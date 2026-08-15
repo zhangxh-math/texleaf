@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://texleaf.local/schemas/snippets.schema.json",
+  "title": "TeXLeaf Snippet Library",
+  "description": "A safe, declarative TeXLeaf snippet library.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/library"
+    },
+    {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/snippet"
+      }
+    }
+  ],
+  "$defs": {
+    "library": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "snippets"
+      ],
+      "properties": {
+        "$schema": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer",
+          "const": 1
+        },
+        "defaultsRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Factory-library revision already materialized into this editable file."
+        },
+        "variables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "snippets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/snippet"
+          }
+        }
+      }
+    },
+    "snippet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trigger",
+        "replacement"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "trigger": {
+          "type": "string",
+          "minLength": 1
+        },
+        "replacement": {
+          "type": "string"
+        },
+        "options": {
+          "type": "string",
+          "pattern": "^[tMmnrAvw]*$",
+          "default": ""
+        },
+        "flags": {
+          "type": "string",
+          "pattern": "^[imsuv]*$"
+        },
+        "priority": {
+          "type": "number",
+          "default": 0
+        },
+        "description": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "syntaxVersion": {
+          "type": "integer",
+          "enum": [
+            1,
+            2
+          ],
+          "default": 2
+        }
+      }
+    }
+  }
+}

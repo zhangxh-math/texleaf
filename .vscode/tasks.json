@@ -1,0 +1,27 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "TeXLeaf: compile",
+      "type": "shell",
+      "command": "pnpm",
+      "args": [
+        "run",
+        "compile"
+      ],
+      "group": "build",
+      "problemMatcher": "$tsc"
+    },
+    {
+      "label": "TeXLeaf: watch",
+      "type": "shell",
+      "command": "pnpm",
+      "args": [
+        "run",
+        "watch"
+      ],
+      "isBackground": true,
+      "problemMatcher": "$tsc-watch"
+    }
+  ]
+}

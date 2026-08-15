@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">TeXLeaf</title>
+  <desc id="desc">深蓝圆角方形中的绿色叶片与经典排版风格的白色 TeX 字标</desc>
+  <defs>
+    <linearGradient id="background" x1="24" y1="20" x2="232" y2="236" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#17324D"/>
+      <stop offset="1" stop-color="#0B1F33"/>
+    </linearGradient>
+    <linearGradient id="leaf" x1="66" y1="194" x2="201" y2="47" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2EB67D"/>
+      <stop offset="1" stop-color="#8CDD75"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="232" height="232" rx="54" fill="url(#background)"/>
+  <path d="M57 190C64 114 113 57 203 43c-1 89-45 150-133 154-8 0-13-2-13-7Z" fill="url(#leaf)"/>
+  <path d="M67 190c31-45 70-81 122-126" fill="none" stroke="#D8FFE8" stroke-width="9" stroke-linecap="round" opacity=".62"/>
+  <path d="M97 156c1-18-2-32-9-44M126 126c18 0 34-4 48-11M143 105c3-13 2-24-1-34" fill="none" stroke="#D8FFE8" stroke-width="6" stroke-linecap="round" opacity=".42"/>
+  <!--
+    The wordmark uses path outlines inspired by CMU Serif Bold Extended, the
+    open Computer Modern family.  Keeping the glyphs as paths makes the icon
+    deterministic on every platform while the lowered E preserves TeX's
+    familiar typographic signature.
+  -->
+  <g fill="#FAFFFC">
+    <path transform="translate(42.7 70.25) scale(1.1)" d="M3.024 36.217H6.408C7.056 28.081 7.776 22.249 18.144 22.249H23.688V64.081H12.672V67.465C16.56 67.249 24.552 67.249 28.8 67.249S41.04 67.249 44.928 67.465V64.081H33.912V22.249H39.384C49.68 22.249 50.4 28.009 51.12 36.217H54.504L52.992 18.865H4.536Z"/>
+    <path transform="translate(101.5 89.35) scale(.9)" d="M2.808 67.465H48.744L52.056 47.737H48.672C47.088 57.673 45.072 64.081 31.752 64.081H20.808V43.777H24.768C31.68 43.777 32.4 46.873 32.4 52.201H35.784V31.969H32.4C32.4 37.297 31.752 40.393 24.768 40.393H20.808V21.889H31.752C43.344 21.889 45.216 27.145 46.368 35.857H49.752L47.52 18.505H2.808V21.889H10.584V64.081H2.808Z"/>
+    <path transform="translate(147.36 71.48) scale(1.08)" d="M2.448 67.465C5.472 67.249 9 67.249 12.096 67.249C14.904 67.249 20.448 67.249 23.04 67.465V64.081C21.744 64.081 18.936 64.081 16.416 63.289C16.488 63.145 16.848 62.713 16.992 62.497L28.872 46.729 41.4 64.081H35.424V67.465C38.376 67.249 45.216 67.249 48.456 67.249C51.336 67.249 57.6 67.249 60.12 67.465V64.081H53.064L34.848 38.881 46.944 22.969C47.736 21.961 47.808 21.889 50.328 21.673C52.056 21.457 52.488 21.457 54.504 21.457H56.592V18.073C53.568 18.289 50.04 18.289 46.944 18.289C44.136 18.289 38.592 18.289 36 18.073V21.457C37.296 21.457 40.104 21.457 42.624 22.249C42.552 22.393 42.192 22.825 42.048 23.041L32.544 35.641 22.248 21.457H28.224V18.073C25.272 18.289 18.432 18.289 15.192 18.289C12.312 18.289 6.048 18.289 3.528 18.073V21.457H10.584L26.568 43.561 12.024 62.641C11.376 63.505 11.232 63.649 8.928 63.865C7.488 64.009 5.976 64.081 4.536 64.081H2.448Z"/>
+  </g>
+</svg>

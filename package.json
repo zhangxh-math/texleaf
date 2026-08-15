@@ -1,0 +1,456 @@
+{
+  "name": "texleaf",
+  "displayName": "TeXLeaf — Fast LaTeX Snippets",
+  "description": "安全、可定制的 LaTeX 自动片段与数学编辑增强。",
+  "version": "0.3.0",
+  "publisher": "local-lab",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhangxh-math/texleaf.git"
+  },
+  "homepage": "https://github.com/zhangxh-math/texleaf#readme",
+  "bugs": {
+    "url": "https://github.com/zhangxh-math/texleaf/issues"
+  },
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.98.0"
+  },
+  "categories": [
+    "Snippets",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "latex",
+    "tex",
+    "bibtex",
+    "math",
+    "snippets",
+    "snippet-leaf"
+  ],
+  "main": "./dist/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "TeXLeaf 在受限模式下继续使用用户的全局片段库；项目级附加文件会被禁用。",
+      "restrictedConfigurations": [
+        "texleaf.snippetFiles"
+      ]
+    },
+    "virtualWorkspaces": {
+      "supported": true
+    }
+  },
+  "activationEvents": [
+    "onLanguage:latex",
+    "onLanguage:tex",
+    "onLanguage:bibtex",
+    "onStartupFinished",
+    "onView:texleaf.snippets"
+  ],
+  "scripts": {
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test:compile": "tsc -p tsconfig.test.json",
+    "test": "pnpm run test:compile && node --test .test-dist/test/core.test.js .test-dist/test/defaultSnippets.test.js",
+    "test:extension-host:run": "node test/run-extension-host.cjs",
+    "test:extension-host": "pnpm run compile && pnpm run test:extension-host:run",
+    "test:bundle": "node test/bundle-smoke.cjs",
+    "verify": "pnpm run check && pnpm run test && pnpm run compile && pnpm run test:bundle",
+    "release:verify": "pnpm run verify && pnpm run test:extension-host:run",
+    "package": "pnpm run release:verify && vsce package --no-dependencies --allow-missing-repository --no-rewrite-relative-links"
+  },
+  "dependencies": {
+    "jsonc-parser": "^3.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "1.98.0",
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "texleaf.openSnippetFile",
+        "title": "TeXLeaf: 打开全局 Snippet 配置文件",
+        "icon": "$(json)"
+      },
+      {
+        "command": "texleaf.openSnippetEditor",
+        "title": "TeXLeaf: 编辑全局 Snippet",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "texleaf.restoreDefaultSnippets",
+        "title": "TeXLeaf: 恢复默认片段",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "texleaf.reloadSnippets",
+        "title": "TeXLeaf: 重载片段",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "texleaf.pickSnippet",
+        "title": "TeXLeaf: 搜索并插入片段",
+        "icon": "$(search)"
+      },
+      {
+        "command": "texleaf.toggle",
+        "title": "TeXLeaf: 切换启用状态"
+      },
+      {
+        "command": "texleaf.importSnippets",
+        "title": "TeXLeaf: 导入片段"
+      },
+      {
+        "command": "texleaf.exportSnippets",
+        "title": "TeXLeaf: 导出片段"
+      },
+      {
+        "command": "texleaf.wrapSelection",
+        "title": "TeXLeaf: 用片段包裹所选内容"
+      },
+      {
+        "command": "texleaf.insertSnippet",
+        "title": "插入片段"
+      },
+      {
+        "command": "texleaf.handleTab",
+        "title": "TeXLeaf: 展开或跳出"
+      },
+      {
+        "command": "texleaf.matrixEnter",
+        "title": "TeXLeaf: 新建矩阵行"
+      },
+      {
+        "command": "texleaf.matrixExit",
+        "title": "TeXLeaf: 跳出矩阵"
+      },
+      {
+        "command": "texleaf.handleSpace",
+        "title": "TeXLeaf: 用空格展开片段"
+      },
+      {
+        "command": "texleaf.deleteEmptyMathDelimiters",
+        "title": "TeXLeaf: 删除空数学定界符"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "texleaf.handleTab",
+        "key": "tab",
+        "when": "texleaf.tabActionAvailable && editorTextFocus && !editorReadonly && !editorTabMovesFocus && !suggestWidgetVisible && !renameInputVisible && !inlineSuggestionVisible && !inSnippetMode"
+      },
+      {
+        "command": "texleaf.matrixEnter",
+        "key": "enter",
+        "when": "texleaf.matrixActionAvailable && editorTextFocus && !editorReadonly && !suggestWidgetVisible && !renameInputVisible"
+      },
+      {
+        "command": "texleaf.matrixExit",
+        "key": "shift+enter",
+        "when": "texleaf.matrixActionAvailable && editorTextFocus && !editorReadonly && !suggestWidgetVisible && !renameInputVisible"
+      },
+      {
+        "command": "texleaf.pickSnippet",
+        "key": "ctrl+alt+l",
+        "mac": "cmd+alt+l",
+        "when": "editorTextFocus && texleaf.enabled"
+      },
+      {
+        "command": "texleaf.handleSpace",
+        "key": "space",
+        "when": "texleaf.manualSpaceActionAvailable && editorTextFocus && !editorReadonly && !suggestWidgetVisible && !renameInputVisible && !inSnippetMode"
+      },
+      {
+        "command": "texleaf.deleteEmptyMathDelimiters",
+        "key": "backspace",
+        "when": "texleaf.emptyMathDelimiters && editorTextFocus && !editorReadonly && !suggestWidgetVisible && !renameInputVisible && !inSnippetMode"
+      }
+    ],
+    "configuration": {
+      "title": "TeXLeaf",
+      "properties": {
+        "texleaf.enabled": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "启用 TeXLeaf。"
+        },
+        "texleaf.autoSnippets": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "键入带 A 选项的触发器后立即展开。"
+        },
+        "texleaf.manualTrigger": {
+          "scope": "resource",
+          "type": "string",
+          "enum": [
+            "tab",
+            "space"
+          ],
+          "enumDescriptions": [
+            "按 Tab 展开非自动片段。",
+            "按空格展开非自动片段。"
+          ],
+          "default": "tab",
+          "description": "非自动片段的触发按键。"
+        },
+        "texleaf.autoFraction": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "在数学环境中键入 / 时把左侧表达式转换为分式。"
+        },
+        "texleaf.autoFractionCommand": {
+          "scope": "resource",
+          "type": "string",
+          "default": "\\frac",
+          "description": "自动分式使用的 LaTeX 命令，例如 \\frac、\\dfrac 或 \\tfrac。"
+        },
+        "texleaf.autoEnlargeBrackets": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "片段生成分式、求和或积分后，将包围它的括号转换为 \\left/\\right。"
+        },
+        "texleaf.visualSnippets": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "允许单字符 visual 片段包裹选区。"
+        },
+        "texleaf.matrixShortcuts": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "矩阵环境中 Tab 插入列、Enter 插入行、Shift+Enter 跳出。"
+        },
+        "texleaf.tabout": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "数学环境中用 Tab 跳到下一个闭括号或环境外。"
+        },
+        "texleaf.skipPairedClosingCharacters": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "光标位于现有 )、] 或 } 前时，键入相同字符只跳过它。"
+        },
+        "texleaf.autoDeleteMathDelimiters": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "在空的 $…$、\\(…\\) 或 \\[...\\] 中按 Backspace 时删除整对定界符。"
+        },
+        "texleaf.colorizeBrackets": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "在数学环境中按嵌套深度给配对括号着色。"
+        },
+        "texleaf.highlightActiveBracketPair": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "突出显示光标附近或包围光标的括号对。"
+        },
+        "texleaf.enableCompletions": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "在补全列表中显示可用片段。"
+        },
+        "texleaf.languageIds": {
+          "scope": "resource",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "latex",
+            "tex",
+            "bibtex"
+          ],
+          "description": "启用 TeXLeaf 的 VS Code 语言 ID；编辑功能仍只在已保存的 .tex 或 .bib 文件中生效。"
+        },
+        "texleaf.snippetFiles": {
+          "scope": "resource",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "可选：相对每个工作区目录额外加载的安全 JSON/JSONC 片段文件。全局片段始终从扩展的全局存储加载，不需要在这里配置；未信任工作区会忽略此项目级设置。"
+        },
+        "texleaf.excludedEnvironments": {
+          "scope": "resource",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "verbatim",
+            "lstlisting",
+            "minted"
+          ],
+          "description": "不运行自动片段和自动分式的 LaTeX 环境。"
+        },
+        "texleaf.matrixEnvironments": {
+          "scope": "resource",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "matrix",
+            "pmatrix",
+            "bmatrix",
+            "Bmatrix",
+            "vmatrix",
+            "Vmatrix",
+            "array",
+            "cases",
+            "align",
+            "align*",
+            "aligned"
+          ],
+          "description": "启用矩阵快捷键的环境名称。"
+        },
+        "texleaf.autoFractionBreakingCharacters": {
+          "scope": "resource",
+          "type": "string",
+          "default": "+-=,;:&",
+          "description": "自动分式向左扫描时用于终止分子的字符。"
+        },
+        "texleaf.autoEnlargeTriggers": {
+          "scope": "resource",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "\\frac",
+            "\\sum",
+            "\\prod",
+            "\\int",
+            "\\lim"
+          ],
+          "description": "括号内出现这些 LaTeX 命令时自动添加 \\left/\\right。"
+        },
+        "texleaf.maxRegexScanLength": {
+          "scope": "resource",
+          "type": "integer",
+          "default": 512,
+          "minimum": 64,
+          "maximum": 8192,
+          "description": "正则触发器最多检查光标前多少个字符。"
+        },
+        "texleaf.wordDelimiters": {
+          "scope": "resource",
+          "type": "string",
+          "default": "., +-\\n\\t:;!?\\/{}[]()=~$",
+          "description": "带 w 选项的片段可接受的词边界字符；\\n 与 \\t 会转换为换行和制表符。"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "texleaf",
+          "title": "TeXLeaf",
+          "icon": "media/texleaf.svg"
+        }
+      ]
+    },
+    "views": {
+      "texleaf": [
+        {
+          "id": "texleaf.snippets",
+          "name": "片段库"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "texleaf.snippets",
+        "contents": "没有可显示的片段。\n[编辑全局 Snippet](command:texleaf.openSnippetEditor)\n[打开全局 JSONC 文件](command:texleaf.openSnippetFile)\n[恢复默认片段](command:texleaf.restoreDefaultSnippets)\n[重新加载](command:texleaf.reloadSnippets)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "texleaf.openSnippetFile"
+        },
+        {
+          "command": "texleaf.restoreDefaultSnippets"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "texleaf.pickSnippet",
+          "when": "view == texleaf.snippets",
+          "group": "navigation@1"
+        },
+        {
+          "command": "texleaf.openSnippetEditor",
+          "when": "view == texleaf.snippets",
+          "group": "navigation@2"
+        },
+        {
+          "command": "texleaf.openSnippetFile",
+          "when": "view == texleaf.snippets",
+          "group": "navigation@3"
+        },
+        {
+          "command": "texleaf.importSnippets",
+          "when": "view == texleaf.snippets",
+          "group": "navigation@4"
+        },
+        {
+          "command": "texleaf.exportSnippets",
+          "when": "view == texleaf.snippets",
+          "group": "navigation@5"
+        },
+        {
+          "command": "texleaf.reloadSnippets",
+          "when": "view == texleaf.snippets",
+          "group": "navigation@6"
+        },
+        {
+          "command": "texleaf.restoreDefaultSnippets",
+          "when": "view == texleaf.snippets",
+          "group": "navigation@7"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "texleaf.insertSnippet",
+          "when": "view == texleaf.snippets && viewItem == texleafSnippet",
+          "group": "inline"
+        }
+      ]
+    },
+    "jsonValidation": [
+      {
+        "fileMatch": [
+          "/.vscode/texleaf-snippets.json",
+          "/.vscode/texleaf-snippets.jsonc",
+          "**/globalStorage/local-lab.texleaf/texleaf-snippets.jsonc"
+        ],
+        "url": "./schemas/texleaf-snippets.schema.json"
+      }
+    ]
+  }
+}
