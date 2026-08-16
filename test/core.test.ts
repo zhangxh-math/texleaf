@@ -28,6 +28,7 @@ import {
   selectScopedResources,
   SerialTaskQueue,
   toPortableSnippetObject,
+  validateMigratableSnippetLibraryText,
   validateSnippetFile,
 } from '../src/core';
 import {
@@ -129,6 +130,67 @@ test('serial task queue orders reload epochs and recovers after failure', async 
     /expected reload failure/,
   );
   assert.equal(await queue.enqueue(async (epoch) => epoch), 4);
+});
+
+test('publisher-storage migration accepts complete JSONC without normalizing it', () => {
+  const text = `{
+    // Comments and trailing commas must survive the byte-for-byte copy.
+    "version": 1,
+    "defaultsRevision": 3,
+    "variables": { "GREEK": "alpha|beta" },
+    "snippets": [
+      {
+        "id": "user.regex",
+        "trigger": "([A-Z])hat",
+        "replacement": "\\\\hat{@[0]}",
+        "options": "mAr",
+      },
+    ],
+  }\n`;
+  assert.deepEqual(validateMigratableSnippetLibraryText(text), {
+    ok: true,
+    snippetCount: 1,
+  });
+
+  const legacyString = JSON.stringify({
+    snippets: JSON.stringify([
+      { trigger: 'old', replacement: '\\operatorname{Old}', options: 'tA' },
+    ]),
+  });
+  assert.deepEqual(validateMigratableSnippetLibraryText(legacyString), {
+    ok: true,
+    snippetCount: 1,
+  });
+});
+
+test('publisher-storage migration rejects malformed or partly unusable libraries', () => {
+  const invalidCases = [
+    '{ not JSONC',
+    '{}',
+    JSON.stringify({ snippets: [null] }),
+    JSON.stringify({ snippets: [{ trigger: 'x', replacement: 1 }] }),
+    JSON.stringify({ snippets: [{ trigger: 'x', replacement: 'x', options: 'q' }] }),
+    JSON.stringify({
+      snippets: [{ trigger: 'a*', replacement: 'x', options: 'r' }],
+    }),
+    JSON.stringify({
+      variables: { unsafe: 42 },
+      snippets: [],
+    }),
+    JSON.stringify({
+      snippets: [
+        { id: 'duplicate', trigger: 'a', replacement: 'a' },
+        { id: 'duplicate', trigger: 'b', replacement: 'b' },
+      ],
+    }),
+  ];
+  for (const text of invalidCases) {
+    assert.equal(
+      validateMigratableSnippetLibraryText(text).ok,
+      false,
+      text,
+    );
+  }
 });
 
 test('snippet sync performs a conservative three-way hash merge', () => {

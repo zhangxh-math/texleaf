@@ -30,7 +30,7 @@ pnpm run test:extension-host
 5. 输入 `dm`、`;a`、`//` 等默认触发，或运行 `TeXLeaf: 搜索并插入片段`。
 6. 修改源码并重新编译后，点击调试工具栏的“重新启动”验证变更。
 
-针对 0.7.1 的手工冒烟检查至少包括：
+针对 0.7.2 的手工冒烟检查至少包括：
 
 - 切换到 Windows 中文输入法，在已保存的 `.tex` 文件中分别按下全角左括号和顿号对应按键，确认每次只得到一个 `（` 和一个 `、`。
 - 用全新隔离 Profile 激活扩展，运行 `TeXLeaf: 管理 Snippet 与模板`，确认无需显示任何存储路径即可载入 212 条 Snippet 和四个模板。结构化编辑一个 trigger 后保存，运行时应立即使用新 trigger；另一个干净工作区应看到同一 Profile 内容。
@@ -51,12 +51,12 @@ pnpm run test:extension-host
 - 保持 `reference.bib` 有未保存修改后再导入，确认插件读取并编辑当前文档模型但不自动保存用户的其他修改；在干净 bibliography 上导入则应保存成功。撤销一次应同时撤销 TeX 与 Bib 文本编辑。
 - 分别验证 Zotero 未运行、错误端口、错误库名和超时：自动加载把原因写入 `TeXLeaf` 输出通道，手动刷新立即重试并显示错误，已有 bibliography 候选仍可选，两个文件都不发生部分写入；Better BibTeX 未安装/禁用时验证 Zotero Local API 回退。
 - 在未信任 workspace 中进入 `\cite{}`，确认不自动弹框、不访问端口、不创建 `reference.bib`；手动命令给出明确提示。多根 workspace 中确认 bibliography 不会跨根选错。
-- 在设置页搜索 `@ext:local-lab.texleaf`，确认 Zotero 总开关、bibliography 路径与 BibTeX/BibLaTeX 格式位于“Zotero 与参考文献”分类；Math Preview 总开关、`auto`/`above`/`below` 位置和性能参数位于独立分类。
+- 在设置页搜索 `@ext:zhangxh-math.texleaf`，确认 Zotero 总开关、bibliography 路径与 BibTeX/BibLaTeX 格式位于“Zotero 与参考文献”分类；Math Preview 总开关、`auto`/`above`/`below` 位置和性能参数位于独立分类。
 - 在 `$x^2$`、`$$\sum_n a_n$$`、`\(\frac{1}{2}\)`、`align` 和嵌套 `cases` 中移动光标，确认只出现一个当前公式预览；注释、`\verb`、`verbatim`、`lstlisting`、`minted` 中不出现。分别验证 `cursor`、`hover`、`both` 与总开关。`cursor` 卡片的底色必须 100% 不透明，并显示在源文字上层。
 - 在上下都紧邻非空文字的长行内公式中连续输入，确认 `auto` 始终把浮动卡片放在活动源码行下方，不参与行宽或换行计算。光标位于起始行时，左边缘必须与 `$`/`\(` 对齐；把同一公式写成多行并把光标移到后续行时，左边缘必须改为对齐该行首个非空白字符，而不是光标横坐标或第 0 列。
 - 给 `$$…$$`、`\[…\]` 和 `\begin{align}…\end{align}` 加入不同非零缩进及 Tab：卡片应稳定保持 opening delimiter 列；超宽卡片允许右端被编辑器裁切，但不得因 Monaco 的短 token span 错跳到第 0 列。对行间公式验证 `placement=auto` 下方优先、下方不足转上方、上下都不足仍在上方并保住源码/预览末尾；显式 `above`/`below` 仍严格服从设置。
 - 在前言定义零参数、多参数、可选参数宏和 `DeclareMathOperator`，确认预览更新；递归宏、超长公式、非法 TeX 和快速连续编辑不能卡住扩展宿主，旧渲染结果不能覆盖新公式。切换深/浅主题、编辑器缩放和大文档时检查颜色、尺寸与防抖。
-- 断网后重新启动扩展开发宿主并首次使用 Math Preview，确认不请求 CDN；检查输出 SVG 不包含脚本、事件属性、外部 URL 或 `foreignObject`，并确认没有安装/激活 Hyperscopes Booster。
+- 断网后重新启动只加载本项目的隔离扩展开发宿主并首次使用 Math Preview，确认不请求 CDN；检查输出 SVG 不包含脚本、事件属性、外部 URL 或 `foreignObject`。
 
 固定的 Math Preview 视觉夹具可以分别复现行内文字重叠、源码缩进、行间 opening 对齐，以及超高公式末尾的垂直定位。`inline` 场景用于确认起始行定界符对齐与下方浮动；`display` 场景同时包含带缩进的 `\[`、`$$` 与 `\begin{align}`，用于检查静态 opening 列与跨行缩进补偿；`nested-display` 复现缩进 `enumerate` 中 `\[` 卡片被错误放到编辑区第 0 列的问题；`tall-display` 会把光标直接放到 28 行 `align` 的末行附近，便于确认 `auto` 保住源码末尾和预览底部。脚本只接受枚举后的主题、场景与位置值，并在启动时用 JSON 输出实际选项和安全 TeX atom 后的光标坐标：
 
@@ -80,7 +80,7 @@ node .\test\math-preview-cdp-check.cjs --port 9340 --scenario tall-display
 
 检查器会读取 `before` 伪元素的实际边界：`nested-display` 场景要求卡片左边缘与 opening delimiter 的误差不超过 3 px，并确认 decoration 没有加入 `left`/`right`/`inset` 形式的伪视口拟合；超宽卡片允许右端被编辑器裁切。超高场景要求 SVG 根高度和 decoration 高度都大于 8em、二者一致且自动选择上方。CDP 只在这个隔离进程中显式开启，测试结束后关闭窗口或按 `Ctrl+C` 即会清理临时 Profile。
 
-关闭隔离窗口后脚本只清理本次创建且经过路径校验的临时目录。发版前还应针对 `above`、`below` 和两种主题补齐矩阵；若固定 Monaco CSS 兼容层在某个 VS Code 构建中失效，改用 `presentation=hover` 验证公开 API 回退路径。该测试不安装、激活或引用 Ultra Math Preview/Hyperscopes Booster，也不使用其源码、CSS 或资源。
+关闭隔离窗口后脚本只清理本次创建且经过路径校验的临时目录。发版前还应针对 `above`、`below` 和两种主题补齐矩阵；若固定 Monaco CSS 兼容层在某个 VS Code 构建中失效，改用 `presentation=hover` 验证公开 API 回退路径。该测试环境只加载当前 TeXLeaf 开发扩展，以便把行为和性能回归限定在本项目候选包内。
 
 片段加载问题可以用以下最小文件复现：
 
@@ -111,7 +111,7 @@ pnpm run package
 构建完成后，可从命令面板选择 `Extensions: Install from VSIX...`，或在终端执行：
 
 ```powershell
-code --install-extension .\texleaf-0.7.1.vsix --force
+code --install-extension .\texleaf-0.7.2.vsix --force
 ```
 
 安装后在普通 VS Code 窗口验证，而不是只在扩展开发宿主中验证。发布前至少执行：
@@ -120,7 +120,9 @@ code --install-extension .\texleaf-0.7.1.vsix --force
 pnpm run release:verify
 ```
 
-还应检查 VSIX 内容，确认 `dist/extension.js`、`dist/mathPreviewWorker.js`、README、CHANGELOG、LICENSE、`THIRD_PARTY_NOTICES.md`、`media/icon.png` 与其他运行资源已包含，源码、测试、coverage 和本地配置未被打包。安装后的扩展详情页应显示 PNG 图标，命令面板应能找到片段、Zotero 与 Math Preview 命令。手工 VSIX 不会因为 Settings Sync 而自动安装到另一台机器；跨机测试必须在两端安装兼容版本并保持扩展标识 `local-lab.texleaf`。
+还应检查 VSIX 内容，确认 `dist/extension.js`、`dist/mathPreviewWorker.js`、README、CHANGELOG、LICENSE、`SUPPORT.md`、`THIRD_PARTY_NOTICES.md`、`media/icon.png` 与其他运行资源已包含，源码、测试、coverage 和本地配置未被打包。归档内的 README 图片与相对文档链接必须已由 `vsce --githubBranch main` 改写为公开 HTTPS 地址；安装后的扩展详情页应显示 PNG 图标，命令面板应能找到片段、Zotero 与 Math Preview 命令。手工 VSIX 不会因为 Settings Sync 而自动安装到另一台机器；跨机测试必须在两端安装兼容版本并保持扩展标识 `zhangxh-math.texleaf`。
+
+Visual Studio Marketplace 使用现有 Publisher `zhangxh-math`；Marketplace 项目标识为 `zhangxh-math.texleaf`。可以在 Publisher 管理页手工上传 `texleaf-0.7.2.vsix`；后续自动发布优先使用短期联合身份凭据，不要把 PAT 写入仓库。Publisher 变更会建立新的扩展身份：升级冒烟必须先在旧版保存修改并记录自定义模板，安装新版后禁用旧版但暂不卸载，再 Reload Window；只有新主文件不存在、旧 JSONC 严格校验通过且复制期间未变化时，新版才尽力逐字节复制旧片段库，并保留旧文件。验证 Snippet、按需重建自定义模板后再卸载旧版。模板 catalog、既有 `globalState` 与 Settings Sync 基线不会跨 ID 自动迁移。
 
 ## 安全约束
 

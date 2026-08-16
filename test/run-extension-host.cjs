@@ -4,6 +4,10 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const {
+  LEGACY_PUBLISHER_EXTENSION_ID,
+  LEGACY_PUBLISHER_LIBRARY_TEXT,
+} = require("./storageMigrationFixture.cjs");
 
 const extensionDevelopmentPath = path.resolve(__dirname, "..");
 const extensionTestsPath = path.resolve(__dirname, "extensionHost.cjs");
@@ -16,11 +20,24 @@ const workspaceRootA = path.join(isolatedRoot, "paper-a");
 const workspaceRootB = path.join(isolatedRoot, "library-b");
 const workspaceFile = path.join(isolatedRoot, "texleaf-tests.code-workspace");
 const codeCommand = resolveCodeCommand();
+const legacyPublisherSnippetPath = path.join(
+  userDataDir,
+  "User",
+  "globalStorage",
+  LEGACY_PUBLISHER_EXTENSION_ID,
+  "texleaf-snippets.jsonc",
+);
 
 fs.mkdirSync(userDataDir, { recursive: true });
 fs.mkdirSync(extensionsDir, { recursive: true });
 fs.mkdirSync(path.join(workspaceRootA, ".vscode"), { recursive: true });
 fs.mkdirSync(workspaceRootB, { recursive: true });
+fs.mkdirSync(path.dirname(legacyPublisherSnippetPath), { recursive: true });
+fs.writeFileSync(
+  legacyPublisherSnippetPath,
+  LEGACY_PUBLISHER_LIBRARY_TEXT,
+  "utf8",
+);
 fs.writeFileSync(
   path.join(workspaceRootA, ".vscode", "texleaf-snippets.jsonc"),
   `${JSON.stringify(
@@ -71,7 +88,10 @@ try {
   const result = spawnSync(codeCommand, args, {
     cwd: extensionDevelopmentPath,
     encoding: "utf8",
-    env: process.env,
+    env: {
+      ...process.env,
+      TEXLEAF_TEST_LEGACY_PUBLISHER_SNIPPET_PATH: legacyPublisherSnippetPath,
+    },
     shell: false,
     stdio: "inherit",
   });

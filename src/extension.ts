@@ -12,9 +12,26 @@ import { SnippetSyncController } from "./snippetSync";
 import { SnippetTreeProvider } from "./snippetTree";
 import { TemplateManager } from "./templateManager";
 
+const LEGACY_EXTENSION_ID = "local-lab.texleaf";
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel("TeXLeaf", { log: true });
   context.subscriptions.push(output);
+
+  // Changing the Marketplace publisher creates a distinct VS Code extension.
+  // Let the legacy installation keep running until the user has saved its
+  // data and disabled it. Initializing the new repository before that point
+  // could copy a stale on-disk snapshot while the legacy JSONC is still dirty.
+  // Registering both sets of texleaf.* commands would also be racy.
+  if (vscode.extensions.getExtension(LEGACY_EXTENSION_ID) !== undefined) {
+    output.warn(
+      `检测到仍启用的旧扩展 ${LEGACY_EXTENSION_ID}；新版为避免复制未保存内容和重复注册命令，本窗口不再继续激活。`,
+    );
+    void vscode.window.showWarningMessage(
+      "TeXLeaf 检测到仍启用的旧版 local-lab.texleaf。请先保存旧版中的未保存内容，再禁用旧版并执行“Developer: Reload Window”；新版随后会安全迁移全局 Snippet。确认迁移无误后再卸载旧版。",
+    );
+    return;
+  }
 
   const repository = new SnippetRepository(context);
   context.subscriptions.push(repository);

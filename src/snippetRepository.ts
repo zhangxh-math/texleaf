@@ -22,6 +22,7 @@ import {
   selectScopedResources,
   SerialTaskQueue,
   toPortableSnippetObject,
+  validateMigratableSnippetLibraryText,
 } from "./core";
 
 export type SnippetSourceKind = "global" | "workspace";
@@ -129,7 +130,20 @@ interface ReplaceWithBackupResult {
   readonly backupUri?: vscode.Uri;
 }
 
+type InitialGlobalFileCreateStatus =
+  | "created"
+  | "exists"
+  | "dirty"
+  | "source-changed";
+
+type LegacyPublisherMigrationResult =
+  | { readonly status: "absent" | "target-exists" }
+  | { readonly status: "copied"; readonly sourceChangedAfterCopy: boolean }
+  | { readonly status: "deferred"; readonly reason: string }
+  | { readonly status: "invalid" | "failed"; readonly reason: string };
+
 const GLOBAL_SNIPPET_FILE_NAME = "texleaf-snippets.jsonc";
+const LEGACY_PUBLISHER_EXTENSION_ID = "local-lab.texleaf";
 const SELF_WRITE_MARKER_LIFETIME_MS = 2_000;
 const GLOBAL_BACKUP_DIRECTORY_NAME = "backups";
 const MAX_MANAGED_LIBRARY_BYTES = 10_000_000;
@@ -163,6 +177,7 @@ export class SnippetRepository implements vscode.Disposable {
   private revision = 0;
   private currentSnapshot: SnippetLibrarySnapshot;
   private warnedDirtyEnsure = false;
+  private warnedLegacyPublisherEnsure = false;
 
   public readonly onDidChange = this.changeEmitter.event;
   public readonly globalSnippetUri: vscode.Uri;
@@ -320,6 +335,12 @@ export class SnippetRepository implements vscode.Disposable {
 
   public async openGlobalSnippetFile(): Promise<void> {
     await this.ensureGlobalSnippetFile();
+    if (!(await uriExists(this.globalSnippetUri))) {
+      // A dirty legacy-publisher document deliberately defers initialization.
+      // ensureGlobalSnippetFile already explains the required save/reload step;
+      // do not follow that warning with an opaque openTextDocument error.
+      return;
+    }
     await this.reload();
     const document = await vscode.workspace.openTextDocument(this.globalSnippetUri);
     await vscode.window.showTextDocument(document);
@@ -751,7 +772,7 @@ export class SnippetRepository implements vscode.Disposable {
       if (!this.warnedDirtyEnsure) {
         this.warnedDirtyEnsure = true;
         void vscode.window.showWarningMessage(
-          "TeXLeaf: 全局 Snippet 文件有尚未保存的内容；首次创建或 0.2.x 迁移已暂缓，保存或撤销后请重新加载。",
+          "TeXLeaf: 新版全局 Snippet 文件有尚未保存的内容；初始化已暂缓。请先保存或撤销，再重新加载窗口。",
         );
       }
       return this.globalSnippetUri;
@@ -759,31 +780,271 @@ export class SnippetRepository implements vscode.Disposable {
     this.warnedDirtyEnsure = false;
     await vscode.workspace.fs.createDirectory(this.globalStorageUri);
     if (!(await uriExists(this.globalSnippetUri))) {
-      const legacySettingsText = readLegacyCustomSnippetsSetting();
-      const problems: string[] = [];
-      const initialText =
-        legacySettingsText.trim().length === 0
-          ? serializeDefaultSnippetLibrary()
-          : migrateLibraryTextToFactoryDefaults(
-              '{\n  "version": 1,\n  "variables": {},\n  "snippets": []\n}\n',
-              this.globalSnippetUri,
-              legacySettingsText,
-              problems,
-            ) ?? serializeDefaultSnippetLibrary();
-      await this.writeGlobalSnippetFile(
-        this.globalSnippetUri,
-        new TextEncoder().encode(initialText),
-      );
-      if (problems.length > 0) {
-        void vscode.window.showWarningMessage(
-          `TeXLeaf 已创建完整全局片段库，但旧 texleaf.customSnippets 设置中有 ${problems.length} 个问题；无效定义未迁移。`,
-        );
+      const publisherMigration =
+        await this.tryMigrateLegacyPublisherGlobalSnippetFile();
+      if (publisherMigration.status === "deferred") {
+        if (!this.warnedLegacyPublisherEnsure) {
+          this.warnedLegacyPublisherEnsure = true;
+          void vscode.window.showWarningMessage(publisherMigration.reason);
+        }
+        return this.globalSnippetUri;
       }
-      return this.globalSnippetUri;
+      this.warnedLegacyPublisherEnsure = false;
+
+      if (
+        publisherMigration.status === "absent" ||
+        publisherMigration.status === "invalid" ||
+        publisherMigration.status === "failed"
+      ) {
+        const legacySettingsText = readLegacyCustomSnippetsSetting();
+        const problems: string[] = [];
+        const initialText =
+          legacySettingsText.trim().length === 0
+            ? serializeDefaultSnippetLibrary()
+            : migrateLibraryTextToFactoryDefaults(
+                '{\n  "version": 1,\n  "variables": {},\n  "snippets": []\n}\n',
+                this.globalSnippetUri,
+                legacySettingsText,
+                problems,
+              ) ?? serializeDefaultSnippetLibrary();
+        const createStatus = await this.createGlobalSnippetFileIfAbsent(
+          new TextEncoder().encode(initialText),
+        );
+        if (createStatus === "dirty") {
+          if (!this.warnedDirtyEnsure) {
+            this.warnedDirtyEnsure = true;
+            void vscode.window.showWarningMessage(
+              "TeXLeaf: 全局 Snippet 文件在初始化期间出现未保存内容；未写入或覆盖文件。请保存或撤销后重新加载。",
+            );
+          }
+          return this.globalSnippetUri;
+        }
+        if (publisherMigration.status === "invalid") {
+          void vscode.window.showWarningMessage(
+            `TeXLeaf 未复制旧 ${LEGACY_PUBLISHER_EXTENSION_ID} 全局片段：${publisherMigration.reason}。旧文件保持不变；新扩展已创建默认库，可修复旧文件后使用“TeXLeaf: 导入片段”。`,
+          );
+        } else if (publisherMigration.status === "failed") {
+          void vscode.window.showWarningMessage(
+            `TeXLeaf 读取或复制旧 ${LEGACY_PUBLISHER_EXTENSION_ID} 全局片段失败：${publisherMigration.reason}。旧文件保持不变；新扩展已创建默认库。`,
+          );
+        }
+        if (problems.length > 0) {
+          void vscode.window.showWarningMessage(
+            `TeXLeaf 已创建完整全局片段库，但旧 texleaf.customSnippets 设置中有 ${problems.length} 个问题；无效定义未迁移。`,
+          );
+        }
+      } else if (publisherMigration.status === "copied") {
+        if (publisherMigration.sourceChangedAfterCopy) {
+          void vscode.window.showWarningMessage(
+            `TeXLeaf 已复制 ${LEGACY_PUBLISHER_EXTENSION_ID} 的一个已验证快照，但旧文件随后又发生了变化。两个文件均未删除；如需后续改动，请使用“TeXLeaf: 导入片段”。`,
+          );
+        } else {
+          void vscode.window.showInformationMessage(
+            `TeXLeaf 已把 ${LEGACY_PUBLISHER_EXTENSION_ID} 的全局 Snippet 复制到新扩展身份；旧文件已原样保留，不会删除。`,
+          );
+        }
+      }
     }
 
-    await this.migrateGlobalSnippetFileIfNeeded();
+    if (await uriExists(this.globalSnippetUri)) {
+      await this.migrateGlobalSnippetFileIfNeeded();
+    }
     return this.globalSnippetUri;
+  }
+
+  /**
+   * Copy the previous publisher ID's profile-local library exactly once. The
+   * source lives next to (not inside) this extension's globalStorageUri, so the
+   * current VS Code profile remains the hard boundary of this migration.
+   */
+  private async tryMigrateLegacyPublisherGlobalSnippetFile(): Promise<
+    LegacyPublisherMigrationResult
+  > {
+    const legacyUri = vscode.Uri.joinPath(
+      this.globalStorageUri,
+      "..",
+      LEGACY_PUBLISHER_EXTENSION_ID,
+      GLOBAL_SNIPPET_FILE_NAME,
+    );
+    if (urisReferToSameResource(legacyUri, this.globalSnippetUri)) {
+      return { status: "absent" };
+    }
+    if (this.isSnippetDocumentDirty(legacyUri)) {
+      return {
+        status: "deferred",
+        reason:
+          `TeXLeaf: 旧 ${LEGACY_PUBLISHER_EXTENSION_ID} 全局 Snippet 文件有未保存内容；` +
+          "为避免复制过期磁盘快照，迁移已暂缓且未创建新文件。请先保存或撤销，再重新加载窗口。",
+      };
+    }
+
+    let bytes: Uint8Array;
+    try {
+      bytes = await vscode.workspace.fs.readFile(legacyUri);
+    } catch (error) {
+      if (isFileNotFound(error)) {
+        return { status: "absent" };
+      }
+      return { status: "failed", reason: errorMessage(error) };
+    }
+    if (bytes.byteLength > MAX_MANAGED_LIBRARY_BYTES) {
+      return {
+        status: "invalid",
+        reason: `旧片段库超过 ${Math.floor(MAX_MANAGED_LIBRARY_BYTES / 1_000_000)} MB 安全上限`,
+      };
+    }
+
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch (error) {
+      return {
+        status: "invalid",
+        reason: `旧片段库不是有效 UTF-8：${errorMessage(error)}`,
+      };
+    }
+    const validation = validateMigratableSnippetLibraryText(text);
+    if (!validation.ok) {
+      return { status: "invalid", reason: validation.reason };
+    }
+    if (validation.snippetCount > MAX_MANAGED_SNIPPETS) {
+      return {
+        status: "invalid",
+        reason: `旧片段数量超过 ${MAX_MANAGED_SNIPPETS} 条安全上限`,
+      };
+    }
+
+    const sourceHash = hashBytes(bytes);
+    let createStatus: InitialGlobalFileCreateStatus;
+    try {
+      createStatus = await this.createGlobalSnippetFileIfAbsent(bytes, {
+        uri: legacyUri,
+        expectedHash: sourceHash,
+      });
+    } catch (error) {
+      return { status: "failed", reason: errorMessage(error) };
+    }
+    if (createStatus === "exists") {
+      return { status: "target-exists" };
+    }
+    if (createStatus === "dirty") {
+      return {
+        status: "deferred",
+        reason:
+          "TeXLeaf: 迁移期间片段编辑器出现了未保存内容；未创建或覆盖新文件。请保存或撤销后重新加载。",
+      };
+    }
+    if (createStatus === "source-changed") {
+      return {
+        status: "deferred",
+        reason:
+          `TeXLeaf: 旧 ${LEGACY_PUBLISHER_EXTENSION_ID} 全局 Snippet 在迁移期间发生变化；` +
+          "未创建或覆盖新文件。请等待保存完成后重新加载。",
+      };
+    }
+
+    let sourceChangedAfterCopy = false;
+    try {
+      sourceChangedAfterCopy =
+        hashBytes(await vscode.workspace.fs.readFile(legacyUri)) !== sourceHash;
+    } catch {
+      // The exclusive target create already committed a verified snapshot. A
+      // later source delete/read failure cannot be rolled back safely, so make
+      // that snapshot semantics explicit to the user instead.
+      sourceChangedAfterCopy = true;
+    }
+    return { status: "copied", sourceChangedAfterCopy };
+  }
+
+  /**
+   * Atomically create the canonical global file without replacing a winner.
+   * When `source` is supplied, its exact bytes are rechecked immediately before
+   * the exclusive rename so a save racing first activation is deferred.
+   */
+  private async createGlobalSnippetFileIfAbsent(
+    bytes: Uint8Array,
+    source?: { readonly uri: vscode.Uri; readonly expectedHash: string },
+  ): Promise<InitialGlobalFileCreateStatus> {
+    if (
+      this.isGlobalSnippetDocumentDirty() ||
+      (source !== undefined && this.isSnippetDocumentDirty(source.uri))
+    ) {
+      return "dirty";
+    }
+    if (await uriExists(this.globalSnippetUri)) {
+      return "exists";
+    }
+
+    const temporaryUri = vscode.Uri.joinPath(
+      this.globalStorageUri,
+      `.texleaf-snippets.${randomUUID()}.initial.tmp`,
+    );
+    const desiredHash = hashBytes(bytes);
+    await vscode.workspace.fs.writeFile(temporaryUri, bytes);
+    try {
+      const verification = await vscode.workspace.fs.readFile(temporaryUri);
+      if (hashBytes(verification) !== desiredHash) {
+        throw new Error("首次初始化的临时文件写入后校验失败");
+      }
+      if (
+        this.isGlobalSnippetDocumentDirty() ||
+        (source !== undefined && this.isSnippetDocumentDirty(source.uri))
+      ) {
+        return "dirty";
+      }
+      if (await uriExists(this.globalSnippetUri)) {
+        return "exists";
+      }
+      if (source !== undefined) {
+        let latestSource: Uint8Array;
+        try {
+          latestSource = await vscode.workspace.fs.readFile(source.uri);
+        } catch {
+          return "source-changed";
+        }
+        if (hashBytes(latestSource) !== source.expectedHash) {
+          return "source-changed";
+        }
+      }
+
+      const marker: SelfWriteMarker = {
+        contentHash: desiredHash,
+        expiresAt: Date.now() + SELF_WRITE_MARKER_LIFETIME_MS,
+      };
+      this.selfWriteMarkers.set(this.globalSnippetUri.toString(), marker);
+      try {
+        await vscode.workspace.fs.rename(temporaryUri, this.globalSnippetUri, {
+          overwrite: false,
+        });
+      } catch (error) {
+        if (this.selfWriteMarkers.get(this.globalSnippetUri.toString()) === marker) {
+          this.selfWriteMarkers.delete(this.globalSnippetUri.toString());
+        }
+        if (await uriExists(this.globalSnippetUri)) {
+          return "exists";
+        }
+        throw error;
+      }
+
+      const committed = await vscode.workspace.fs.readFile(this.globalSnippetUri);
+      if (hashBytes(committed) !== desiredHash) {
+        // An external writer replaced the just-created file. Never overwrite
+        // that newer winner merely to make this initialization appear to win.
+        if (this.selfWriteMarkers.get(this.globalSnippetUri.toString()) === marker) {
+          this.selfWriteMarkers.delete(this.globalSnippetUri.toString());
+        }
+        return "exists";
+      }
+      return "created";
+    } finally {
+      try {
+        await vscode.workspace.fs.delete(temporaryUri, { recursive: false });
+      } catch (error) {
+        if (!isFileNotFound(error)) {
+          // A uniquely named orphan is safer than any broad cleanup attempt.
+        }
+      }
+    }
   }
 
   /**
@@ -869,10 +1130,14 @@ export class SnippetRepository implements vscode.Disposable {
   }
 
   public isGlobalSnippetDocumentDirty(): boolean {
+    return this.isSnippetDocumentDirty(this.globalSnippetUri);
+  }
+
+  private isSnippetDocumentDirty(uri: vscode.Uri): boolean {
     return vscode.workspace.textDocuments.some(
       (document) =>
         document.isDirty &&
-        urisReferToSameResource(document.uri, this.globalSnippetUri),
+        urisReferToSameResource(document.uri, uri),
     );
   }
 

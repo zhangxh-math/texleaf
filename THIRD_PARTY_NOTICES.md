@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-TeXLeaf 是独立开发的 VS Code 扩展。其交互理念与部分片段语法受到以下开源项目启发；TeXLeaf 不隶属于、也不代表该项目或其维护者。
+TeXLeaf 由 zhangxh-math 与 OpenAI Codex 联合开发，并作为独立于下列上游项目的 VS Code 扩展发行。其交互理念与部分片段语法受到开源项目启发；完整致谢见 README 与 Wiki，本文件重点记录实际发行组件、来源与许可证。
 
 ## snippet-leaf
 
@@ -84,4 +84,4 @@ SOFTWARE.
 
 以上两个 MathJax 组件的完整 Apache-2.0 许可证文本随发行包保存在 [licenses/Apache-2.0.txt](licenses/Apache-2.0.txt)。TeXLeaf 没有修改这些依赖的源文件；发布时只把所需模块打进独立 worker bundle。
 
-TeXLeaf 的 Math Preview 是独立实现。开发过程中只研究了 Ultra Math Preview 的公开功能与架构，没有复制其源码、正则表达式、CSS、图标、动画、文档或测试，因此本发行包不包含 Ultra Math Preview 或 Hyperscopes Booster 的代码。
+TeXLeaf 的 Math Preview 产品方向受到 Ultra Math Preview 与 hscopes-booster 公开功能和架构的启发。当前发行包中的实际渲染组件与许可证如上所列；归档不包含这两个仓库的源码、正则表达式、CSS、图标、动画、文档或测试。若未来发行内容发生变化，本通知也必须同步更新。

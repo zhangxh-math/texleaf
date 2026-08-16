@@ -3,10 +3,12 @@
 TeXLeaf 的日常入口是 `TeXLeaf: 管理 Snippet 与模板`：它提供结构化搜索、筛选、增删改、trigger 编辑和批量查找替换，不要求用户定位或手写配置文件。扩展内部仍使用一份完整 JSONC 主库，以保留可靠的迁移、导入导出、原字节备份和 Settings Sync 兼容性；首次创建时包含全部 212 条默认规则和 `GREEK`、`SYMBOL`、`MORE_SYMBOLS` 三个变量。只有高级修复或审阅时才需要运行 `TeXLeaf: 打开高级 Snippet JSONC`：
 
 ```text
-<VS Code 用户数据>/globalStorage/local-lab.texleaf/texleaf-snippets.jsonc
+<VS Code 用户数据>/globalStorage/zhangxh-math.texleaf/texleaf-snippets.jsonc
 ```
 
 这份内部后端在同一个 VS Code Profile 和扩展宿主的所有工作区中共享。不要手工猜测 Profile、Insiders、Remote 或便携版的存储路径；结构化管理器会选择正确的内部库，保存后立即刷新运行时。
+
+从旧 `local-lab.texleaf` 身份升级时，先在旧版保存所有修改；若改过模板，还应逐项保留名称、trigger、说明和正文。安装新版后先禁用旧版但不要卸载，再执行“Developer: Reload Window”。如果新主文件还不存在、旧 JSONC 能通过严格校验且复制期间内容未变化，新版会尽力逐字节复制旧片段库并保留原文件。确认片段迁移完成、按需重建自定义模板后再卸载旧版；未修改的四个工厂模板会自动重建。旧模板 catalog、既有 `globalState` 与 Settings Sync 基线不包含在这次跨 ID 迁移中。
 
 长篇 article/Beamer 模板不在这份 JSONC 中，而是保存在当前 Profile 的 TeXLeaf 插件内部模板库。运行 `TeXLeaf: 管理 TeX 模板` 可直接编辑名称、trigger、说明和正文，或添加、复制、删除及恢复模板。首次升级会一次性迁移旧版 `globalStorageUri/templates/*.tex` 中的用户内容，之后运行时不再依赖那些文件。模板只在单光标、已保存的空白 `.tex` 文档中，完整输入 trigger 后自动展开；关闭 `texleaf.autoSnippets` 时可在完整 trigger 后按 `Tab` 展开。模板使用下文相同的 v2 `@` 占位符语法；需要字面量 `@` 时写成 `@@`。
 

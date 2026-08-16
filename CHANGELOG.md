@@ -2,6 +2,22 @@
 
 TeXLeaf 的所有重要变更都会记录在此文件中。版本格式遵循语义化版本。
 
+## [0.7.2] - 2026-08-16
+
+### Fixed
+
+- 修复 VSIX 中 README 仍保留 `media/icon.png` 相对地址、导致扩展详情正文 Logo 显示为破图的问题；打包现在会按公开 GitHub `main` 分支把图片与本地文档链接改写为 HTTPS。
+
+### Changed
+
+- 补充 Marketplace 作者、横幅、免费定价、GitHub Markdown 与 Q&A 元数据，并新增独立支持说明；仓库、问题、主页和许可证资源链接继续指向公开的 `zhangxh-math/texleaf`。
+- 清理会掩盖仓库元数据缺失的打包参数，并在 Marketplace 首发前把 Publisher ID 从 `local-lab` 调整为现有开发者身份 `zhangxh-math`；正式扩展身份现为 `zhangxh-math.texleaf`。新版会在旧扩展仍启用时暂停激活；用户保存并禁用旧版、Reload Window 后，若新主片段文件不存在、旧 JSONC 通过严格校验且复制期间未变化，则尽力逐字节复制旧库并保留旧文件。模板 catalog、既有 `globalState` 与 Settings Sync 基线不会跨 ID 自动迁移，自定义模板需在卸载旧版前手工保留并在新版重建。
+- README 与 Wiki 新增按片段、Math Preview、Zotero 分组的上游项目致谢，并公开说明 TeXLeaf 由 zhangxh-math 与 OpenAI Codex 联合开发；同步移除 README/Wiki 中把“不依赖 Ultra Math Preview / hscopes-booster”作为宣传表述的文字，改为准确记录其产品灵感与当前实现。
+
+### Distribution
+
+- `texleaf-0.7.2.vsix` 同时作为 Visual Studio Marketplace 首发候选和 GitHub Release 资产生成，不提交到 Git 源码树。
+
 ## [0.7.1] - 2026-08-16
 
 ### Changed

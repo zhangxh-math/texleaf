@@ -4,8 +4,15 @@ const assert = require("node:assert/strict");
 const os = require("node:os");
 const path = require("node:path");
 const vscode = require("vscode");
+const { parse: parseJsonc } = require("jsonc-parser");
+const {
+  LEGACY_PUBLISHER_LIBRARY_TEXT,
+  LEGACY_PUBLISHER_SNIPPET_ID,
+} = require("./storageMigrationFixture.cjs");
 
-const EXTENSION_ID = "local-lab.texleaf";
+const EXTENSION_ID = "zhangxh-math.texleaf";
+const DIRTY_LEGACY_PUBLISHER_PREFIX =
+  "// Unsaved old-publisher edit must be saved before migration.\n";
 const LEGACY_WORKSPACE_SNIPPET_ID = "extension-host-legacy-workspace";
 const LEGACY_WORKSPACE_TRIGGER = "told";
 const ROOT_A_TRIGGER = "traa";
@@ -388,6 +395,25 @@ async function run() {
   assert.ok(texWorkspace, "paper-a workspace fixture was not opened");
   assert.ok(bibWorkspace, "library-b workspace fixture was not opened");
 
+  const legacyPublisherSnippetPath =
+    process.env.TEXLEAF_TEST_LEGACY_PUBLISHER_SNIPPET_PATH;
+  assert.ok(
+    legacyPublisherSnippetPath,
+    "the extension-host runner must provide the legacy publisher fixture path",
+  );
+  const legacyPublisherSnippetUri = vscode.Uri.file(
+    legacyPublisherSnippetPath,
+  ).with({ scheme: "vscode-userdata" });
+  const expectedLegacyPublisherText =
+    `${DIRTY_LEGACY_PUBLISHER_PREFIX}${LEGACY_PUBLISHER_LIBRARY_TEXT}`;
+  const expectedNewPublisherSnippetUri = vscode.Uri.joinPath(
+    legacyPublisherSnippetUri,
+    "..",
+    "..",
+    EXTENSION_ID,
+    "texleaf-snippets.jsonc",
+  );
+
   const testRoot = vscode.Uri.joinPath(
     vscode.Uri.file(os.tmpdir()),
     `texleaf-extension-host-${process.pid}-${Date.now()}`,
@@ -434,6 +460,133 @@ async function run() {
     );
 
     await waitFor(() => extension.isActive, "onLanguage:latex activation");
+    // Activation can also happen through onStartupFinished, so first let the
+    // clean fixture exercise normal publisher migration. Then remove only the
+    // isolated test profile's new target and retry with the old source dirty.
+    await vscode.workspace.fs.delete(expectedNewPublisherSnippetUri, {
+      recursive: false,
+    });
+    const legacyPublisherDocument = await vscode.workspace.openTextDocument(
+      legacyPublisherSnippetUri,
+    );
+    const legacyPublisherEditor = await vscode.window.showTextDocument(
+      legacyPublisherDocument,
+    );
+    assert.equal(
+      await legacyPublisherEditor.edit((builder) => {
+        builder.insert(new vscode.Position(0, 0), DIRTY_LEGACY_PUBLISHER_PREFIX);
+      }),
+      true,
+      "the migration test must create an unsaved old-publisher edit",
+    );
+    assert.equal(legacyPublisherDocument.isDirty, true);
+    await vscode.commands.executeCommand("texleaf.openSnippetFile");
+    let newTargetExistsWhileOldIsDirty = true;
+    try {
+      await vscode.workspace.fs.stat(expectedNewPublisherSnippetUri);
+    } catch (error) {
+      if (
+        error instanceof vscode.FileSystemError &&
+        error.code === "FileNotFound"
+      ) {
+        newTargetExistsWhileOldIsDirty = false;
+      } else {
+        throw error;
+      }
+    }
+    assert.equal(
+      newTargetExistsWhileOldIsDirty,
+      false,
+      "a dirty old-publisher document must defer migration and default seeding",
+    );
+    assert.equal(
+      await legacyPublisherDocument.save(),
+      true,
+      "the old-publisher edit must reach disk before migration retries",
+    );
+    await vscode.commands.executeCommand("texleaf.openSnippetFile");
+    await waitFor(
+      () =>
+        vscode.window.activeTextEditor?.document.uri.toString() ===
+        expectedNewPublisherSnippetUri.toString(),
+      "publisher-ID snippet migration after saving the dirty source",
+    );
+    assert.equal(
+      new TextDecoder().decode(
+        await vscode.workspace.fs.readFile(legacyPublisherSnippetUri),
+      ),
+      expectedLegacyPublisherText,
+      "publisher-ID migration must never delete or rewrite the old source",
+    );
+    const initiallyMigratedPublisherText = new TextDecoder().decode(
+      await vscode.workspace.fs.readFile(expectedNewPublisherSnippetUri),
+    );
+    assert.equal(
+      initiallyMigratedPublisherText.includes(DIRTY_LEGACY_PUBLISHER_PREFIX),
+      true,
+      "the saved old-publisher JSONC edit must be the snapshot that migrates",
+    );
+    assert.equal(
+      initiallyMigratedPublisherText.includes(LEGACY_PUBLISHER_SNIPPET_ID),
+      true,
+      "the migrated target must include old-publisher user snippets",
+    );
+
+    // A malformed old file must be left byte-for-byte intact while the new ID
+    // receives a usable default library. Restore the valid fixture afterwards
+    // so the remainder of the smoke test exercises the migrated user rule.
+    await vscode.workspace.fs.delete(expectedNewPublisherSnippetUri, {
+      recursive: false,
+    });
+    const invalidLegacyPublisherText = "{ this is not valid JSONC\n";
+    const invalidLegacyPublisherEditor = await vscode.window.showTextDocument(
+      legacyPublisherDocument,
+    );
+    await replaceDocument(
+      invalidLegacyPublisherEditor,
+      invalidLegacyPublisherText,
+      invalidLegacyPublisherText.length,
+    );
+    assert.equal(await legacyPublisherDocument.save(), true);
+    await vscode.commands.executeCommand("texleaf.openSnippetFile");
+    const invalidFallbackText = new TextDecoder().decode(
+      await vscode.workspace.fs.readFile(expectedNewPublisherSnippetUri),
+    );
+    assert.equal(
+      parseJsonc(invalidFallbackText).snippets.length,
+      212,
+      "an invalid old-publisher library must fall back to the complete factory library",
+    );
+    assert.equal(
+      new TextDecoder().decode(
+        await vscode.workspace.fs.readFile(legacyPublisherSnippetUri),
+      ),
+      invalidLegacyPublisherText,
+      "invalid publisher migration must not repair, replace, or delete the old source",
+    );
+
+    await vscode.workspace.fs.delete(expectedNewPublisherSnippetUri, {
+      recursive: false,
+    });
+    const restoredLegacyPublisherEditor = await vscode.window.showTextDocument(
+      legacyPublisherDocument,
+    );
+    await replaceDocument(
+      restoredLegacyPublisherEditor,
+      expectedLegacyPublisherText,
+      expectedLegacyPublisherText.length,
+    );
+    assert.equal(await legacyPublisherDocument.save(), true);
+    await vscode.commands.executeCommand("texleaf.openSnippetFile");
+    assert.equal(
+      new TextDecoder()
+        .decode(await vscode.workspace.fs.readFile(expectedNewPublisherSnippetUri))
+        .includes(LEGACY_PUBLISHER_SNIPPET_ID),
+      true,
+      "restoring a valid old source must allow publisher migration to retry",
+    );
+    editor = await vscode.window.showTextDocument(document);
+
     const configurationGroups = Array.isArray(
       extension.packageJSON.contributes.configuration,
     )
@@ -777,7 +930,7 @@ async function run() {
     assert.equal(
       extension.packageJSON.contributes.jsonValidation.some((validation) =>
         validation.fileMatch.includes(
-          "**/globalStorage/local-lab.texleaf/texleaf-snippets.jsonc",
+          "**/globalStorage/zhangxh-math.texleaf/texleaf-snippets.jsonc",
         ),
       ),
       true,
@@ -1800,7 +1953,7 @@ async function run() {
       globalSnippetUri.path
         .toLowerCase()
         .endsWith(
-          "/globalstorage/local-lab.texleaf/texleaf-snippets.jsonc",
+          "/globalstorage/zhangxh-math.texleaf/texleaf-snippets.jsonc",
         ),
       true,
       "the primary snippet file must live under ExtensionContext.globalStorageUri",
@@ -1811,7 +1964,7 @@ async function run() {
       "refuse to overwrite an unsaved global snippet document during tests",
     );
     globalSnippetBefore = await vscode.workspace.fs.readFile(globalSnippetUri);
-    const seededGlobalLibrary = JSON.parse(
+    const seededGlobalLibrary = parseJsonc(
       new TextDecoder().decode(globalSnippetBefore),
     );
     assert.equal(
@@ -1821,8 +1974,20 @@ async function run() {
     );
     assert.equal(
       seededGlobalLibrary.snippets.length,
-      212,
-      "all factory snippets must be editable in the global file",
+      213,
+      "the publisher-migrated user snippet and all factory snippets must be editable",
+    );
+    assert.equal(
+      seededGlobalLibrary.snippets[0]?.id,
+      LEGACY_PUBLISHER_SNIPPET_ID,
+      "publisher migration must keep the user's old global snippet ahead of factory defaults",
+    );
+    assert.equal(
+      new TextDecoder()
+        .decode(globalSnippetBefore)
+        .includes(DIRTY_LEGACY_PUBLISHER_PREFIX),
+      true,
+      "factory revision migration must preserve the copied JSONC comment",
     );
     assert.equal(
       seededGlobalLibrary.snippets.find(
@@ -1842,6 +2007,20 @@ async function run() {
       globalEditor.document.getText().includes(LEGACY_WORKSPACE_SNIPPET_ID),
       false,
       "legacy workspace snippets must never be promoted into global storage",
+    );
+    const changedOldPublisherText = LEGACY_PUBLISHER_LIBRARY_TEXT.replace(
+      "tlegacyid",
+      "tlegacyidchanged",
+    );
+    await vscode.workspace.fs.writeFile(
+      legacyPublisherSnippetUri,
+      new TextEncoder().encode(changedOldPublisherText),
+    );
+    await vscode.commands.executeCommand("texleaf.openSnippetFile");
+    assert.deepEqual(
+      await vscode.workspace.fs.readFile(globalSnippetUri),
+      globalSnippetBefore,
+      "an existing new-publisher global file must never be overwritten by later old-publisher changes",
     );
 
     const templateDirectoryUri = vscode.Uri.joinPath(
@@ -1939,15 +2118,34 @@ async function run() {
     const migrationBackups = (await vscode.workspace.fs.readDirectory(
       backupDirectory,
     )).filter(([name]) => name.includes(".migration."));
-    assert.equal(migrationBackups.length, 1);
     assert.equal(
-      new TextDecoder().decode(
-        await vscode.workspace.fs.readFile(
-          vscode.Uri.joinPath(backupDirectory, migrationBackups[0][0]),
+      migrationBackups.length,
+      4,
+      "all valid publisher-ID migrations and the explicit pre-0.3 fixture require verified backups",
+    );
+    const migrationBackupTexts = await Promise.all(
+      migrationBackups.map(async ([name]) =>
+        new TextDecoder().decode(
+          await vscode.workspace.fs.readFile(
+            vscode.Uri.joinPath(backupDirectory, name),
+          ),
         ),
       ),
-      legacyGlobalLibraryText,
+    );
+    assert.equal(
+      migrationBackupTexts.includes(legacyGlobalLibraryText),
+      true,
       "migration backup must preserve the exact pre-0.3 bytes",
+    );
+    assert.equal(
+      migrationBackupTexts.includes(expectedLegacyPublisherText),
+      true,
+      "publisher-ID factory migration backup must preserve the exact copied JSONC bytes",
+    );
+    assert.equal(
+      migrationBackupTexts.includes(LEGACY_PUBLISHER_LIBRARY_TEXT),
+      true,
+      "the clean publisher-ID activation must also preserve its exact copied JSONC bytes",
     );
 
     const theoremRevisionMigrations = new Map([

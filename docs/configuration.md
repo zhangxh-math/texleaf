@@ -1,6 +1,6 @@
 # TeXLeaf 配置参考
 
-在 VS Code 设置中搜索 `@ext:local-lab.texleaf` 即可修改配置。设置页按 **TeXLeaf · 编辑与片段**、**TeXLeaf · Zotero 与参考文献**、**TeXLeaf · 高级**、**TeXLeaf · Math Preview** 分成四个原生分类；工作区级设置适合团队统一使用，用户级设置适合个人习惯。
+在 VS Code 设置中搜索 `@ext:zhangxh-math.texleaf` 即可修改配置。设置页按 **TeXLeaf · 编辑与片段**、**TeXLeaf · Zotero 与参考文献**、**TeXLeaf · 高级**、**TeXLeaf · Math Preview** 分成四个原生分类；工作区级设置适合团队统一使用，用户级设置适合个人习惯。
 
 ## 设置项
 
@@ -127,7 +127,7 @@ TeXLeaf 使用离线打包的 MathJax SVG 渲染器和 New Computer Modern 字�
 
 文档前言中支持 `newcommand`、`renewcommand`、`providecommand` 和 `DeclareMathOperator`（含星号变体）；不扫描 `\input`/`\include` 中的外部宏，也不尝试执行任意 TeX 包加载。渲染器只加载显式允许的 MathJax package，不启用 `require`、`autoload`、HTML/TeXHTML 或运行时 `setoptions`。
 
-本功能不依赖 Ultra Math Preview、Hyperscopes Booster、TextMate grammar 重解析或 Oniguruma WASM。TeXLeaf 只借鉴“光标驱动公式预览”这一产品思路，区域扫描、宏处理、布局规划、缓存、Worker、SVG 清理和测试均为本项目的独立实现；没有复制 Ultra 或 Booster 的源码、正则、CSS 或资源。
+Math Preview 的产品方向受到 Ultra Math Preview 与 hscopes-booster 的启发；TeXLeaf 当前使用随 VSIX 提供的 MathJax Worker、区域扫描、宏处理、布局规划、缓存和 SVG 安全处理来完成活动公式预览。完整致谢和实现边界见 README、Wiki 与 `THIRD_PARTY_NOTICES.md`。
 
 VS Code 没有允许单个扩展控制 Electron GPU 的公开 API，而且 MathJax TeX 解析/SVG 排版主要消耗 CPU，所以没有提供名不副实的硬件加速开关。需要降低开销时，优先提高 `debounceMs`、降低 `maxSourceLength`，或关闭 `mathPreview.enabled`；后台 Worker 与缓存始终启用，不需要额外配置。
 
@@ -135,7 +135,9 @@ VS Code 没有允许单个扩展控制 Electron GPU 的公开 API，而且 MathJ
 
 `TeXLeaf: 管理 Snippet 与模板` 打开结构化面板，不显示或要求用户处理存储路径。Snippet 页支持 trigger/replacement/options/priority/category/description/flags/占位符版本/启用状态编辑，模板页支持名称、trigger、说明和完整 TeX 正文编辑；两页都有搜索、添加、复制、删除、恢复默认，以及带字段范围、大小写、正则、预览和撤销的批量查找替换。保存前后使用 revision 校验，检测到另一个窗口、Settings Sync 或高级编辑器的变化时拒绝覆盖。
 
-在 Windows Stable 中，其典型位置是 `%APPDATA%\Code\User\globalStorage\local-lab.texleaf\texleaf-snippets.jsonc`。实际路径由当前 VS Code Profile 与运行环境决定；命令入口会始终使用正确 URI。该文件不属于任何项目，切换工作区无需复制。不同 VS Code Profile 或不同 Remote 主机拥有各自的全局存储。
+在 Windows Stable 中，其典型位置是 `%APPDATA%\Code\User\globalStorage\zhangxh-math.texleaf\texleaf-snippets.jsonc`。实际路径由当前 VS Code Profile 与运行环境决定；命令入口会始终使用正确 URI。该文件不属于任何项目，切换工作区无需复制。不同 VS Code Profile 或不同 Remote 主机拥有各自的全局存储。
+
+从旧 `local-lab.texleaf` 身份首次迁入时，先在旧版保存所有修改；如自定义过模板，还要逐项保留名称、trigger、说明和正文。新版检测到仍启用的旧版时会暂停激活，避免两个实例同时注册 `texleaf.*` 命令，也避免复制一个尚未保存的磁盘快照。此时先**禁用但不要卸载**旧版并执行“Developer: Reload Window”。新主片段文件尚不存在、旧 JSONC 严格校验通过且复制期间内容未变化时，新版会尽力逐字节复制片段库；旧文件不会被移动或删除。确认 Snippet 迁移无误、按需重建自定义模板后，再卸载旧身份扩展。未修改的四个工厂模板会由新版自动创建；旧模板 catalog、既有 `globalState` 与 Settings Sync 基线不会跨扩展 ID 自动迁移。
 
 首次创建时，文件直接包含当前版本的 212 条默认规则、`GREEK`、`SYMBOL`、`MORE_SYMBOLS` 三个变量，以及 `defaultsRevision` 迁移标记。运行时只有这份全局文件和用户显式配置的项目附加文件，不再有隐藏的 `builtin` 或 `settings` 片段源。用户可以在全局文件中直接修改、禁用或删除默认规则；`defaultsRevision` 已完成后，启动时不会把用户删除的规则重新补回。
 
@@ -165,7 +167,7 @@ revision 2 会追加缺失的定理类片段；只有仍与 revision 1 出厂记
 
 可编辑的唯一真源仍是当前 VS Code Profile/扩展宿主下的 `globalStorageUri/texleaf-snippets.jsonc`。这个文件不会被 Settings Sync 原生上传；TeXLeaf 把有效、已保存的完整 JSONC 内容封装到一个私有 `globalState` envelope，并通过 `globalState.setKeysForSync(...)` 注册。片段库不会写入公开 `settings.json`，同步镜像也不是额外的运行时片段来源。
 
-用户必须在 VS Code 中主动开启 Settings Sync，并在同步内容中包含 Extensions。关闭同步时，本地文件和所有编辑功能仍正常工作。手工安装的 VSIX 不会因为片段镜像而自动出现在另一台机器；每个设备仍需安装标识为 `local-lab.texleaf` 的相同或兼容版本。
+用户必须在 VS Code 中主动开启 Settings Sync，并在同步内容中包含 Extensions。关闭同步时，本地文件和所有编辑功能仍正常工作。手工安装的 VSIX 不会因为片段镜像而自动出现在另一台机器；每个设备仍需安装标识为 `zhangxh-math.texleaf` 的相同或兼容版本。
 
 同步 envelope 的 **JSON 序列化结果上限为 256 KiB**，不是单纯源文件的字节数。超过上限时本机文件和当前片段继续可用，但新内容不上传。JSONC 无效、缺少有效 `snippets` 结构、高级 JSONC 编辑器 dirty，或管理器存在未保存内容时，上传与下载 reconciliation 都会延后，并保留上一次有效云端镜像。
 
@@ -233,7 +235,7 @@ TeXLeaf 识别常见的 `$ … $`、`\( … \)`、`$$ … $$`、`\[ … \]` 与�
 
 ### 整篇所见即所得边界
 
-TeXLeaf 不把普通 VS Code 文本编辑器改造成 Overleaf/Obsidian 式整篇所见即所得界面。VS Code 的稳定扩展 API 无法在原文本范围里提供可点击、可交互、能自动重排编辑器行高的任意 MathJax 替换部件；Decoration 也没有可靠的点击回调。按照产品约束，本版没有加入 PDF Webview 或自定义编辑器来冒充这个功能，只保留不修改文档内容、字符偏移、光标或选择范围的当前公式浮动预览。
+TeXLeaf 专注于 VS Code 源码编辑器中的活动公式预览。VS Code 的稳定扩展 API 无法在原文本范围里提供可点击、可交互、能自动重排编辑器行高的任意 MathJax 替换部件；Decoration 也没有可靠的点击回调。因此本版不提供整篇所见即所得替换或内置 PDF Webview，只保留不修改文档内容、字符偏移、光标或选择范围的当前公式浮动预览。
 
 ## 与其他扩展共存
 

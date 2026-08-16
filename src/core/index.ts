@@ -14,3 +14,4 @@ export * from './serialTaskQueue';
 export * from './citation';
 export * from './mathPreview';
 export * from './optimisticRevision';
+export * from './migratableSnippetLibrary';
