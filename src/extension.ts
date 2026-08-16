@@ -1,13 +1,16 @@
 import * as vscode from "vscode";
 import { BracketDecorationController } from "./bracketDecorations";
+import { CitationController } from "./citationController";
 import { registerCompletionProvider } from "./completionProvider";
 import { readConfig } from "./config";
 import { EditorController } from "./editorController";
+import { MathPreviewController } from "./mathPreviewController";
 import { SnippetRepository } from "./snippetRepository";
 import { registerSnippetEditorPanel } from "./snippetEditorPanel";
 import { SnippetRuntime } from "./snippetRuntime";
 import { SnippetSyncController } from "./snippetSync";
 import { SnippetTreeProvider } from "./snippetTree";
+import { TemplateManager } from "./templateManager";
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel("TeXLeaf", { log: true });
@@ -16,6 +19,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const repository = new SnippetRepository(context);
   context.subscriptions.push(repository);
   await repository.initialize();
+
+  const templates = new TemplateManager(context, output);
+  context.subscriptions.push(templates);
+  await templates.initialize();
 
   const snippetEditor = registerSnippetEditorPanel(context, {
     onWillOpen: () => repository.ensureGlobalSnippetFile(),
@@ -28,9 +35,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     },
     onRestoreDefaults: () => repository.restoreDefaultSnippets(),
+    onReadLibrary: () => repository.readGlobalLibraryModel(),
+    onReplaceLibrary: (model, expectedRevision) =>
+      repository.replaceGlobalLibraryModel(model, expectedRevision),
+    onListTemplates: () => templates.listTemplates(),
+    onReplaceTemplates: (managedTemplates, expectedRevision) =>
+      templates.replaceTemplates(managedTemplates, expectedRevision),
+    onRestoreTemplates: () => templates.restoreDefaultTemplates(),
   });
   context.subscriptions.push(
     repository.onDidChange(() => {
+      void snippetEditor.refreshCleanSessions();
+    }),
+    templates.onDidChange(() => {
       void snippetEditor.refreshCleanSessions();
     }),
   );
@@ -52,8 +69,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   runtime.configure(readConfig(vscode.window.activeTextEditor?.document.uri));
   context.subscriptions.push(runtime);
 
+  const citations = new CitationController(runtime, output);
+  citations.register();
+  context.subscriptions.push(citations);
+
   const decorations = new BracketDecorationController();
   context.subscriptions.push(decorations);
+
+  const mathPreview = new MathPreviewController(context, output);
+  mathPreview.register();
+  context.subscriptions.push(mathPreview);
 
   const treeProvider = new SnippetTreeProvider(repository);
   const tree = vscode.window.createTreeView("texleaf.snippets", {
@@ -68,6 +93,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context,
     repository,
     runtime,
+    templates,
     {
       onEditorStateChanged: (editor) => decorations.schedule(editor),
     },

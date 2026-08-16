@@ -26,7 +26,7 @@ const runtimeRequests = [
 ].map((match) => match[1]);
 assert.deepEqual(
   [...new Set(runtimeRequests)],
-  ["vscode", "node:crypto"],
+  ["vscode", "node:crypto", "node:worker_threads"],
   "only VS Code and explicitly approved Node built-ins may remain external",
 );
 

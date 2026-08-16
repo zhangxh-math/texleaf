@@ -2,10 +2,12 @@ import * as vscode from "vscode";
 import {
   findFractionNumerator,
   planAutoEnlarge,
+  planLeftRightEnter,
   planTabout,
   replacementPartsToText,
   scanLatexRegions,
   type CompiledSnippet,
+  type LeftRightEnterPlan,
   type LatexContext,
   type ReplacementPart,
   type SnippetMatch,
@@ -17,6 +19,7 @@ import {
   SnippetRuntime,
   type RuntimeMatch,
 } from "./snippetRuntime";
+import { TemplateManager, type TemplateMatch } from "./templateManager";
 
 interface TypeCommandArguments {
   readonly text: string;
@@ -49,6 +52,7 @@ export class EditorController implements vscode.Disposable {
     _extensionContext: vscode.ExtensionContext,
     private readonly repository: SnippetRepository,
     private readonly runtime: SnippetRuntime,
+    private readonly templates: TemplateManager,
     private readonly hooks: EditorControllerHooks = {},
   ) {}
 
@@ -76,6 +80,9 @@ export class EditorController implements vscode.Disposable {
       ),
       vscode.commands.registerCommand("texleaf.openSnippetFile", () =>
         this.repository.openGlobalSnippetFile(),
+      ),
+      vscode.commands.registerCommand("texleaf.openTemplateFile", () =>
+        this.templates.openTemplateFile(),
       ),
       vscode.commands.registerCommand("texleaf.reloadSnippets", async () => {
         await this.repository.reload();
@@ -127,6 +134,7 @@ export class EditorController implements vscode.Disposable {
         this.scheduleContextUpdate();
         this.hooks.onEditorStateChanged?.(editor);
       }),
+      this.templates.onDidChange(() => this.scheduleContextUpdate()),
     );
 
     this.scheduleContextUpdate();
@@ -171,21 +179,27 @@ export class EditorController implements vscode.Disposable {
 
     const selection = editor.selection;
     const typedText = args.text;
+    const typedNewline = typedText === "\n" || typedText === "\r\n";
+    const leftRightEnter =
+      typedNewline && selection.isEmpty && config.matrixShortcuts
+        ? leftRightEnterPlan(editor.document, selection.active)
+        : undefined;
     if (
-      (typedText === "\n" || typedText === "\r\n") &&
+      typedNewline &&
       selection.isEmpty &&
       config.matrixShortcuts &&
-      isConfiguredMatrix(
+      (isConfiguredMatrix(
         this.runtime.contextAt(editor.document, selection.active),
         config,
-      )
+      ) ||
+        leftRightEnter !== undefined)
     ) {
       // LaTeX Workshop owns Enter by default and eventually delegates its
       // ordinary newline path to the public `type` command. Route that call
       // back through TeXLeaf while the cursor is in a configured matrix-like
       // environment, so Align row insertion does not depend on extension
       // keybinding order.
-      await this.matrixEnter();
+      await this.matrixEnter(leftRightEnter);
       return;
     }
     if (typedText.length === 1 && !selection.isEmpty && config.visualSnippets) {
@@ -215,6 +229,16 @@ export class EditorController implements vscode.Disposable {
     }
 
     if (typedText.length === 1 && selection.isEmpty && config.autoSnippets) {
+      const template = this.templates.matchAfterType(
+        editor.document,
+        selection.active,
+        typedText,
+      );
+      if (template !== undefined && (await this.expandTemplate(editor, template))) {
+        this.pendingFractions.delete(editor.document.uri.toString());
+        return;
+      }
+
       const automatic = this.syntheticAutomaticMatch(editor, typedText, config);
       if (
         automatic !== undefined &&
@@ -280,10 +304,23 @@ export class EditorController implements vscode.Disposable {
       return;
     }
 
+    if (editor.selections.length === 1 && editor.selection.isEmpty) {
+      const template = this.templates.match(
+        editor.document,
+        editor.selection.active,
+      );
+      if (template !== undefined) {
+        await vscode.commands.executeCommand("hideSuggestWidget");
+        if (await this.expandTemplate(editor, template)) {
+          return;
+        }
+      }
+    }
+
     if (
       config.manualTrigger === "tab" &&
       editor.selection.isEmpty &&
-      (await this.expandManualSnippet(editor, config))
+      (await this.expandManualSnippet(editor, config, true))
     ) {
       return;
     }
@@ -336,7 +373,7 @@ export class EditorController implements vscode.Disposable {
     await vscode.commands.executeCommand("default:type", { text: " " });
   }
 
-  private async matrixEnter(): Promise<void> {
+  private async matrixEnter(precomputedLeftRight?: LeftRightEnterPlan): Promise<void> {
     const editor = vscode.window.activeTextEditor;
     if (editor === undefined) {
       return;
@@ -346,8 +383,34 @@ export class EditorController implements vscode.Disposable {
     if (
       !isSupportedDocument(editor.document, config) ||
       !config.matrixShortcuts ||
-      !isConfiguredMatrix(context, config)
+      !editor.selection.isEmpty
     ) {
+      await vscode.commands.executeCommand("default:type", { text: "\n" });
+      return;
+    }
+
+    const leftRight =
+      precomputedLeftRight ??
+      leftRightEnterPlan(editor.document, editor.selection.active);
+    if (leftRight !== undefined) {
+      const inserted = await this.withMutation(editor.document.uri, () =>
+        editor.edit(
+          (builder) =>
+            builder.insert(
+              editor.document.positionAt(leftRight.insertionOffset),
+              leftRight.insertionText,
+            ),
+          { undoStopBefore: true, undoStopAfter: true },
+        ),
+      );
+      if (inserted) {
+        const target = editor.document.positionAt(leftRight.cursorOffset);
+        editor.selection = new vscode.Selection(target, target);
+      }
+      return;
+    }
+
+    if (!isConfiguredMatrix(context, config)) {
       await vscode.commands.executeCommand("default:type", { text: "\n" });
       return;
     }
@@ -649,6 +712,11 @@ export class EditorController implements vscode.Disposable {
       return;
     }
     if (config.autoSnippets) {
+      const template = this.templates.match(document, editor.selection.active);
+      if (template !== undefined && (await this.expandTemplate(editor, template))) {
+        return;
+      }
+
       const runtimeMatch = this.runtime.matchAt(
         document,
         editor.selection.active,
@@ -825,6 +893,7 @@ export class EditorController implements vscode.Disposable {
   private async expandManualSnippet(
     editor: vscode.TextEditor,
     config: TeXLeafConfig,
+    dismissSuggestions = false,
   ): Promise<boolean> {
     const runtimeMatch = this.runtime.matchAt(
       editor.document,
@@ -832,14 +901,33 @@ export class EditorController implements vscode.Disposable {
       "manual",
       config,
     );
-    return runtimeMatch === undefined
-      ? false
-      : this.insertParts(
-          editor,
-          runtimeMatch.match.replacement,
-          runtimeMatch.range,
-          config,
-        );
+    if (runtimeMatch === undefined) {
+      return false;
+    }
+    if (dismissSuggestions) {
+      await vscode.commands.executeCommand("hideSuggestWidget");
+    }
+    return this.insertParts(
+      editor,
+      runtimeMatch.match.replacement,
+      runtimeMatch.range,
+      config,
+    );
+  }
+
+  private async expandTemplate(
+    editor: vscode.TextEditor,
+    match: TemplateMatch,
+  ): Promise<boolean> {
+    const snippet = replacementPartsToSnippetString(match.parts);
+    return this.withMutation(editor.document.uri, () =>
+      editor.insertSnippet(snippet, match.range, {
+        undoStopBefore: true,
+        undoStopAfter: true,
+        // Template files already contain their intended top-level formatting.
+        keepWhitespace: true,
+      }),
+    );
   }
 
   private async wrapSelectionAsFraction(
@@ -1032,10 +1120,17 @@ export class EditorController implements vscode.Disposable {
           config,
         )
       : undefined;
+    const template = editor.selections.length === 1 && editor.selection.isEmpty
+      ? this.templates.match(editor.document, editor.selection.active)
+      : undefined;
     const matrix =
       editor.selection.isEmpty &&
       config.matrixShortcuts &&
       isConfiguredMatrix(context, config);
+    const smartEnter =
+      editor.selection.isEmpty &&
+      config.matrixShortcuts &&
+      leftRightEnterPlan(editor.document, editor.selection.active) !== undefined;
     const canTabout =
       editor.selection.isEmpty && config.tabout && context.mathMode !== "text";
     const emptyMath =
@@ -1047,12 +1142,26 @@ export class EditorController implements vscode.Disposable {
       vscode.commands.executeCommand(
         "setContext",
         "texleaf.tabActionAvailable",
-        (config.manualTrigger === "tab" && manual !== undefined) || matrix || canTabout,
+        template !== undefined ||
+          (config.manualTrigger === "tab" && manual !== undefined) ||
+          matrix ||
+          canTabout,
+      ),
+      vscode.commands.executeCommand(
+        "setContext",
+        "texleaf.snippetTabActionAvailable",
+        template !== undefined ||
+          (config.manualTrigger === "tab" && manual !== undefined),
       ),
       vscode.commands.executeCommand(
         "setContext",
         "texleaf.manualSpaceActionAvailable",
         config.manualTrigger === "space" && manual !== undefined,
+      ),
+      vscode.commands.executeCommand(
+        "setContext",
+        "texleaf.enterActionAvailable",
+        matrix || smartEnter,
       ),
       vscode.commands.executeCommand(
         "setContext",
@@ -1166,6 +1275,15 @@ function innermostMathRegion(text: string, offset: number) {
       (left, right) =>
         left.innerEnd - left.innerStart - (right.innerEnd - right.innerStart),
     )[0];
+}
+
+function leftRightEnterPlan(
+  document: vscode.TextDocument,
+  position: vscode.Position,
+): LeftRightEnterPlan | undefined {
+  return planLeftRightEnter(document.getText(), document.offsetAt(position), {
+    eol: document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n",
+  });
 }
 
 function stripCompleteOuterParentheses(value: string): string {
@@ -1316,7 +1434,17 @@ async function setAllContextKeys(enabled: boolean): Promise<void> {
     ),
     vscode.commands.executeCommand(
       "setContext",
+      "texleaf.snippetTabActionAvailable",
+      false,
+    ),
+    vscode.commands.executeCommand(
+      "setContext",
       "texleaf.manualSpaceActionAvailable",
+      false,
+    ),
+    vscode.commands.executeCommand(
+      "setContext",
+      "texleaf.enterActionAvailable",
       false,
     ),
     vscode.commands.executeCommand(

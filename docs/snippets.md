@@ -1,18 +1,24 @@
 # TeXLeaf 片段格式
 
-TeXLeaf 0.3.0 使用一份完整、可编辑的全局 JSONC 主文件。首次创建时，扩展会把全部 199 条默认规则和 `GREEK`、`SYMBOL`、`MORE_SYMBOLS` 三个变量写入其中；运行时不再另外加载隐藏的 `builtin` 或 `settings` 片段源。主文件由 VS Code 放在扩展的 `globalStorageUri` 中：
+TeXLeaf 的日常入口是 `TeXLeaf: 管理 Snippet 与模板`：它提供结构化搜索、筛选、增删改、trigger 编辑和批量查找替换，不要求用户定位或手写配置文件。扩展内部仍使用一份完整 JSONC 主库，以保留可靠的迁移、导入导出、原字节备份和 Settings Sync 兼容性；首次创建时包含全部 212 条默认规则和 `GREEK`、`SYMBOL`、`MORE_SYMBOLS` 三个变量。只有高级修复或审阅时才需要运行 `TeXLeaf: 打开高级 Snippet JSONC`：
 
 ```text
 <VS Code 用户数据>/globalStorage/local-lab.texleaf/texleaf-snippets.jsonc
 ```
 
-这份文件在同一个 VS Code Profile 和扩展宿主的所有工作区中共享。不要手工猜测 Profile、Insiders、Remote 或便携版的存储路径；运行 `TeXLeaf: 打开全局 Snippet 配置文件` 即可定位并打开它。所有默认规则都在文件里，因此可以直接修改、禁用或删除。
+这份内部后端在同一个 VS Code Profile 和扩展宿主的所有工作区中共享。不要手工猜测 Profile、Insiders、Remote 或便携版的存储路径；结构化管理器会选择正确的内部库，保存后立即刷新运行时。
+
+长篇 article/Beamer 模板不在这份 JSONC 中，而是保存在当前 Profile 的 TeXLeaf 插件内部模板库。运行 `TeXLeaf: 管理 TeX 模板` 可直接编辑名称、trigger、说明和正文，或添加、复制、删除及恢复模板。首次升级会一次性迁移旧版 `globalStorageUri/templates/*.tex` 中的用户内容，之后运行时不再依赖那些文件。模板只在单光标、已保存的空白 `.tex` 文档中，完整输入 trigger 后自动展开；关闭 `texleaf.autoSnippets` 时可在完整 trigger 后按 `Tab` 展开。模板使用下文相同的 v2 `@` 占位符语法；需要字面量 `@` 时写成 `@@`。
 
 `texleaf.snippetFiles` 默认为空。如果确实需要项目专属规则，可以在该设置中明确添加额外文件；相对路径按对应工作区文件夹解析，多根工作区会各自加载。它不会改变全局主文件的位置。
 
 旧版本留在项目 `.vscode/texleaf-snippets.jsonc` 中的文件不会被自动读取、复制或删除。需要迁移时，从 Command Palette 运行 `TeXLeaf: 导入片段` 并明确选择旧文件一次即可。未信任工作区会忽略项目级 `texleaf.snippetFiles`；用户全局文件仍可正常使用。
 
 从 0.2.x 升级时，TeXLeaf 会对缺少当前 `defaultsRevision` 的有效全局文件执行一次追加式迁移：保留现有片段和变量，读取一次已移除设置 `texleaf.customSnippets` 的旧用户全局值，再补齐尚不存在的默认定义。对象式且 `snippets` 为数组的 JSONC 会尽量保留注释、未知顶层字段、原顺序和未改动条目的格式；顶层数组或旧字符串格式需要规范化并重新序列化。现有内容优先，工作区级旧设置不会被提升。实际改写之前会创建逐字节备份，因此规范化前的原始内容仍可恢复；标记迁移完成后，用户主动删除的默认项不会在后续启动时重新出现。
+
+工厂迁移 revision 2 会追加缺失的定理类环境，并把仍与旧出厂记录完全一致的 `mode.inline` 触发词从 `mk` 窄迁移为 `lm`。revision 3 只把仍与 revision 2 出厂记录完全一致的 13 个定理片段，从裸 trigger 的手动规则窄迁移为带反斜杠的自动规则，例如 `thm` 变为 `\thm`、`def` 变为 `\dfn`，选项 `tw` 变为 `tAw`。只要记录已被禁用、改名、改写 replacement/选项/说明或分类，就视为用户自定义并保持不动；文件已经标记 revision 3 后，用户删除的默认规则也不会在重启时复活。默认规则总数仍为 212。
+
+默认使用 `\dfn` 自动展开 `definition` 环境。所有自动规则仍保留精确 `Tab` 兜底，Suggest 打开时也优先执行与当前输入完全一致的 TeXLeaf trigger。
 
 ## 安全模型
 
@@ -33,12 +39,12 @@ TeXLeaf 0.3.0 使用一份完整、可编辑的全局 JSONC 主文件。首次�
 
 ## 推荐的片段库结构
 
-下面是全局主库的简化对象结构；真实首次文件还包含其余默认变量和 199 条规则。项目附加文件可以省略 `defaultsRevision`，但全局主库应保留它。
+下面是全局主库的简化对象结构；真实首次文件还包含其余默认变量和 212 条规则。项目附加文件可以省略 `defaultsRevision`，但全局主库应保留它。
 
 ```jsonc
 {
   "version": 1,
-  "defaultsRevision": 1,
+  "defaultsRevision": 3,
   "variables": {
     "GREEK": "alpha|beta|gamma|delta",
   },
@@ -192,7 +198,7 @@ Visual 片段只处理非空选择。replacement 使用 `@{VISUAL}` 表示被选
 ```jsonc
 {
   "version": 1,
-  "defaultsRevision": 1,
+  "defaultsRevision": 3,
   "variables": {},
   "snippets": [
     {
@@ -222,4 +228,4 @@ Visual 片段只处理非空选择。replacement 使用 `@{VISUAL}` 表示被选
 }
 ```
 
-保存全局文件后 watcher 会自动重新加载；`TeXLeaf: 重载片段` 是显式刷新和排错手段，不是每次保存的必需步骤。通过全局大面板保存时也会立即重新加载；有效内容还会更新 VS Code Settings Sync 的 `globalState` 镜像。Settings Sync 必须由用户主动启用；只有有效、已保存且序列化 envelope 不超过 256 KiB 的内容才会上传。同步冲突不会静默覆盖本地未保存或已并发变化的文件，替换前备份也只保存在当前环境。若片段没有生效，请依次检查：当前编辑器是否已经保存为 `.tex` 或 `.bib`、当前语言是否在 `texleaf.languageIds` 中、扩展是否启用、数学上下文是否符合模式选项、当前环境是否被排除，以及“问题”面板中是否出现片段诊断。
+保存全局文件后 watcher 会自动重新加载；`TeXLeaf: 重载片段` 是显式刷新和排错手段，不是每次保存的必需步骤。通过内置管理器保存时也会立即重新加载；有效内容还会更新 VS Code Settings Sync 的 `globalState` 镜像。Settings Sync 必须由用户主动启用；只有有效、已保存且序列化 envelope 不超过 256 KiB 的内容才会上传。同步冲突不会静默覆盖本地未保存或已并发变化的文件，替换前备份也只保存在当前环境。若片段没有生效，请依次检查：当前编辑器是否已经保存为 `.tex` 或 `.bib`、当前语言是否在 `texleaf.languageIds` 中、扩展是否启用、数学上下文是否符合模式选项、当前环境是否被排除，以及“问题”面板中是否出现片段诊断。

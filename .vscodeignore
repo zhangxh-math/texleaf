@@ -12,6 +12,9 @@ coverage/**
 out/**
 node_modules/**
 vscode-ultra-math-preview/**
+triforge-git/**
+.wiki-publish/**
+.release-publish/**
 *.vsix
 *.tgz
 *.log

@@ -21,6 +21,25 @@ export interface LatexDelimiterFrame {
   readonly startOffset: number;
 }
 
+/**
+ * Command arguments that are identifiers/annotations rather than TeX math.
+ * Snippet expansion is deliberately suppressed while the cursor is in one of
+ * these arguments, even when the command itself appears in a math environment.
+ */
+export type LatexSnippetSuppressionCommand = 'label' | 'tag';
+
+export interface LatexSnippetSuppressionFrame {
+  readonly command: LatexSnippetSuppressionCommand;
+  /** Brace depth including the command's outer mandatory argument. */
+  readonly braceDepth: number;
+}
+
+export interface LatexPendingSnippetSuppression {
+  readonly command: LatexSnippetSuppressionCommand;
+  /** `\\tag*{...}` is valid; a second star or `\\label*` cancels the pending argument. */
+  readonly starConsumed: boolean;
+}
+
 /** Serializable state that can be cached at line boundaries by an adapter. */
 export interface LatexScanState {
   readonly environments: readonly LatexEnvironmentFrame[];
@@ -28,12 +47,19 @@ export interface LatexScanState {
   readonly inComment: boolean;
   readonly verbatimDelimiter: string | undefined;
   readonly verbatimEnvironment: string | undefined;
+  /** A `\\label`/`\\tag` command seen before its mandatory argument. */
+  readonly pendingSnippetSuppression: LatexPendingSnippetSuppression | undefined;
+  /** The currently open `\\label{...}`/`\\tag{...}` argument, if any. */
+  readonly snippetSuppression: LatexSnippetSuppressionFrame | undefined;
 }
 
 export interface LatexContext {
   readonly mathMode: LatexMathMode;
   readonly inComment: boolean;
   readonly inVerbatim: boolean;
+  /** True inside the mandatory argument of `\\label` or `\\tag`/`\\tag*`. */
+  readonly inSnippetSuppressedArgument: boolean;
+  readonly snippetSuppressionCommand: LatexSnippetSuppressionCommand | undefined;
   readonly environments: readonly string[];
   readonly matrixEnvironment: string | undefined;
 }

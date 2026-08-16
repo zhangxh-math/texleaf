@@ -14,9 +14,11 @@ import {
   isTeXLeafSourceUri,
   latexContextFromState,
   materializeReplacement,
+  optimisticRevisionStatus,
   parseReplacementTemplate,
   parseSnippetOptions,
   planAutoEnlarge,
+  planLeftRightEnter,
   planTabout,
   remapTabstopsForVsCode,
   replacementPartsToText,
@@ -79,6 +81,20 @@ test('portable snippet export preserves IDs containing namespace colons', () => 
 
   assert.equal(exported.id, 'namespace:item:variant');
   assert.equal(exported.trigger, 'nsx');
+});
+
+test('optimistic save acknowledgement requires the exact desired revision', () => {
+  const desiredA = 'a'.repeat(64);
+  const overwrittenB = 'b'.repeat(64);
+  assert.equal(
+    optimisticRevisionStatus(desiredA, desiredA),
+    'committed',
+  );
+  assert.equal(
+    optimisticRevisionStatus(desiredA, overwrittenB),
+    'changed',
+    'a later B write must not be acknowledged as the successful A save',
+  );
 });
 
 test('serial task queue orders reload epochs and recovers after failure', async () => {
@@ -261,6 +277,8 @@ function latexContext(mathMode: LatexContext['mathMode']): LatexContext {
     mathMode,
     inComment: false,
     inVerbatim: false,
+    inSnippetSuppressedArgument: false,
+    snippetSuppressionCommand: undefined,
     environments: [],
     matrixEnvironment: undefined,
   };
@@ -396,6 +414,54 @@ test('segment scanner carries incremental comment, delimiter, and environment st
   assert.equal(latexContextFromState(environment).matrixEnvironment, 'matrix');
   const environmentClosed = scanLatexSegment('\\end{matrix}', environment, 15);
   assert.equal(latexContextFromState(environmentClosed).mathMode, 'text');
+});
+
+test('LaTeX context suppresses snippets only inside label and tag arguments', () => {
+  const equationLabel = scanLatexContext(String.raw`\begin{equation}\label{;a`);
+  assert.equal(equationLabel.mathMode, 'block');
+  assert.equal(equationLabel.inSnippetSuppressedArgument, true);
+  assert.equal(equationLabel.snippetSuppressionCommand, 'label');
+
+  const afterLabel = scanLatexContext(String.raw`\begin{equation}\label{eq:a};a`);
+  assert.equal(afterLabel.mathMode, 'block');
+  assert.equal(afterLabel.inSnippetSuppressedArgument, false);
+  assert.equal(afterLabel.snippetSuppressionCommand, undefined);
+
+  const starredTag = scanLatexContext(String.raw`\begin{equation}\tag* {row {;a`);
+  assert.equal(starredTag.mathMode, 'block');
+  assert.equal(starredTag.inSnippetSuppressedArgument, true);
+  assert.equal(starredTag.snippetSuppressionCommand, 'tag');
+
+  // Escaped braces are label content, not structure; the unescaped brace closes it.
+  assert.equal(
+    scanLatexContext(String.raw`\begin{equation}\label{eq\};a`).inSnippetSuppressedArgument,
+    true,
+  );
+  assert.equal(
+    scanLatexContext(String.raw`\begin{equation}\label{eq\}};a`).inSnippetSuppressedArgument,
+    false,
+  );
+
+  // An escaped slash does not introduce a real `\\label` command.
+  assert.equal(scanLatexContext(String.raw`\\label{;a`).inSnippetSuppressedArgument, false);
+  assert.equal(scanLatexContext(String.raw`\label*{;a`).inSnippetSuppressedArgument, false);
+});
+
+test('segment scanner carries pending and multiline label/tag argument state', () => {
+  const pending = scanLatexSegment(String.raw`\tag* % explanation` + '\n');
+  assert.equal(pending.pendingSnippetSuppression?.command, 'tag');
+  assert.equal(pending.pendingSnippetSuppression?.starConsumed, true);
+
+  const nested = scanLatexSegment('  {row {;a', pending, 20);
+  const nestedContext = latexContextFromState(nested);
+  assert.equal(nestedContext.mathMode, 'text');
+  assert.equal(nestedContext.inSnippetSuppressedArgument, true);
+  assert.equal(nested.snippetSuppression?.braceDepth, 2);
+
+  const stillInside = scanLatexSegment('}\n', nested, 30);
+  assert.equal(latexContextFromState(stillInside).inSnippetSuppressedArgument, true);
+  const closed = scanLatexSegment('} trailing', stillInside, 32);
+  assert.equal(latexContextFromState(closed).inSnippetSuppressedArgument, false);
 });
 
 test('full-region scanner returns exact closed and EOF-unclosed UTF-16 spans', () => {
@@ -595,6 +661,52 @@ test('matcher enforces math modes, activation, visual, disabled, and excluded co
   assert.equal(activation.match({ textBefore: 'q', context: verbatimContext }), undefined);
 });
 
+test('matcher blocks automatic and manual snippets in label/tag arguments only', () => {
+  const matcher = matcherFor([
+    { id: 'alpha', trigger: ';a', replacement: '\\alpha', options: 'mA' },
+  ]);
+
+  for (const source of [
+    String.raw`\begin{equation}\label{;a`,
+    String.raw`\begin{equation}\tag{;a`,
+    String.raw`\begin{equation}\tag*{nested{;a`,
+  ]) {
+    const context = scanLatexContext(source);
+    assert.equal(context.mathMode, 'block');
+    assert.equal(context.inSnippetSuppressedArgument, true);
+    assert.equal(
+      matcher.match({ textBefore: ';a', context, activation: 'auto' }),
+      undefined,
+    );
+    assert.equal(
+      matcher.match({ textBefore: ';a', context, activation: 'manual' }),
+      undefined,
+    );
+  }
+
+  const surroundingEquation = scanLatexContext(
+    String.raw`\begin{equation}\label{eq:alpha};a`,
+  );
+  assert.equal(surroundingEquation.mathMode, 'block');
+  assert.equal(surroundingEquation.inSnippetSuppressedArgument, false);
+  assert.equal(
+    matcher.match({
+      textBefore: ';a',
+      context: surroundingEquation,
+      activation: 'auto',
+    })?.snippet.id,
+    'alpha',
+  );
+  assert.equal(
+    matcher.match({
+      textBefore: ';a',
+      context: surroundingEquation,
+      activation: 'manual',
+    })?.snippet.id,
+    'alpha',
+  );
+});
+
 test('matcher uses configured word-delimiter semantics for option w', () => {
   const defaultMatcher = matcherFor([
     { id: 'word', trigger: 'sin', replacement: '\\sin', options: 'w' },
@@ -725,6 +837,133 @@ test('Tabout exits a closed math region only when its remaining content is white
 
   const explicit = planTabout('abc )', 0, { innerEnd: 5, outerEnd: 5 });
   assert.equal(explicit?.to, 5);
+});
+
+function cursorMarked(value: string): { text: string; offset: number } {
+  const marker = '<CURSOR>';
+  const offset = value.indexOf(marker);
+  assert.notEqual(offset, -1, 'test fixture must contain a cursor marker');
+  return {
+    text: `${value.slice(0, offset)}${value.slice(offset + marker.length)}`,
+    offset,
+  };
+}
+
+function applyLeftRightEnterPlan(
+  text: string,
+  plan: NonNullable<ReturnType<typeof planLeftRightEnter>>,
+): string {
+  return `${text.slice(0, plan.insertionOffset)}${plan.insertionText}${text.slice(plan.insertionOffset)}`;
+}
+
+test('left/right Enter splits a top-level scalable pair with the current row indentation', () => {
+  const fixture = cursorMarked(String.raw`\begin{align}
+  x &= \left(a + <CURSOR>b\right)
+\end{align}`);
+  const plan = planLeftRightEnter(fixture.text, fixture.offset);
+  assert.ok(plan);
+  assert.equal(plan.environmentName, 'align');
+  assert.equal(plan.openingDelimiter, '(');
+  assert.equal(plan.closingDelimiter, ')');
+  assert.equal(plan.insertionOffset, fixture.offset);
+  assert.equal(
+    plan.insertionText,
+    `${String.raw`\right.\\`}\n  ${String.raw`\left.`}`,
+  );
+  assert.equal(plan.cursorOffset, fixture.offset + plan.insertionText.length);
+  assert.equal(
+    applyLeftRightEnterPlan(fixture.text, plan),
+    String.raw`\begin{align}
+  x &= \left(a + \right.\\
+  \left.b\right)
+\end{align}`,
+  );
+});
+
+test('left/right Enter preserves CRLF and supports starred and command delimiters', () => {
+  const fixture = cursorMarked(
+    String.raw`\begin{align*}
+	F &= \left\langle u,<CURSOR>v \right\rangle
+\end{align*}`.replaceAll('\n', '\r\n'),
+  );
+  const plan = planLeftRightEnter(fixture.text, fixture.offset, { eol: '\r\n' });
+  assert.ok(plan);
+  assert.equal(plan.environmentName, 'align*');
+  assert.equal(plan.openingDelimiter, String.raw`\langle`);
+  assert.equal(plan.closingDelimiter, String.raw`\rangle`);
+  assert.equal(
+    plan.insertionText,
+    `${String.raw`\right.\\`}\r\n\t${String.raw`\left.`}`,
+  );
+});
+
+test('left/right Enter works in equation and chooses an innermost aligned environment', () => {
+  const equation = cursorMarked(
+    String.raw`\begin{equation}\left[x<CURSOR>+y\right]\end{equation}`,
+  );
+  assert.equal(
+    planLeftRightEnter(equation.text, equation.offset)?.environmentName,
+    'equation',
+  );
+
+  const aligned = cursorMarked(String.raw`\begin{equation}
+  \begin{aligned}
+    f &= \left(x<CURSOR>+y\right)
+  \end{aligned}
+\end{equation}`);
+  assert.equal(
+    planLeftRightEnter(aligned.text, aligned.offset)?.environmentName,
+    'aligned',
+  );
+});
+
+test('left/right Enter allows completed nested pairs on one side of the cursor', () => {
+  const fixture = cursorMarked(String.raw`\begin{align}
+  x &= \left(\left[a\right] + <CURSOR>b\right)
+\end{align}`);
+  assert.ok(planLeftRightEnter(fixture.text, fixture.offset));
+});
+
+test('left/right Enter declines cursor-crossing nested pairs and unsafe TeX boundaries', () => {
+  const unsafeFixtures = [
+    // Both the inner and outer pair cross the requested row boundary.
+    String.raw`\begin{align}\left(a + \left[b<CURSOR>+c\right]\right)\end{align}`,
+    // A braced macro argument may not be split with an alignment row command.
+    String.raw`\begin{align}\left(\frac{a<CURSOR>+b}{c}\right)\end{align}`,
+    // Alignment tabs and existing row separators already define row structure.
+    String.raw`\begin{align}\left(a & <CURSOR>b\right)\end{align}`,
+    String.raw`\begin{align}\left(a \\ <CURSOR>b\right)\end{align}`,
+    // A nested environment owns its own line structure.
+    String.raw`\begin{align}\left(a\begin{split}b<CURSOR>+c\end{split}\right)\end{align}`,
+    // The cursor is inside command syntax rather than mathematical content.
+    String.raw`\begin{align}\left(a + \fr<CURSOR>ac{b}{c}\right)\end{align}`,
+  ];
+  for (const source of unsafeFixtures) {
+    const fixture = cursorMarked(source);
+    assert.equal(planLeftRightEnter(fixture.text, fixture.offset), undefined, source);
+  }
+});
+
+test('left/right Enter ignores comment tokens and declines ordinary or malformed cases', () => {
+  const commentedToken = cursorMarked(String.raw`\begin{align}
+  x &= \left(a % fake \right)
+    + <CURSOR>b\right)
+\end{align}`);
+  assert.ok(planLeftRightEnter(commentedToken.text, commentedToken.offset));
+
+  const declined = [
+    String.raw`\begin{align}x + <CURSOR>y\end{align}`,
+    String.raw`\begin{align}\left(x+y\right) + <CURSOR>z\end{align}`,
+    String.raw`\begin{align}\left(x<CURSOR>+y\end{align}`,
+    String.raw`\[\left(x<CURSOR>+y\right)\]`,
+    String.raw`\begin{matrix}\left(x<CURSOR>+y\right)\end{matrix}`,
+    String.raw`\begin{align}\left(x % <CURSOR>comment
+      + y\right)\end{align}`,
+  ];
+  for (const source of declined) {
+    const fixture = cursorMarked(source);
+    assert.equal(planLeftRightEnter(fixture.text, fixture.offset), undefined, source);
+  }
 });
 
 function applyEnlargePlan(text: string, plan: EnlargeBracketPlan): string {

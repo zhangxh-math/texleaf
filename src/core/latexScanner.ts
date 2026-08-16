@@ -4,7 +4,10 @@ import {
   LatexEnvironmentFrame,
   LatexMathRegion,
   LatexMathMode,
+  LatexPendingSnippetSuppression,
   LatexScanState,
+  LatexSnippetSuppressionCommand,
+  LatexSnippetSuppressionFrame,
 } from './types';
 
 const BLOCK_MATH_ENVIRONMENTS = new Set([
@@ -56,6 +59,8 @@ interface MutableLatexScanState {
   inComment: boolean;
   verbatimDelimiter: string | undefined;
   verbatimEnvironment: string | undefined;
+  pendingSnippetSuppression: LatexPendingSnippetSuppression | undefined;
+  snippetSuppression: LatexSnippetSuppressionFrame | undefined;
 }
 
 export function createLatexScanState(): LatexScanState {
@@ -65,6 +70,8 @@ export function createLatexScanState(): LatexScanState {
     inComment: false,
     verbatimDelimiter: undefined,
     verbatimEnvironment: undefined,
+    pendingSnippetSuppression: undefined,
+    snippetSuppression: undefined,
   };
 }
 
@@ -76,6 +83,14 @@ function mutableCopy(state: LatexScanState | undefined): MutableLatexScanState {
     inComment: source.inComment,
     verbatimDelimiter: source.verbatimDelimiter,
     verbatimEnvironment: source.verbatimEnvironment,
+    pendingSnippetSuppression:
+      source.pendingSnippetSuppression === undefined
+        ? undefined
+        : { ...source.pendingSnippetSuppression },
+    snippetSuppression:
+      source.snippetSuppression === undefined
+        ? undefined
+        : { ...source.snippetSuppression },
   };
 }
 
@@ -86,7 +101,19 @@ function freezeState(state: MutableLatexScanState): LatexScanState {
     inComment: state.inComment,
     verbatimDelimiter: state.verbatimDelimiter,
     verbatimEnvironment: state.verbatimEnvironment,
+    pendingSnippetSuppression:
+      state.pendingSnippetSuppression === undefined
+        ? undefined
+        : { ...state.pendingSnippetSuppression },
+    snippetSuppression:
+      state.snippetSuppression === undefined
+        ? undefined
+        : { ...state.snippetSuppression },
   };
+}
+
+function snippetSuppressionCommand(command: string): LatexSnippetSuppressionCommand | undefined {
+  return command === 'label' || command === 'tag' ? command : undefined;
 }
 
 function normalizeEnvironmentName(name: string): string {
@@ -196,6 +223,80 @@ export function scanLatexSegment(
       continue;
     }
 
+    // `\\label{...}` and `\\tag{...}` contain identifiers/presentation text,
+    // not equation input. Keep their mandatory arguments opaque to the math
+    // scanner while still counting nested, unescaped braces. In particular,
+    // commands and dollar signs in a label must not corrupt the surrounding
+    // equation's delimiter/environment state.
+    if (state.snippetSuppression !== undefined) {
+      if (char === '%') {
+        state.inComment = true;
+        index += 1;
+        continue;
+      }
+      if (char === '\\') {
+        const { end } = readCommand(text, index);
+        index = Math.max(index + 1, end);
+        continue;
+      }
+      if (char === '{') {
+        state.snippetSuppression = {
+          ...state.snippetSuppression,
+          braceDepth: state.snippetSuppression.braceDepth + 1,
+        };
+        index += 1;
+        continue;
+      }
+      if (char === '}') {
+        const braceDepth = state.snippetSuppression.braceDepth - 1;
+        state.snippetSuppression =
+          braceDepth === 0
+            ? undefined
+            : { ...state.snippetSuppression, braceDepth };
+        index += 1;
+        continue;
+      }
+      index += 1;
+      continue;
+    }
+
+    // Whitespace and comments may separate a command from its mandatory
+    // argument. `\\tag` additionally accepts one optional star. Any other
+    // token means the command did not begin the protected braced argument.
+    if (state.pendingSnippetSuppression !== undefined) {
+      if (/\s/.test(char!)) {
+        index += 1;
+        continue;
+      }
+      if (char === '%') {
+        state.inComment = true;
+        index += 1;
+        continue;
+      }
+      if (
+        char === '*' &&
+        state.pendingSnippetSuppression.command === 'tag' &&
+        !state.pendingSnippetSuppression.starConsumed
+      ) {
+        state.pendingSnippetSuppression = {
+          command: 'tag',
+          starConsumed: true,
+        };
+        index += 1;
+        continue;
+      }
+      if (char === '{') {
+        state.snippetSuppression = {
+          command: state.pendingSnippetSuppression.command,
+          braceDepth: 1,
+        };
+        state.pendingSnippetSuppression = undefined;
+        index += 1;
+        continue;
+      }
+      state.pendingSnippetSuppression = undefined;
+    }
+
     if (char === '%') {
       state.inComment = true;
       index += 1;
@@ -205,6 +306,16 @@ export function scanLatexSegment(
     if (char === '\\') {
       const { command, end } = readCommand(text, index);
       const absoluteOffset = baseOffset + index;
+
+      const suppressedCommand = snippetSuppressionCommand(command);
+      if (suppressedCommand !== undefined) {
+        state.pendingSnippetSuppression = {
+          command: suppressedCommand,
+          starConsumed: false,
+        };
+        index = end;
+        continue;
+      }
 
       if (command === '(') {
         openDelimiter(state, 'paren', absoluteOffset);
@@ -316,6 +427,8 @@ export function latexContextFromState(state: LatexScanState): LatexContext {
     mathMode,
     inComment: state.inComment,
     inVerbatim: state.verbatimDelimiter !== undefined || state.verbatimEnvironment !== undefined,
+    inSnippetSuppressedArgument: state.snippetSuppression !== undefined,
+    snippetSuppressionCommand: state.snippetSuppression?.command,
     environments: state.environments.map((frame) => frame.name),
     matrixEnvironment,
   };

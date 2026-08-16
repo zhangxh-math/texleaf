@@ -65,3 +65,23 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## MathJax
+
+- 组件：`@mathjax/src` 4.1.3
+- 项目：https://www.mathjax.org/
+- 用途：在 TeXLeaf 的隔离后台 Worker 中把当前 LaTeX 公式排版为 SVG
+- 作者：MathJax Consortium
+- 许可证：Apache License 2.0
+
+## MathJax New Computer Modern Font
+
+- 组件：`@mathjax/mathjax-newcm-font` 4.1.3
+- 项目：https://github.com/mathjax/MathJax-fonts
+- 用途：MathJax SVG 输出所使用的本地字体数据
+- 作者：MathJax Consortium
+- 许可证：Apache License 2.0
+
+以上两个 MathJax 组件的完整 Apache-2.0 许可证文本随发行包保存在 [licenses/Apache-2.0.txt](licenses/Apache-2.0.txt)。TeXLeaf 没有修改这些依赖的源文件；发布时只把所需模块打进独立 worker bundle。
+
+TeXLeaf 的 Math Preview 是独立实现。开发过程中只研究了 Ultra Math Preview 的公开功能与架构，没有复制其源码、正则表达式、CSS、图标、动画、文档或测试，因此本发行包不包含 Ultra Math Preview 或 Hyperscopes Booster 的代码。

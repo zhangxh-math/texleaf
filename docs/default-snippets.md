@@ -1,15 +1,28 @@
 # TeXLeaf 默认片段速查
 
-这是一份 199 条工厂默认规则的入门速查，不是机器生成的完整清单。首次创建或运行 `TeXLeaf: 恢复默认片段` 时，这些规则会直接写入可编辑的全局 JSONC 文件；运行时没有另藏一份“内置片段”。要查看、搜索或修改当前实际规则，请打开全局文件、运行 `TeXLeaf: 搜索并插入片段`，或使用侧栏中的 TeXLeaf 片段库。
+这是一份 212 条工厂默认规则的入门速查，不是机器生成的完整清单。要查看、搜索或修改当前实际规则，请运行 `TeXLeaf: 管理 Snippet 与模板`；快速插入可用 `TeXLeaf: 搜索并插入片段` 或侧栏。高级 JSONC 后端仍保存完整库，但不是日常管理入口。
 
 ## 数学分隔符
 
 | Trigger | Replacement | 选项 | 行为 |
 | --- | --- | --- | --- |
-| `mk` | `\(@0\)` | `tA` | 在文本模式快速进入行内数学，光标停在内部。 |
+| `lm` | `\(@0\)` | `tA` | 在文本模式快速进入行内数学，光标停在内部。 |
 | `dm` | `\[` 换行 `@0` 换行 `\]` | `tAw` | 在文本模式创建块级数学；`w` 避免在单词内部误触发，多行内容会继承当前缩进。 |
 
 从自动触发、手动触发或补全列表插入 `dm` 时，VS Code 都会按插入位置调整续行缩进，不再把内部行和结尾 `\]` 强制放到第 0 列。
+
+## 独立文档模板
+
+四个长模板不计入上面的 212 条 Snippet 规则，而是保存在 Profile 的插件内部模板库：
+
+| Trigger | 模板 |
+| --- | --- |
+| `tmpa-cn` | 中文 `ctexart` 论文 |
+| `tmpa-en` | 英文 `article` 论文 |
+| `beamer-cn` | 中文 `ctexbeamer` 演示文稿 |
+| `beamer-en` | 英文 `beamer` 演示文稿 |
+
+它们只在已保存、除空白与完整 trigger 外没有其他内容的 `.tex` 文档中自动展开，并替换整份文档。`texleaf.autoSnippets` 关闭时不会自动展开；此时可在完整 trigger 后按 `Tab`。自动路径偶发未命中、原生 Suggest 已经打开时，精确 `Tab` 兜底仍优先选择 TeXLeaf 模板。按 `Ctrl+Shift+P` 运行 `TeXLeaf: 管理 TeX 模板` 可修改 trigger 和正文，或添加、复制、删除和恢复模板；保存后后续展开立即使用新内容。
 
 ## 高频数学结构
 
@@ -91,6 +104,22 @@ Visual 片段使用 `@{VISUAL}` 引用选择内容，并仍可加入 `@0` 等 ta
 - `Shift+Enter` 跳出当前环境。
 
 `Enter` 与 `Shift+Enter` 可以在刚由片段创建、仍处于 snippet 模式的 align/matrix 环境中工作；`Tab` 会先遵守活动 tabstop，结束 snippet 导航后再执行矩阵列操作。当前版本还会接住 LaTeX Workshop 转发的普通 Enter，使其在 Align 中仍按 TeXLeaf 行操作处理。
+
+从用户提供的 HSnips 文件中只加入了定理类环境这一组。为避免与正文单词和原生单词补全竞争，13 个 trigger 都显式带一个反斜杠；它们是文本模式、词边界、自动展开（`tAw`），完整输入后立即创建环境：
+
+| Trigger | Environment | Trigger | Environment |
+| --- | --- | --- | --- |
+| `\axm` | `axiom` | `\dfn` | `definition` |
+| `\lem` | `lemma` | `\prp` | `proposition` |
+| `\thm` | `theorem` | `\cor` | `corollary` |
+| `\clm` | `claim` | `\asm` | `assumption` |
+| `\exm` | `example` | `\exr` | `exercise` |
+| `\cnj` | `conjecture` | `\hyp` | `hypothesis` |
+| `\rmk` | `remark` |  |  |
+
+原生 Suggest 中，当前输入与 TeXLeaf trigger 精确相同时，该片段会优先显示并预选；因此 `\thm`、`\lem`、`\dfn`、`\cor` 等的精确候选会指向上表对应的完整环境，普通非精确候选仍使用 VS Code 的原生排序。自动展开、精确 Suggest 和 `Tab` 兜底使用同一条规则；模板、定理片段或 `dm` 若偶尔没有在键入后自动展开，直接按 `Tab` 也会走精确 TeXLeaf 片段，而不是接受一个相近的普通单词。
+
+在数学环境中的 `\label{...}`、`\tag{...}` 与 `\tag*{...}` 参数里，所有自动与手动数学片段都会暂时停用。因此 `\label{;a}` 会保持字面值；参数闭合后，外层 equation/align 中的 `;a` 仍可正常展开。
 
 ## 触发未发生时
 

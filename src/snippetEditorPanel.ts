@@ -1,10 +1,19 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 import {
   parse,
   type ParseError,
   printParseErrorCode,
 } from "jsonc-parser";
+import type {
+  ManagedSnippet,
+  ManagedSnippetLibrary,
+} from "./snippetRepository";
+import type {
+  ManagedTemplate,
+  ManagedTemplateCatalog,
+} from "./templateManager";
+import { renderSnippetManagerWebview } from "./snippetManagerWebview";
 
 export const OPEN_SNIPPET_EDITOR_COMMAND = "texleaf.openSnippetEditor";
 export const RESTORE_DEFAULT_SNIPPETS_COMMAND =
@@ -12,6 +21,7 @@ export const RESTORE_DEFAULT_SNIPPETS_COMMAND =
 
 const PANEL_VIEW_TYPE = "texleaf.snippetEditor";
 const MAX_EDITABLE_CHARACTERS = 10_000_000;
+const MANAGER_LOAD_TIMEOUT_MS = 15_000;
 const EMPTY_LIBRARY = `{
   "version": 1,
   "variables": {},
@@ -38,6 +48,19 @@ export interface SnippetEditorPanelOptions {
    * the same confirmation, backup, watcher, and reload implementation.
    */
   readonly onRestoreDefaults?: () => Promise<RestoreDefaultsResult>;
+  /** Structured, revisioned access used by the built-in manager UI. */
+  readonly onReadLibrary?: () => Promise<ManagedSnippetLibrary>;
+  readonly onReplaceLibrary?: (
+    model: Omit<ManagedSnippetLibrary, "revision">,
+    expectedRevision: string,
+  ) => Promise<ManagedSnippetLibrary>;
+  /** Atomic template catalog access. Template bodies never enter snippet JSONC. */
+  readonly onListTemplates?: () => Promise<ManagedTemplateCatalog>;
+  readonly onReplaceTemplates?: (
+    templates: readonly ManagedTemplate[],
+    expectedRevision: string,
+  ) => Promise<ManagedTemplateCatalog>;
+  readonly onRestoreTemplates?: () => Promise<ManagedTemplateCatalog>;
 }
 
 export interface RestoreDefaultsResult {
@@ -54,18 +77,44 @@ interface PanelSession {
   readonly subscriptions: vscode.Disposable[];
   ready: boolean;
   webviewDirty: boolean;
-  lastLoaded: FileContent | undefined;
+  snippetRevision: string | undefined;
+  templateRevision: string | undefined;
+  initialTab: "snippets" | "templates";
 }
 
 type WebviewMessage =
-  | { readonly type: "ready" }
-  | { readonly type: "dirty"; readonly dirty: boolean }
-  | { readonly type: "reload"; readonly requestId: string }
-  | { readonly type: "restoreDefaults"; readonly requestId: string }
+  | { readonly protocol: 1; readonly type: "ready" }
+  | { readonly protocol: 1; readonly type: "dirty"; readonly dirty: boolean }
+  | { readonly protocol: 1; readonly type: "reload"; readonly requestId: string }
   | {
-      readonly type: "save";
+      readonly protocol: 1;
+      readonly type: "restoreDefaults";
       readonly requestId: string;
-      readonly text: string;
+    }
+  | {
+      readonly protocol: 1;
+      readonly type: "saveLibrary";
+      readonly requestId: string;
+      readonly expectedRevision: string;
+      readonly library: Omit<ManagedSnippetLibrary, "revision">;
+    }
+  | {
+      readonly protocol: 1;
+      readonly type: "saveTemplates";
+      readonly requestId: string;
+      readonly expectedRevision: string;
+      readonly templates: readonly ManagedTemplate[];
+    }
+  | {
+      readonly protocol: 1;
+      readonly type: "runCommand";
+      readonly requestId: string;
+      readonly command: "import" | "export" | "openJson";
+    }
+  | {
+      readonly protocol: 1;
+      readonly type: "restoreTemplates";
+      readonly requestId: string;
     };
 
 interface FileContent {
@@ -117,7 +166,7 @@ export class SnippetEditorPanel implements vscode.Disposable {
     );
   }
 
-  public async open(): Promise<void> {
+  public async open(initialTab: "snippets" | "templates" = "snippets"): Promise<void> {
     if (this.disposed) {
       throw new Error("SnippetEditorPanel has already been disposed.");
     }
@@ -129,16 +178,31 @@ export class SnippetEditorPanel implements vscode.Disposable {
     const key = uri.toString();
     const existing = this.sessions.get(key);
     if (existing !== undefined) {
+      existing.initialTab = initialTab;
       existing.panel.reveal(vscode.ViewColumn.Active, true);
+      await postMessage(existing, {
+        protocol: 1,
+        type: "activateTab",
+        tab: initialTab,
+      });
       return;
     }
 
     if (this.opening !== undefined) {
       await this.opening;
+      const opened = this.sessions.get(key);
+      if (opened !== undefined) {
+        opened.initialTab = initialTab;
+        await postMessage(opened, {
+          protocol: 1,
+          type: "activateTab",
+          tab: initialTab,
+        });
+      }
       return;
     }
 
-    const opening = this.openSession(uri, key);
+    const opening = this.openSession(uri, key, initialTab);
     this.opening = opening;
     try {
       await opening;
@@ -166,7 +230,11 @@ export class SnippetEditorPanel implements vscode.Disposable {
     );
   }
 
-  private async openSession(uri: vscode.Uri, key: string): Promise<void> {
+  private async openSession(
+    uri: vscode.Uri,
+    key: string,
+    initialTab: "snippets" | "templates",
+  ): Promise<void> {
     try {
       await this.options.onWillOpen?.();
     } catch (error) {
@@ -182,7 +250,7 @@ export class SnippetEditorPanel implements vscode.Disposable {
 
     const panel = vscode.window.createWebviewPanel(
       PANEL_VIEW_TYPE,
-      "TeXLeaf 全局片段",
+      "TeXLeaf Snippet 与模板管理器",
       vscode.ViewColumn.Active,
       {
         enableScripts: true,
@@ -198,7 +266,9 @@ export class SnippetEditorPanel implements vscode.Disposable {
       subscriptions: [],
       ready: false,
       webviewDirty: false,
-      lastLoaded: undefined,
+      snippetRevision: undefined,
+      templateRevision: undefined,
+      initialTab,
     };
     this.sessions.set(key, session);
 
@@ -206,6 +276,43 @@ export class SnippetEditorPanel implements vscode.Disposable {
       panel.webview.onDidReceiveMessage((message: unknown) => {
         const parsed = parseWebviewMessage(message);
         if (parsed === undefined) {
+          if (
+            isRecord(message) &&
+            message.protocol === 1 &&
+            typeof message.type === "string" &&
+            message.type !== "ready" &&
+            message.type !== "dirty" &&
+            isRequestId(message.requestId)
+          ) {
+            void postMessage(session, {
+              protocol: 1,
+              type: "error",
+              requestId: message.requestId,
+              message:
+                "请求内容未通过安全校验（字段类型、数量或大小超出限制），未写入任何更改。",
+            });
+          }
+          return;
+        }
+        // The Webview retries `ready` until it receives the first content
+        // payload. Claim the handshake synchronously so retries cannot enqueue
+        // an unbounded number of duplicate initial loads behind a slow remote
+        // file-system read.
+        if (parsed.type === "ready") {
+          if (!this.isCurrentSession(session) || session.ready) {
+            return;
+          }
+          session.ready = true;
+          void this.enqueueOperation(
+            () => this.loadIntoPanel(session, null),
+            async (error: unknown) => {
+              await postMessage(session, {
+                protocol: 1,
+                type: "error",
+                message: `初始载入失败：${errorMessage(error)}`,
+              });
+            },
+          );
           return;
         }
         // Dirty notifications are intentionally applied immediately instead
@@ -251,26 +358,31 @@ export class SnippetEditorPanel implements vscode.Disposable {
     if (!this.isCurrentSession(session)) {
       return;
     }
-    if (message.type !== "ready" && !session.ready) {
+    if (!session.ready) {
       return;
     }
 
     switch (message.type) {
-      case "ready":
-        if (session.ready) {
-          return;
-        }
-        session.ready = true;
-        await this.loadIntoPanel(session, null);
-        return;
       case "reload":
         await this.loadIntoPanel(session, message.requestId);
         return;
       case "restoreDefaults":
         await this.performRestoreDefaults(session, message.requestId);
         return;
-      case "save":
-        await this.saveFromPanel(session, message.requestId, message.text);
+      case "saveLibrary":
+        await this.saveLibraryFromPanel(session, message);
+        return;
+      case "saveTemplates":
+        await this.saveTemplatesFromPanel(session, message);
+        return;
+      case "runCommand":
+        await this.runManagerCommand(session, message);
+        return;
+      case "restoreTemplates":
+        await this.restoreTemplatesFromPanel(session, message.requestId);
+        return;
+      case "ready":
+        return;
     }
   }
 
@@ -279,15 +391,35 @@ export class SnippetEditorPanel implements vscode.Disposable {
     requestId: string | null,
   ): Promise<void> {
     try {
-      const content = await readSnippetFile(session.uri);
-      session.lastLoaded = content;
+      const contentPromise = readSnippetFile(session.uri);
+      const [content, library, templates] = await withTimeout(
+        Promise.all([
+          contentPromise,
+          this.options.onReadLibrary === undefined
+            ? contentPromise.then((loaded) =>
+                parseManagedSnippetLibrary(loaded.text, loaded.exists),
+              )
+            : this.options.onReadLibrary(),
+          this.options.onListTemplates === undefined
+            ? Promise.resolve({ revision: "unavailable", templates: [] })
+            : this.options.onListTemplates(),
+        ]),
+        MANAGER_LOAD_TIMEOUT_MS,
+        "载入内部 Snippet/模板库超时",
+      );
+      session.snippetRevision = library.revision;
+      session.templateRevision = templates.revision;
       session.webviewDirty = false;
       await postMessage(session, {
         type: "content",
+        protocol: 1,
         requestId,
-        text: content.text,
         exists: content.exists,
         location: formatSnippetLocation(session.uri),
+        library,
+        templateCatalog: templates,
+        templatesAvailable: this.options.onReplaceTemplates !== undefined,
+        initialTab: session.initialTab,
       });
     } catch (error) {
       await postMessage(session, {
@@ -301,130 +433,169 @@ export class SnippetEditorPanel implements vscode.Disposable {
     }
   }
 
-  private async saveFromPanel(
+  private async saveLibraryFromPanel(
+    session: PanelSession,
+    message: Extract<WebviewMessage, { readonly type: "saveLibrary" }>,
+  ): Promise<void> {
+    if (
+      session.snippetRevision === undefined ||
+      message.expectedRevision !== session.snippetRevision
+    ) {
+      await postManagerResult(session, message.requestId, "saveLibrary", false, {
+        tone: "warning",
+        message: "片段库版本已变化。请先重新加载，再合并修改。",
+      });
+      return;
+    }
+
+    const validation = validateManagedSnippetLibrary(message.library);
+    if (validation !== undefined) {
+      await postManagerResult(session, message.requestId, "saveLibrary", false, {
+        tone: "error",
+        message: `${validation} 未写入任何更改。`,
+      });
+      return;
+    }
+    const replace = this.options.onReplaceLibrary;
+    if (replace === undefined) {
+      await postManagerResult(session, message.requestId, "saveLibrary", false, {
+        tone: "error",
+        message: "结构化片段存储尚未完成初始化，请重新加载 VS Code 窗口。",
+      });
+      return;
+    }
+
+    try {
+      const saved = await replace(message.library, message.expectedRevision);
+      session.snippetRevision = saved.revision;
+      await this.options.onDidSave?.(session.uri);
+      await postManagerResult(session, message.requestId, "saveLibrary", true, {
+        tone: "success",
+        message: `已保存并启用 ${saved.snippets.length} 条片段。`,
+        library: saved,
+      });
+    } catch (error) {
+      await postManagerResult(session, message.requestId, "saveLibrary", false, {
+        tone: "error",
+        message: `保存片段失败：${errorMessage(error)}`,
+      });
+    }
+  }
+
+  private async saveTemplatesFromPanel(
+    session: PanelSession,
+    message: Extract<WebviewMessage, { readonly type: "saveTemplates" }>,
+  ): Promise<void> {
+    if (
+      session.templateRevision === undefined ||
+      message.expectedRevision !== session.templateRevision
+    ) {
+      await postManagerResult(session, message.requestId, "saveTemplates", false, {
+        tone: "warning",
+        message: "模板目录已在其他窗口发生变化。请先重新加载。",
+      });
+      return;
+    }
+    const validation = validateManagedTemplates(message.templates);
+    if (validation !== undefined) {
+      await postManagerResult(session, message.requestId, "saveTemplates", false, {
+        tone: "error",
+        message: `${validation} 未写入任何更改。`,
+      });
+      return;
+    }
+    const replace = this.options.onReplaceTemplates;
+    if (replace === undefined) {
+      await postManagerResult(session, message.requestId, "saveTemplates", false, {
+        tone: "error",
+        message: "此版本尚未启用模板目录写入功能。",
+      });
+      return;
+    }
+    try {
+      const saved = await replace(message.templates, message.expectedRevision);
+      session.templateRevision = saved.revision;
+      await postManagerResult(session, message.requestId, "saveTemplates", true, {
+        tone: "success",
+        message: `已保存 ${saved.templates.length} 个模板。`,
+        templateCatalog: saved,
+      });
+    } catch (error) {
+      await postManagerResult(session, message.requestId, "saveTemplates", false, {
+        tone: "error",
+        message: `保存模板失败：${errorMessage(error)}`,
+      });
+    }
+  }
+
+  private async runManagerCommand(
+    session: PanelSession,
+    message: Extract<WebviewMessage, { readonly type: "runCommand" }>,
+  ): Promise<void> {
+    if (session.webviewDirty && message.command !== "export") {
+      await postManagerResult(session, message.requestId, "runCommand", false, {
+        tone: "warning",
+        message: "请先保存或撤销管理器中的修改，再执行该操作。",
+      });
+      return;
+    }
+    const commandId = {
+      import: "texleaf.importSnippets",
+      export: "texleaf.exportSnippets",
+      openJson: "texleaf.openSnippetFile",
+    }[message.command];
+    try {
+      await vscode.commands.executeCommand(commandId);
+      if (message.command === "import") {
+        await this.loadIntoPanel(session, null);
+      }
+      await postManagerResult(session, message.requestId, "runCommand", true, {
+        tone: "success",
+        message:
+          message.command === "export"
+            ? "导出操作已完成或取消。"
+            : message.command === "import"
+              ? "导入操作已完成或取消；管理器已重新载入。"
+              : "已在文本编辑器中打开高级 JSONC 配置。",
+      });
+    } catch (error) {
+      await postManagerResult(session, message.requestId, "runCommand", false, {
+        tone: "error",
+        message: `命令执行失败：${errorMessage(error)}`,
+      });
+    }
+  }
+
+  private async restoreTemplatesFromPanel(
     session: PanelSession,
     requestId: string,
-    text: string,
   ): Promise<void> {
-    if (text.length > MAX_EDITABLE_CHARACTERS) {
-      await postMessage(session, {
-        type: "result",
-        requestId,
-        action: "save",
-        ok: false,
-        tone: "error",
-        message: "内容超过 1000 万字符，未写入文件。",
-      });
-      return;
-    }
-
-    if (session.lastLoaded === undefined) {
-      await postMessage(session, {
-        type: "result",
-        requestId,
-        action: "save",
-        ok: false,
-        tone: "error",
-        message: "尚未成功读取磁盘文件，未保存。请先重新加载。",
-      });
-      return;
-    }
-
-    const validationProblem = validateSnippetEditorText(text);
-    if (validationProblem !== undefined) {
-      await postMessage(session, {
-        type: "result",
-        requestId,
-        action: "save",
-        ok: false,
-        tone: "error",
-        message: `${validationProblem} 文件尚未写入，请在面板中修正后重试。`,
-      });
-      return;
-    }
-
-    const dirtyDocument = vscode.workspace.textDocuments.find(
-      (document) =>
-        document.isDirty && document.uri.toString() === session.uri.toString(),
-    );
-    if (dirtyDocument !== undefined) {
-      await postMessage(session, {
-        type: "result",
-        requestId,
-        action: "save",
-        ok: false,
-        tone: "error",
-        message: "该文件在文本编辑器中还有未保存的更改；请先处理这些更改。",
-      });
-      return;
-    }
-
-    try {
-      const diskContent = await readSnippetFile(session.uri);
-      if (
-        diskContent.exists !== session.lastLoaded.exists ||
-        diskContent.text !== session.lastLoaded.text
-      ) {
-        await postMessage(session, {
-          type: "result",
-          requestId,
-          action: "save",
-          ok: false,
-          tone: "error",
-          message: "磁盘文件已在编辑器外发生变化。请先从磁盘重新加载，再合并修改。",
-        });
-        return;
-      }
-    } catch (error) {
-      await postMessage(session, {
-        type: "result",
-        requestId,
-        action: "save",
-        ok: false,
-        tone: "error",
-        message: `无法确认磁盘文件状态，未保存：${errorMessage(error)}`,
-      });
-      return;
-    }
-
-    try {
-      await vscode.workspace.fs.createDirectory(session.directory);
-      await vscode.workspace.fs.writeFile(
-        session.uri,
-        new TextEncoder().encode(text),
-      );
-      session.lastLoaded = { text, exists: true };
-      session.webviewDirty = false;
-    } catch (error) {
-      await postMessage(session, {
-        type: "result",
-        requestId,
-        action: "save",
-        ok: false,
-        tone: "error",
-        message: `保存失败：${errorMessage(error)}`,
-      });
-      return;
-    }
-
-    try {
-      await this.options.onDidSave?.(session.uri);
-      await postMessage(session, {
-        type: "result",
-        requestId,
-        action: "save",
-        ok: true,
-        tone: "success",
-        message: "已保存并重新加载 TeXLeaf 片段。",
-      });
-    } catch (error) {
-      await postMessage(session, {
-        type: "result",
-        requestId,
-        action: "save",
-        ok: true,
+    if (session.webviewDirty) {
+      await postManagerResult(session, requestId, "restoreTemplates", false, {
         tone: "warning",
-        message: `文件已保存，但片段重新加载失败：${errorMessage(error)}`,
+        message: "请先保存或撤销未保存的修改，再恢复默认模板。",
+      });
+      return;
+    }
+    if (this.options.onRestoreTemplates === undefined) {
+      await postManagerResult(session, requestId, "restoreTemplates", false, {
+        tone: "error",
+        message: "恢复默认模板功能尚未完成初始化。",
+      });
+      return;
+    }
+    try {
+      const catalog = await this.options.onRestoreTemplates();
+      session.templateRevision = catalog.revision;
+      await postManagerResult(session, requestId, "restoreTemplates", true, {
+        tone: "success",
+        message: `已恢复 ${catalog.templates.length} 个默认模板。`,
+        templateCatalog: catalog,
+      });
+    } catch (error) {
+      await postManagerResult(session, requestId, "restoreTemplates", false, {
+        tone: "error",
+        message: `恢复默认模板失败：${errorMessage(error)}`,
       });
     }
   }
@@ -586,40 +757,6 @@ export class SnippetEditorPanel implements vscode.Disposable {
   }
 }
 
-function validateSnippetEditorText(text: string): string | undefined {
-  const errors: ParseError[] = [];
-  const value = parse(text, errors, {
-    allowTrailingComma: true,
-    disallowComments: false,
-  }) as unknown;
-  const firstError = errors[0];
-  if (firstError !== undefined) {
-    return `JSONC 解析失败：${printParseErrorCode(firstError.error)}（偏移 ${firstError.offset}）。`;
-  }
-  if (Array.isArray(value)) {
-    return undefined;
-  }
-  if (typeof value !== "object" || value === null) {
-    return "片段库顶层必须是数组，或包含 snippets 的对象。";
-  }
-  const snippets = (value as Record<string, unknown>).snippets;
-  if (Array.isArray(snippets)) {
-    return undefined;
-  }
-  if (typeof snippets === "string") {
-    const nestedErrors: ParseError[] = [];
-    const nested = parse(snippets, nestedErrors, {
-      allowTrailingComma: true,
-      disallowComments: false,
-    }) as unknown;
-    if (nestedErrors.length === 0 && Array.isArray(nested)) {
-      return undefined;
-    }
-    return "旧格式 snippets 字符串必须包含有效的 JSON/JSONC 数组。";
-  }
-  return "片段库对象必须包含 snippets 数组。";
-}
-
 /**
  * Registers the command and puts both the command and panel owner into the
  * extension context. The package manifest still needs to contribute the
@@ -632,7 +769,9 @@ export function registerSnippetEditorPanel(
   const editor = new SnippetEditorPanel(context.globalStorageUri, options);
   context.subscriptions.push(
     editor,
-    vscode.commands.registerCommand(OPEN_SNIPPET_EDITOR_COMMAND, () => editor.open()),
+    vscode.commands.registerCommand(OPEN_SNIPPET_EDITOR_COMMAND, (tab: unknown) =>
+      editor.open(tab === "templates" ? "templates" : "snippets"),
+    ),
     vscode.commands.registerCommand(RESTORE_DEFAULT_SNIPPETS_COMMAND, () =>
       editor.restoreDefaults(),
     ),
@@ -696,50 +835,452 @@ async function showRestoreSuccessNotification(
   }
 }
 
+function parseManagedSnippetLibrary(
+  text: string,
+  exists: boolean,
+): ManagedSnippetLibrary {
+  const errors: ParseError[] = [];
+  const value = parse(text, errors, {
+    allowTrailingComma: true,
+    disallowComments: false,
+  }) as unknown;
+  const firstError = errors[0];
+  if (firstError !== undefined) {
+    throw new Error(
+      `JSONC 解析失败：${printParseErrorCode(firstError.error)}（偏移 ${firstError.offset}）。`,
+    );
+  }
+  const root = Array.isArray(value)
+    ? { snippets: value, variables: {} }
+    : isRecord(value)
+      ? value
+      : undefined;
+  if (root === undefined || !Array.isArray(root.snippets)) {
+    throw new Error("片段库必须是数组，或包含 snippets 数组的对象。");
+  }
+  const variables: Record<string, string> = {};
+  if (isRecord(root.variables)) {
+    for (const [name, variableValue] of Object.entries(root.variables)) {
+      if (typeof variableValue === "string") {
+        variables[name] = variableValue;
+      }
+    }
+  }
+  const snippets: ManagedSnippet[] = [];
+  for (let index = 0; index < root.snippets.length; index += 1) {
+    const raw = root.snippets[index];
+    if (
+      !isRecord(raw) ||
+      typeof raw.trigger !== "string" ||
+      typeof raw.replacement !== "string"
+    ) {
+      continue;
+    }
+    const generatedId = `managed.${index}.${createHash("sha256")
+      .update(`${raw.trigger}\0${raw.replacement}`)
+      .digest("hex")
+      .slice(0, 12)}`;
+    snippets.push({
+      id:
+        typeof raw.id === "string" && raw.id.length > 0 ? raw.id : generatedId,
+      trigger: raw.trigger,
+      replacement: raw.replacement,
+      options: typeof raw.options === "string" ? raw.options : "",
+      priority:
+        typeof raw.priority === "number" && Number.isFinite(raw.priority)
+          ? raw.priority
+          : 0,
+      ...(typeof raw.description === "string"
+        ? { description: raw.description }
+        : {}),
+      category: typeof raw.category === "string" ? raw.category : "User",
+      ...(typeof raw.flags === "string" ? { flags: raw.flags } : {}),
+      syntaxVersion:
+        raw.syntaxVersion === 1 || raw.version === 1 ? (1 as const) : (2 as const),
+      enabled: raw.enabled !== false,
+    });
+  }
+  const defaultsRevision = root.defaultsRevision;
+  return {
+    revision: `${exists ? "file" : "new"}:${createHash("sha256")
+      .update(text)
+      .digest("base64url")}`,
+    ...(typeof defaultsRevision === "number" &&
+    Number.isInteger(defaultsRevision)
+      ? { defaultsRevision }
+      : {}),
+    variables,
+    snippets,
+  };
+}
+
+function validateManagedSnippetLibrary(
+  library: Omit<ManagedSnippetLibrary, "revision">,
+): string | undefined {
+  if (JSON.stringify(library).length > MAX_EDITABLE_CHARACTERS) {
+    return "片段库超过 1000 万字符安全上限。";
+  }
+  const ids = new Set<string>();
+  for (let index = 0; index < library.snippets.length; index += 1) {
+    const snippet = library.snippets[index]!;
+    if (ids.has(snippet.id)) {
+      return `第 ${index + 1} 条片段的 id 与其他片段重复：${snippet.id}。`;
+    }
+    ids.add(snippet.id);
+    const invalidOptions = [...snippet.options].filter(
+      (option) => !"tMmnrAvw".includes(option),
+    );
+    if (invalidOptions.length > 0) {
+      return `触发词 ${JSON.stringify(snippet.trigger)} 含未知 options：${invalidOptions.join("")}。`;
+    }
+    if (snippet.options.includes("r") && snippet.options.includes("v")) {
+      return `触发词 ${JSON.stringify(snippet.trigger)} 不能同时使用正则 r 与 Visual v。`;
+    }
+    if (snippet.options.includes("r")) {
+      try {
+        const regex = new RegExp(
+          `(?:${snippet.trigger})(?![\\s\\S])`,
+          snippet.flags ?? "",
+        );
+        if (regex.test("")) {
+          return `正则触发词 ${JSON.stringify(snippet.trigger)} 不能匹配空字符串。`;
+        }
+      } catch (error) {
+        return `正则触发词 ${JSON.stringify(snippet.trigger)} 无效：${errorMessage(error)}。`;
+      }
+    }
+  }
+  return undefined;
+}
+
+function validateManagedTemplates(
+  templates: readonly ManagedTemplate[],
+): string | undefined {
+  if (templates.length > 128) {
+    return "模板数量不能超过 128 个。";
+  }
+  if (new TextEncoder().encode(JSON.stringify(templates)).byteLength > 256 * 1024) {
+    return "模板目录超过 256 KiB 安全上限。";
+  }
+  const ids = new Set<string>();
+  const triggers = new Set<string>();
+  for (const template of templates) {
+    if (ids.has(template.id)) {
+      return `模板 id 重复：${template.id}。`;
+    }
+    ids.add(template.id);
+    if (triggers.has(template.trigger)) {
+      return `模板 trigger 重复：${template.trigger}。`;
+    }
+    triggers.add(template.trigger);
+  }
+  const ordered = [...triggers].sort(
+    (left, right) => left.length - right.length || left.localeCompare(right),
+  );
+  for (let index = 0; index < ordered.length; index += 1) {
+    const shorter = ordered[index]!;
+    for (let candidate = index + 1; candidate < ordered.length; candidate += 1) {
+      const longer = ordered[candidate]!;
+      if (longer.startsWith(shorter)) {
+        return `模板 trigger 前缀冲突：${JSON.stringify(shorter)} 会在 ${JSON.stringify(longer)} 输入完成前提前展开。`;
+      }
+    }
+  }
+  return undefined;
+}
+
+async function postManagerResult(
+  session: PanelSession,
+  requestId: string,
+  action:
+    | "saveLibrary"
+    | "saveTemplates"
+    | "runCommand"
+    | "restoreTemplates",
+  ok: boolean,
+  details: Readonly<Record<string, unknown>>,
+): Promise<void> {
+  await postMessage(session, {
+    protocol: 1,
+    type: "result",
+    requestId,
+    action,
+    ok,
+    ...details,
+  });
+}
+
 function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
-  if (!isRecord(value) || typeof value.type !== "string") {
+  if (
+    !isRecord(value) ||
+    value.protocol !== 1 ||
+    typeof value.type !== "string"
+  ) {
     return undefined;
   }
 
   switch (value.type) {
     case "ready":
-      return hasOnlyKeys(value, ["type"]) ? { type: "ready" } : undefined;
+      return hasOnlyKeys(value, ["protocol", "type"])
+        ? { protocol: 1, type: "ready" }
+        : undefined;
     case "dirty":
-      return hasOnlyKeys(value, ["type", "dirty"]) &&
+      return hasOnlyKeys(value, ["protocol", "type", "dirty"]) &&
         typeof value.dirty === "boolean"
-        ? { type: "dirty", dirty: value.dirty }
+        ? { protocol: 1, type: "dirty", dirty: value.dirty }
         : undefined;
     case "reload": {
       if (
-        !hasOnlyKeys(value, ["type", "requestId"]) ||
+        !hasOnlyKeys(value, ["protocol", "type", "requestId"]) ||
         !isRequestId(value.requestId)
       ) {
         return undefined;
       }
-      return { type: "reload", requestId: value.requestId };
+      return { protocol: 1, type: "reload", requestId: value.requestId };
     }
     case "restoreDefaults": {
       if (
-        !hasOnlyKeys(value, ["type", "requestId"]) ||
+        !hasOnlyKeys(value, ["protocol", "type", "requestId"]) ||
         !isRequestId(value.requestId)
       ) {
         return undefined;
       }
-      return { type: "restoreDefaults", requestId: value.requestId };
+      return {
+        protocol: 1,
+        type: "restoreDefaults",
+        requestId: value.requestId,
+      };
     }
-    case "save": {
+    case "saveLibrary": {
       if (
-        !hasOnlyKeys(value, ["type", "requestId", "text"]) ||
+        !hasOnlyKeys(value, [
+          "protocol",
+          "type",
+          "requestId",
+          "expectedRevision",
+          "library",
+        ]) ||
         !isRequestId(value.requestId) ||
-        typeof value.text !== "string"
+        !isRevision(value.expectedRevision)
       ) {
         return undefined;
       }
-      return { type: "save", requestId: value.requestId, text: value.text };
+      const library = parseManagedSnippetLibraryMessage(value.library);
+      return library === undefined
+        ? undefined
+        : {
+            protocol: 1,
+            type: "saveLibrary",
+            requestId: value.requestId,
+            expectedRevision: value.expectedRevision,
+            library,
+          };
+    }
+    case "saveTemplates": {
+      if (
+        !hasOnlyKeys(value, [
+          "protocol",
+          "type",
+          "requestId",
+          "expectedRevision",
+          "templates",
+        ]) ||
+        !isRequestId(value.requestId) ||
+        !isRevision(value.expectedRevision) ||
+        !Array.isArray(value.templates) ||
+        value.templates.length > 128
+      ) {
+        return undefined;
+      }
+      const templates: ManagedTemplate[] = [];
+      let payloadBytes = 32;
+      for (const candidate of value.templates) {
+        const template = parseManagedTemplateMessage(candidate);
+        if (template === undefined) {
+          return undefined;
+        }
+        payloadBytes += utf8ByteLength(JSON.stringify(template)) + 1;
+        if (payloadBytes > 256 * 1024) {
+          return undefined;
+        }
+        templates.push(template);
+      }
+      return {
+        protocol: 1,
+        type: "saveTemplates",
+        requestId: value.requestId,
+        expectedRevision: value.expectedRevision,
+        templates,
+      };
+    }
+    case "runCommand": {
+      if (
+        !hasOnlyKeys(value, ["protocol", "type", "requestId", "command"]) ||
+        !isRequestId(value.requestId) ||
+        (value.command !== "import" &&
+          value.command !== "export" &&
+          value.command !== "openJson")
+      ) {
+        return undefined;
+      }
+      return {
+        protocol: 1,
+        type: "runCommand",
+        requestId: value.requestId,
+        command: value.command,
+      };
+    }
+    case "restoreTemplates": {
+      if (
+        !hasOnlyKeys(value, ["protocol", "type", "requestId"]) ||
+        !isRequestId(value.requestId)
+      ) {
+        return undefined;
+      }
+      return {
+        protocol: 1,
+        type: "restoreTemplates",
+        requestId: value.requestId,
+      };
     }
     default:
       return undefined;
   }
+}
+
+function parseManagedSnippetLibraryMessage(
+  value: unknown,
+): Omit<ManagedSnippetLibrary, "revision"> | undefined {
+  if (
+    !isRecord(value) ||
+    !hasOnlyAllowedKeys(value, ["defaultsRevision", "variables", "snippets"]) ||
+    (value.defaultsRevision !== undefined &&
+      (typeof value.defaultsRevision !== "number" ||
+        !Number.isInteger(value.defaultsRevision) ||
+        value.defaultsRevision < 0)) ||
+    !isRecord(value.variables) ||
+    !Array.isArray(value.snippets) ||
+    value.snippets.length > 100_000
+  ) {
+    return undefined;
+  }
+  let payloadBytes = 64;
+  const variables: Record<string, string> = {};
+  if (Object.keys(value.variables).length > 10_000) {
+    return undefined;
+  }
+  for (const [name, variableValue] of Object.entries(value.variables)) {
+    if (
+      name.length === 0 ||
+      name.length > 256 ||
+      typeof variableValue !== "string" ||
+      variableValue.length > 1_000_000
+    ) {
+      return undefined;
+    }
+    payloadBytes += utf8ByteLength(name) + utf8ByteLength(variableValue) + 8;
+    if (payloadBytes > MAX_EDITABLE_CHARACTERS) {
+      return undefined;
+    }
+    variables[name] = variableValue;
+  }
+  const snippets: ManagedSnippet[] = [];
+  for (const candidate of value.snippets) {
+    const snippet = parseManagedSnippetMessage(candidate);
+    if (snippet === undefined) {
+      return undefined;
+    }
+    payloadBytes += utf8ByteLength(JSON.stringify(snippet)) + 1;
+    if (payloadBytes > MAX_EDITABLE_CHARACTERS) {
+      return undefined;
+    }
+    snippets.push(snippet);
+  }
+  const result: Omit<ManagedSnippetLibrary, "revision"> = {
+    variables,
+    snippets,
+  };
+  return value.defaultsRevision === undefined
+    ? result
+    : { ...result, defaultsRevision: value.defaultsRevision };
+}
+
+function parseManagedSnippetMessage(value: unknown): ManagedSnippet | undefined {
+  if (
+    !isRecord(value) ||
+    !hasOnlyAllowedKeys(value, [
+      "id",
+      "trigger",
+      "replacement",
+      "options",
+      "priority",
+      "description",
+      "category",
+      "flags",
+      "syntaxVersion",
+      "enabled",
+    ]) ||
+    !isBoundedString(value.id, 1, 256) ||
+    !isBoundedString(value.trigger, 1, 4_096) ||
+    !isBoundedString(value.replacement, 0, 1_000_000) ||
+    !isBoundedString(value.options, 0, 32) ||
+    typeof value.priority !== "number" ||
+    !Number.isFinite(value.priority) ||
+    !isBoundedString(value.category, 0, 256) ||
+    (value.description !== undefined &&
+      !isBoundedString(value.description, 0, 16_384)) ||
+    (value.flags !== undefined && !isBoundedString(value.flags, 0, 16)) ||
+    (value.syntaxVersion !== 1 && value.syntaxVersion !== 2) ||
+    typeof value.enabled !== "boolean"
+  ) {
+    return undefined;
+  }
+  return {
+    id: value.id,
+    trigger: value.trigger,
+    replacement: value.replacement,
+    options: value.options,
+    priority: value.priority,
+    ...(value.description === undefined
+      ? {}
+      : { description: value.description }),
+    category: value.category,
+    ...(value.flags === undefined ? {} : { flags: value.flags }),
+    syntaxVersion: value.syntaxVersion,
+    enabled: value.enabled,
+  };
+}
+
+function parseManagedTemplateMessage(value: unknown): ManagedTemplate | undefined {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      "id",
+      "name",
+      "trigger",
+      "description",
+      "content",
+      "isFactory",
+    ]) ||
+    !isBoundedString(value.id, 1, 128) ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value.id) ||
+    !isBoundedString(value.name, 1, 128) ||
+    !isBoundedString(value.trigger, 1, 80) ||
+    /[\s\u0000-\u001f\u007f]/u.test(value.trigger) ||
+    !isBoundedString(value.description, 0, 2_048) ||
+    !isBoundedString(value.content, 0, 192 * 1024) ||
+    typeof value.isFactory !== "boolean"
+  ) {
+    return undefined;
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    trigger: value.trigger,
+    description: value.description,
+    content: value.content,
+    isFactory: value.isFactory,
+  };
 }
 
 function hasOnlyKeys(
@@ -751,6 +1292,31 @@ function hasOnlyKeys(
   return keys.length === allowed.length && keys.every((key) => allowedKeys.has(key));
 }
 
+function hasOnlyAllowedKeys(
+  value: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+): boolean {
+  const allowedKeys = new Set(allowed);
+  return Object.keys(value).every((key) => allowedKeys.has(key));
+}
+
+function isBoundedString(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= minimum &&
+    value.length <= maximum &&
+    !value.includes("\0")
+  );
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
 function isRequestId(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -758,6 +1324,10 @@ function isRequestId(value: unknown): value is string {
     value.length <= 64 &&
     /^[A-Za-z0-9._:-]+$/.test(value)
   );
+}
+
+function isRevision(value: unknown): value is string {
+  return isBoundedString(value, 1, 256) && /^[A-Za-z0-9._:+/=-]+$/u.test(value);
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
@@ -770,6 +1340,29 @@ function isFileNotFound(error: unknown): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function withTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label}（${Math.ceil(timeoutMs / 1_000)} 秒）。`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 async function postMessage(
@@ -787,371 +1380,5 @@ async function postMessage(
 }
 
 function renderHtml(): string {
-  const nonce = randomBytes(24).toString("hex");
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TeXLeaf 全局用户片段</title>
-  <style nonce="${nonce}">
-    :root {
-      color-scheme: light dark;
-    }
-    * {
-      box-sizing: border-box;
-    }
-    body {
-      margin: 0;
-      padding: 20px;
-      color: var(--vscode-foreground);
-      background: var(--vscode-editor-background);
-      font-family: var(--vscode-font-family);
-      font-size: var(--vscode-font-size);
-    }
-    main {
-      display: grid;
-      grid-template-rows: auto auto minmax(320px, 1fr) auto;
-      gap: 14px;
-      min-height: calc(100vh - 40px);
-      max-width: 1200px;
-      margin: 0 auto;
-    }
-    header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 16px;
-    }
-    h1, h2, p {
-      margin-top: 0;
-    }
-    h1 {
-      margin-bottom: 5px;
-      font-size: 1.35rem;
-    }
-    h2 {
-      margin-bottom: 6px;
-      font-size: 1rem;
-    }
-    .target {
-      margin-bottom: 0;
-      color: var(--vscode-descriptionForeground);
-      overflow-wrap: anywhere;
-    }
-    .actions {
-      display: flex;
-      flex-wrap: wrap;
-      flex: 0 0 auto;
-      gap: 8px;
-    }
-    button {
-      border: 1px solid transparent;
-      border-radius: 2px;
-      padding: 6px 12px;
-      color: var(--vscode-button-foreground);
-      background: var(--vscode-button-background);
-      font: inherit;
-      cursor: pointer;
-    }
-    button:hover:not(:disabled) {
-      background: var(--vscode-button-hoverBackground);
-    }
-    button.secondary {
-      border-color: var(--vscode-button-secondaryBackground);
-      color: var(--vscode-button-secondaryForeground);
-      background: var(--vscode-button-secondaryBackground);
-    }
-    button.secondary:hover:not(:disabled) {
-      background: var(--vscode-button-secondaryHoverBackground);
-    }
-    button:focus-visible,
-    textarea:focus-visible {
-      outline: 1px solid var(--vscode-focusBorder);
-      outline-offset: 2px;
-    }
-    button:disabled {
-      cursor: wait;
-      opacity: 0.65;
-    }
-    aside {
-      border-left: 3px solid var(--vscode-editorInfo-foreground);
-      padding: 10px 12px;
-      color: var(--vscode-descriptionForeground);
-      background: var(--vscode-textBlockQuote-background);
-    }
-    aside ul {
-      margin: 0;
-      padding-left: 20px;
-    }
-    aside li + li {
-      margin-top: 3px;
-    }
-    .editor-wrap {
-      display: grid;
-      grid-template-rows: auto minmax(300px, 1fr);
-      gap: 6px;
-      min-height: 0;
-    }
-    label {
-      font-weight: 600;
-    }
-    textarea {
-      width: 100%;
-      min-height: 360px;
-      resize: vertical;
-      border: 1px solid var(--vscode-input-border, transparent);
-      border-radius: 2px;
-      padding: 12px;
-      color: var(--vscode-input-foreground);
-      background: var(--vscode-input-background);
-      font-family: var(--vscode-editor-font-family, monospace);
-      font-size: var(--vscode-editor-font-size, 13px);
-      line-height: 1.5;
-      tab-size: 2;
-      white-space: pre;
-    }
-    footer {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      min-height: 20px;
-      color: var(--vscode-descriptionForeground);
-    }
-    #status.success {
-      color: var(--vscode-testing-iconPassed, var(--vscode-foreground));
-    }
-    #status.warning {
-      color: var(--vscode-editorWarning-foreground, var(--vscode-foreground));
-    }
-    #status.error {
-      color: var(--vscode-errorForeground);
-    }
-    kbd {
-      border: 1px solid var(--vscode-widget-border);
-      border-radius: 3px;
-      padding: 1px 4px;
-      font-family: inherit;
-    }
-    @media (max-width: 640px) {
-      header {
-        flex-direction: column;
-      }
-    }
-  </style>
-</head>
-<body>
-  <main>
-    <header>
-      <div>
-        <h1>TeXLeaf 全局用户片段</h1>
-        <p id="target" class="target">正在读取用户级全局配置…</p>
-      </div>
-      <div class="actions">
-        <button id="save" type="button" disabled>保存</button>
-        <button id="reload" class="secondary" type="button" disabled>从磁盘重新加载</button>
-        <button id="restore-defaults" class="secondary" type="button" disabled>恢复默认片段…</button>
-      </div>
-    </header>
-
-    <aside role="note" aria-labelledby="safety-title">
-      <h2 id="safety-title">安全说明</h2>
-      <ul>
-        <li>这里只读写 VS Code 当前用户配置中的固定文件 <code>texleaf-snippets.jsonc</code>；所有工作区共用，文件必须是 JSON 或 JSONC。</li>
-        <li><code>replacement</code> 必须是字符串；TeXLeaf 不执行函数 replacement，也不执行任意 JavaScript。</li>
-        <li>从他人项目复制片段前请先检查内容；无法通过结构校验的定义会被跳过。</li>
-      </ul>
-    </aside>
-
-    <div class="editor-wrap">
-      <label for="editor">片段文件内容</label>
-      <textarea id="editor" aria-describedby="status" autocomplete="off" autocapitalize="off" spellcheck="false" wrap="off" readonly></textarea>
-    </div>
-
-    <footer>
-      <span id="status" role="status" aria-live="polite">等待载入…</span>
-      <span><kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>S</kbd> 保存</span>
-    </footer>
-  </main>
-
-  <script nonce="${nonce}">
-    (() => {
-      "use strict";
-
-      const vscode = acquireVsCodeApi();
-      const editor = document.getElementById("editor");
-      const saveButton = document.getElementById("save");
-      const reloadButton = document.getElementById("reload");
-      const restoreDefaultsButton = document.getElementById("restore-defaults");
-      const target = document.getElementById("target");
-      const status = document.getElementById("status");
-
-      let baseline = "";
-      let busy = true;
-      let discardConfirmation = false;
-      let lastReportedDirty = false;
-      let requestCounter = 0;
-      const pendingSaves = new Map();
-
-      const nextRequestId = () => {
-        requestCounter += 1;
-        return "webview-" + requestCounter;
-      };
-
-      const isDirty = () => editor.value !== baseline;
-
-      const setStatus = (message, tone) => {
-        status.textContent = message;
-        status.className = tone || "";
-      };
-
-      const updateDirtyState = () => {
-        discardConfirmation = false;
-        const dirty = isDirty();
-        if (dirty !== lastReportedDirty) {
-          lastReportedDirty = dirty;
-          vscode.postMessage({ type: "dirty", dirty });
-        }
-        if (!busy) {
-          setStatus(dirty ? "有尚未保存的更改。" : "内容已与磁盘同步。", "");
-        }
-      };
-
-      const setBusy = (value, message) => {
-        busy = value;
-        saveButton.disabled = value;
-        reloadButton.disabled = value;
-        restoreDefaultsButton.disabled = value;
-        editor.readOnly = value;
-        if (message) {
-          setStatus(message, "");
-        }
-      };
-
-      const requestSave = () => {
-        if (busy) {
-          return;
-        }
-        discardConfirmation = false;
-        const requestId = nextRequestId();
-        pendingSaves.set(requestId, editor.value);
-        setBusy(true, "正在保存…");
-        vscode.postMessage({ type: "save", requestId, text: editor.value });
-      };
-
-      const requestReload = () => {
-        if (busy) {
-          return;
-        }
-        if (isDirty() && !discardConfirmation) {
-          discardConfirmation = true;
-          setStatus("再次点击“从磁盘重新加载”以丢弃尚未保存的更改。", "warning");
-          return;
-        }
-        discardConfirmation = false;
-        const requestId = nextRequestId();
-        setBusy(true, "正在从磁盘重新加载…");
-        vscode.postMessage({ type: "reload", requestId });
-      };
-
-      const requestRestoreDefaults = () => {
-        if (busy) {
-          return;
-        }
-        if (isDirty()) {
-          setStatus("请先保存或重新加载尚未保存的更改，再恢复默认片段。", "warning");
-          return;
-        }
-        discardConfirmation = false;
-        const requestId = nextRequestId();
-        setBusy(true, "正在准备恢复默认片段…");
-        vscode.postMessage({ type: "restoreDefaults", requestId });
-      };
-
-      saveButton.addEventListener("click", requestSave);
-      reloadButton.addEventListener("click", requestReload);
-      restoreDefaultsButton.addEventListener("click", requestRestoreDefaults);
-      editor.addEventListener("input", updateDirtyState);
-      document.addEventListener("keydown", (event) => {
-        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
-          event.preventDefault();
-          requestSave();
-        }
-      });
-
-      window.addEventListener("message", (event) => {
-        const message = event.data;
-        if (!message || typeof message !== "object" || typeof message.type !== "string") {
-          return;
-        }
-
-        if (
-          message.type === "content" &&
-          typeof message.text === "string" &&
-          typeof message.location === "string" &&
-          typeof message.exists === "boolean"
-        ) {
-          editor.value = message.text;
-          baseline = message.text;
-          lastReportedDirty = false;
-          target.textContent = "用户级全局配置 / " + message.location;
-          setBusy(false);
-          setStatus(
-            message.exists
-              ? "已从磁盘载入。"
-              : "文件尚不存在；保存时会创建安全的 JSONC 文件。",
-            message.exists ? "success" : "warning",
-          );
-          return;
-        }
-
-        if (
-          message.type === "result" &&
-          typeof message.requestId !== "undefined" &&
-          typeof message.action === "string" &&
-          typeof message.ok === "boolean" &&
-          typeof message.message === "string"
-        ) {
-          if (message.action === "save") {
-            const savedText = pendingSaves.get(message.requestId);
-            pendingSaves.delete(message.requestId);
-            if (message.ok && typeof savedText === "string") {
-              baseline = savedText;
-              const dirty = isDirty();
-              if (dirty !== lastReportedDirty) {
-                lastReportedDirty = dirty;
-                vscode.postMessage({ type: "dirty", dirty });
-              }
-            }
-          }
-          setBusy(false);
-          setStatus(message.message, typeof message.tone === "string" ? message.tone : "");
-          if (message.ok && isDirty()) {
-            setStatus("已保存提交的版本；编辑框中仍有新的未保存更改。", "warning");
-          }
-          return;
-        }
-
-        if (
-          message.type === "busy" &&
-          typeof message.value === "boolean" &&
-          (typeof message.message === "undefined" ||
-            typeof message.message === "string")
-        ) {
-          setBusy(message.value, message.message);
-          return;
-        }
-
-        if (message.type === "error" && typeof message.message === "string") {
-          setBusy(false);
-          setStatus(message.message, "error");
-        }
-      });
-
-      vscode.postMessage({ type: "ready" });
-    })();
-  </script>
-</body>
-</html>`;
+  return renderSnippetManagerWebview(randomBytes(24).toString("hex"));
 }

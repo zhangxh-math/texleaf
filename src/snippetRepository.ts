@@ -14,8 +14,11 @@ import {
   DEFAULT_VARIABLES,
   FACTORY_DEFAULTS_REVISION,
   serializeDefaultSnippetLibrary,
+  THEOREM_ENVIRONMENT_FACTORY_SNIPPET_IDS,
+  upgradeRevisionTwoTheoremFactorySnippet,
 } from "./defaultLibrary";
 import {
+  optimisticRevisionStatus,
   selectScopedResources,
   SerialTaskQueue,
   toPortableSnippetObject,
@@ -52,6 +55,31 @@ export interface RestoreDefaultsResult {
   readonly status: "restored" | "cancelled";
   readonly count?: number;
   readonly backupUri?: vscode.Uri;
+}
+
+/** Serializable user-level record exposed to the integrated manager. */
+export interface ManagedSnippet {
+  readonly id: string;
+  readonly trigger: string;
+  readonly replacement: string;
+  readonly options: string;
+  readonly priority: number;
+  readonly description?: string;
+  readonly category: string;
+  readonly flags?: string;
+  readonly syntaxVersion: 1 | 2;
+  readonly enabled: boolean;
+}
+
+/**
+ * Revision is the SHA-256 of the exact canonical JSONC bytes. It gives the
+ * Webview an optimistic-concurrency token without making the file a public UI.
+ */
+export interface ManagedSnippetLibrary {
+  readonly revision: string;
+  readonly defaultsRevision?: number;
+  readonly variables: Readonly<Record<string, string>>;
+  readonly snippets: readonly ManagedSnippet[];
 }
 
 interface RawSnippetObject {
@@ -104,6 +132,19 @@ interface ReplaceWithBackupResult {
 const GLOBAL_SNIPPET_FILE_NAME = "texleaf-snippets.jsonc";
 const SELF_WRITE_MARKER_LIFETIME_MS = 2_000;
 const GLOBAL_BACKUP_DIRECTORY_NAME = "backups";
+const MAX_MANAGED_LIBRARY_BYTES = 10_000_000;
+const MAX_MANAGED_SNIPPETS = 100_000;
+const REVISION_TWO_FACTORY_SNIPPET_IDS = new Set<string>(
+  THEOREM_ENVIRONMENT_FACTORY_SNIPPET_IDS,
+);
+const REVISION_ONE_FACTORY_INLINE_KEYS = new Set([
+  "id",
+  "trigger",
+  "replacement",
+  "options",
+  "description",
+  "category",
+]);
 
 export class SnippetRepository implements vscode.Disposable {
   private readonly changeEmitter = new vscode.EventEmitter<SnippetLibrarySnapshot>();
@@ -282,6 +323,73 @@ export class SnippetRepository implements vscode.Disposable {
     await this.reload();
     const document = await vscode.workspace.openTextDocument(this.globalSnippetUri);
     await vscode.window.showTextDocument(document);
+  }
+
+  /** Read the canonical user library as structured data for the manager UI. */
+  public async readGlobalLibraryModel(): Promise<ManagedSnippetLibrary> {
+    await this.ensureGlobalSnippetFile();
+    let bytes: Uint8Array;
+    try {
+      bytes = await vscode.workspace.fs.readFile(this.globalSnippetUri);
+    } catch (error) {
+      throw new Error(`无法读取内部片段库：${errorMessage(error)}`);
+    }
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return managedLibraryFromText(
+      text,
+      this.globalSnippetUri,
+      hashBytes(bytes),
+    );
+  }
+
+  /**
+   * Commit one complete structured edit with byte-level CAS, verified backup,
+   * atomic disk replacement, runtime reload, and post-write validation.
+   */
+  public async replaceGlobalLibraryModel(
+    model: Omit<ManagedSnippetLibrary, "revision">,
+    expectedRevision: string,
+  ): Promise<ManagedSnippetLibrary> {
+    const current = await this.readGlobalLibraryModel();
+    if (current.revision !== expectedRevision) {
+      throw new Error(
+        "片段库已在另一个窗口、磁盘编辑器或同步设备中变化。未覆盖新内容，请重新加载后保存。",
+      );
+    }
+    const bytes = serializeManagedLibrary(
+      model,
+      model.defaultsRevision ??
+        current.defaultsRevision ??
+        FACTORY_DEFAULTS_REVISION,
+      this.globalSnippetUri,
+    );
+    const desiredRevision = hashBytes(bytes);
+    const result = await this.replaceGlobalSnippetFileWithBackup(
+      bytes,
+      expectedRevision,
+      "edit",
+    );
+    if (result.status === "changed") {
+      throw new Error(
+        "片段库在保存过程中发生变化或原生 JSONC 编辑器仍有未保存内容；本次结构化保存已取消。",
+      );
+    }
+    await this.reload();
+    const committed = await this.readGlobalLibraryModel();
+    if (
+      optimisticRevisionStatus(desiredRevision, committed.revision) ===
+      "changed"
+    ) {
+      throw new Error(
+        "片段库写入后又被另一个窗口、磁盘编辑器或同步设备替换；未把其他版本误报为本次保存成功，当前草稿仍应保留。",
+      );
+    }
+    if (!(await this.isGlobalSnippetFileCurrent())) {
+      throw new Error(
+        "片段库已经写入，但重新加载验证失败；保存前备份仍然保留。",
+      );
+    }
+    return committed;
   }
 
   /** Whether the current on-disk global file is the version held in cache. */
@@ -828,7 +936,7 @@ export class SnippetRepository implements vscode.Disposable {
   private async replaceGlobalSnippetFileWithBackup(
     bytes: Uint8Array,
     expectedHash: string,
-    reason: "migration" | "restore" | "sync",
+    reason: "migration" | "restore" | "sync" | "edit",
   ): Promise<ReplaceWithBackupResult> {
     // Reject malformed or structurally unrelated sync/reset payloads before a
     // backup or target write is attempted.
@@ -860,7 +968,7 @@ export class SnippetRepository implements vscode.Disposable {
 
   private async createVerifiedBackup(
     bytes: Uint8Array,
-    reason: "migration" | "restore" | "sync",
+    reason: "migration" | "restore" | "sync" | "edit",
   ): Promise<vscode.Uri> {
     const directory = vscode.Uri.joinPath(
       this.globalStorageUri,
@@ -894,8 +1002,9 @@ export class SnippetRepository implements vscode.Disposable {
       if (hashBytes(verification) !== hashBytes(bytes)) {
         throw new Error("临时文件写入后校验失败");
       }
+      const desiredHash = hashBytes(bytes);
       const marker: SelfWriteMarker = {
-        contentHash: hashBytes(bytes),
+        contentHash: desiredHash,
         expiresAt: Date.now() + SELF_WRITE_MARKER_LIFETIME_MS,
       };
       this.selfWriteMarkers.set(this.globalSnippetUri.toString(), marker);
@@ -903,6 +1012,14 @@ export class SnippetRepository implements vscode.Disposable {
         await vscode.workspace.fs.rename(temporaryUri, this.globalSnippetUri, {
           overwrite: true,
         });
+        const committed = await vscode.workspace.fs.readFile(
+          this.globalSnippetUri,
+        );
+        if (hashBytes(committed) !== desiredHash) {
+          throw new Error(
+            "全局 Snippet 文件在替换后立即被其他写入覆盖；未确认本次保存。",
+          );
+        }
       } catch (error) {
         if (this.selfWriteMarkers.get(this.globalSnippetUri.toString()) === marker) {
           this.selfWriteMarkers.delete(this.globalSnippetUri.toString());
@@ -950,6 +1067,265 @@ export class SnippetRepository implements vscode.Disposable {
     }
     return dirty;
   }
+}
+
+function managedLibraryFromText(
+  text: string,
+  uri: vscode.Uri,
+  revision: string,
+): ManagedSnippetLibrary {
+  const errors: ParseError[] = [];
+  const root = parse(text, errors, {
+    allowTrailingComma: true,
+    disallowComments: false,
+  }) as unknown;
+  const firstError = errors[0];
+  if (firstError !== undefined) {
+    throw new Error(
+      `内部片段库 JSONC 解析失败：${printParseErrorCode(firstError.error)}（偏移 ${firstError.offset}）。`,
+    );
+  }
+
+  const problems: string[] = [];
+  const parsed = coerceLibrary(root, problems);
+  const rawCount = rawSnippetEntryCount(root);
+  if (rawCount !== undefined && rawCount !== parsed.snippets.length) {
+    problems.push("片段数组中含非对象条目；请在高级 JSONC 编辑器中修复。");
+  }
+  const records = parsed.snippets.map((snippet, index) =>
+    normalizeSnippet(snippet, "global", uri, index, problems),
+  );
+  if (records.some((record) => record === undefined)) {
+    problems.push("至少一个片段无法转换为结构化记录。");
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `内部片段库含无法安全结构化编辑的内容：${problems[0]} 原文件未被修改，可使用高级 JSONC 编辑器修复。`,
+    );
+  }
+
+  const ids = new Set<string>();
+  const snippets: ManagedSnippet[] = [];
+  for (const record of records) {
+    if (record === undefined) {
+      continue;
+    }
+    if (ids.has(record.portableId)) {
+      throw new Error(
+        `内部片段库含重复 id：${record.portableId}。原文件未被修改，请先在高级 JSONC 编辑器中修复。`,
+      );
+    }
+    ids.add(record.portableId);
+    snippets.push({
+      id: record.portableId,
+      trigger: record.trigger,
+      replacement: record.replacement,
+      options: record.options,
+      priority: record.priority,
+      ...(record.description === undefined
+        ? {}
+        : { description: record.description }),
+      category: record.category,
+      ...(record.flags === undefined ? {} : { flags: record.flags }),
+      syntaxVersion: record.syntaxVersion,
+      enabled: record.enabled,
+    });
+  }
+  return {
+    revision,
+    ...(parsed.defaultsRevision === undefined
+      ? {}
+      : { defaultsRevision: parsed.defaultsRevision }),
+    variables: { ...parsed.variables },
+    snippets,
+  };
+}
+
+function serializeManagedLibrary(
+  model: Omit<ManagedSnippetLibrary, "revision">,
+  defaultsRevision: number,
+  uri: vscode.Uri,
+): Uint8Array {
+  if (
+    !Number.isInteger(defaultsRevision) ||
+    defaultsRevision < 0 ||
+    defaultsRevision > Number.MAX_SAFE_INTEGER
+  ) {
+    throw new Error("片段库 defaultsRevision 无效。");
+  }
+  if (!isObject(model.variables) || !Array.isArray(model.snippets)) {
+    throw new Error("结构化片段库缺少 variables 对象或 snippets 数组。");
+  }
+  if (model.snippets.length > MAX_MANAGED_SNIPPETS) {
+    throw new Error(`片段数量不能超过 ${MAX_MANAGED_SNIPPETS} 条。`);
+  }
+
+  const variables: Record<string, string> = {};
+  const variableEntries = Object.entries(model.variables);
+  if (variableEntries.length > 10_000) {
+    throw new Error("片段变量不能超过 10000 个。");
+  }
+  for (const [name, value] of variableEntries) {
+    if (
+      name.length === 0 ||
+      name.length > 256 ||
+      typeof value !== "string" ||
+      value.length > 1_000_000 ||
+      name.includes("\0") ||
+      value.includes("\0")
+    ) {
+      throw new Error(`片段变量 ${JSON.stringify(name)} 的名称或值无效。`);
+    }
+    variables[name] = value;
+  }
+
+  const ids = new Set<string>();
+  const snippets: Record<string, unknown>[] = [];
+  for (let index = 0; index < model.snippets.length; index += 1) {
+    const candidate = model.snippets[index];
+    if (!isObject(candidate)) {
+      throw new Error(`第 ${index + 1} 条片段不是对象。`);
+    }
+    const id = candidate.id;
+    if (
+      typeof id !== "string" ||
+      id.length === 0 ||
+      id.length > 256 ||
+      id !== id.trim() ||
+      id.includes("\0")
+    ) {
+      throw new Error(`第 ${index + 1} 条片段的 id 无效。`);
+    }
+    if (ids.has(id)) {
+      throw new Error(`片段 id 重复：${id}。`);
+    }
+    ids.add(id);
+
+    if (
+      typeof candidate.trigger !== "string" ||
+      candidate.trigger.length === 0 ||
+      candidate.trigger.length > 4_096 ||
+      candidate.trigger.includes("\0") ||
+      typeof candidate.replacement !== "string" ||
+      candidate.replacement.length > 1_000_000 ||
+      candidate.replacement.includes("\0") ||
+      typeof candidate.options !== "string" ||
+      candidate.options.length > 32 ||
+      typeof candidate.priority !== "number" ||
+      !Number.isFinite(candidate.priority) ||
+      typeof candidate.category !== "string" ||
+      candidate.category.length > 256 ||
+      candidate.category.includes("\0") ||
+      (candidate.description !== undefined &&
+        (typeof candidate.description !== "string" ||
+          candidate.description.length > 16_384 ||
+          candidate.description.includes("\0"))) ||
+      (candidate.flags !== undefined &&
+        (typeof candidate.flags !== "string" ||
+          candidate.flags.length > 16 ||
+          candidate.flags.includes("\0"))) ||
+      (candidate.syntaxVersion !== 1 && candidate.syntaxVersion !== 2) ||
+      typeof candidate.enabled !== "boolean"
+    ) {
+      throw new Error(`第 ${index + 1} 条片段包含无效字段。`);
+    }
+
+    const raw: RawSnippetObject = {
+      id,
+      trigger: candidate.trigger,
+      replacement: candidate.replacement,
+      options: candidate.options,
+      priority: candidate.priority,
+      ...(candidate.description === undefined
+        ? {}
+        : { description: candidate.description }),
+      category: candidate.category,
+      ...(candidate.flags === undefined ? {} : { flags: candidate.flags }),
+      syntaxVersion: candidate.syntaxVersion,
+      enabled: candidate.enabled,
+    };
+    const problems: string[] = [];
+    const normalized = normalizeSnippet(raw, "global", uri, index, problems);
+    if (normalized === undefined || problems.length > 0) {
+      throw new Error(
+        `第 ${index + 1} 条片段无效：${problems[0] ?? "无法规范化"}`,
+      );
+    }
+    if (normalized.options.includes("r")) {
+      let regex: RegExp;
+      try {
+        regex = new RegExp(
+          `(?:${normalized.trigger})(?![\\s\\S])`,
+          normalized.flags ?? "",
+        );
+      } catch (error) {
+        throw new Error(
+          `正则触发词 ${JSON.stringify(normalized.trigger)} 无效：${errorMessage(error)}`,
+        );
+      }
+      if (regex.test("")) {
+        throw new Error(
+          `正则触发词 ${JSON.stringify(normalized.trigger)} 不能匹配空字符串。`,
+        );
+      }
+    }
+    snippets.push({
+      id: normalized.portableId,
+      trigger: normalized.trigger,
+      replacement: normalized.replacement,
+      options: normalized.options,
+      ...(normalized.priority === 0 ? {} : { priority: normalized.priority }),
+      ...(normalized.description === undefined
+        ? {}
+        : { description: normalized.description }),
+      // Structured edits must round-trip even a user-chosen category named
+      // "Workspace"; the generic portable exporter omits that source default.
+      category: normalized.category,
+      ...(normalized.flags === undefined ? {} : { flags: normalized.flags }),
+      ...(normalized.syntaxVersion === 2
+        ? {}
+        : { syntaxVersion: normalized.syntaxVersion }),
+      ...(normalized.enabled ? {} : { enabled: false }),
+    });
+  }
+
+  const output = {
+    version: 1,
+    defaultsRevision,
+    variables,
+    snippets,
+  };
+  const bytes = new TextEncoder().encode(`${JSON.stringify(output, null, 2)}\n`);
+  if (bytes.byteLength > MAX_MANAGED_LIBRARY_BYTES) {
+    throw new Error(
+      `片段库超过 ${Math.floor(MAX_MANAGED_LIBRARY_BYTES / 1_000_000)} MB 安全上限。`,
+    );
+  }
+  parseLibraryText(new TextDecoder().decode(bytes), uri, []);
+  return bytes;
+}
+
+function rawSnippetEntryCount(root: unknown): number | undefined {
+  if (Array.isArray(root)) {
+    return root.length;
+  }
+  if (!isObject(root)) {
+    return undefined;
+  }
+  if (Array.isArray(root.snippets)) {
+    return root.snippets.length;
+  }
+  if (typeof root.snippets !== "string") {
+    return undefined;
+  }
+  const errors: ParseError[] = [];
+  const nested = parse(root.snippets, errors, {
+    allowTrailingComma: true,
+    disallowComments: false,
+  }) as unknown;
+  return errors.length === 0 && Array.isArray(nested)
+    ? nested.length
+    : undefined;
 }
 
 function normalizeSnippet(
@@ -1147,8 +1523,14 @@ function migrateLibraryTextToFactoryDefaults(
     return undefined;
   }
 
+  const upgradingMaterializedRevisionOne = existing.defaultsRevision === 1;
+  const upgradingMaterializedRevisionTwo = existing.defaultsRevision === 2;
+  const hasMaterializedFactoryRevision =
+    existing.defaultsRevision !== undefined && existing.defaultsRevision >= 1;
   let legacy: ParsedLibrary = { snippets: [], variables: {} };
-  if (legacySettingsText.trim().length > 0) {
+  // A materialized library has already consumed the retired setting. Re-reading
+  // it on a later revision could resurrect a user-deleted legacy snippet.
+  if (!hasMaterializedFactoryRevision && legacySettingsText.trim().length > 0) {
     try {
       legacy = parseLibraryText(
         legacySettingsText,
@@ -1160,24 +1542,128 @@ function migrateLibraryTextToFactoryDefaults(
     }
   }
 
+  // Revision 2 renamed the untouched factory inline-math trigger from `mk` to
+  // `lm`. Stable IDs normally make user entries win over factory updates, so
+  // handle this one intentional rename narrowly: only the exact revision-1
+  // factory record is changed. A disabled, renamed, reworded, or otherwise
+  // customized entry is preserved byte-for-byte.
+  const inlineTriggerUpgradeIndex = existing.defaultsRevision === 1
+    ? existing.snippets.findIndex(isRevisionOneFactoryInlineSnippet)
+    : -1;
+  const inlineTriggerUpgradeRawIndex =
+    existing.defaultsRevision === 1 && isObject(root) && Array.isArray(root.snippets)
+      ? root.snippets.findIndex(
+          (snippet) =>
+            isObject(snippet) && isRevisionOneFactoryInlineSnippet(snippet),
+        )
+      : -1;
+  const migratedExistingSnippets = existing.snippets.map((snippet, index) => {
+    if (index === inlineTriggerUpgradeIndex) {
+      return { ...snippet, trigger: "lm" };
+    }
+    if (upgradingMaterializedRevisionTwo) {
+      const upgraded = upgradeRevisionTwoTheoremFactorySnippet(
+        snippet,
+        existing.snippets,
+      );
+      if (upgraded !== undefined) {
+        return { ...upgraded };
+      }
+    }
+    return snippet;
+  });
+
+  const theoremTriggerUpgrades: Array<{
+    readonly rawIndex: number;
+    readonly trigger: string;
+    readonly options: string;
+  }> = [];
+  if (
+    upgradingMaterializedRevisionTwo &&
+    isObject(root) &&
+    Array.isArray(root.snippets)
+  ) {
+    root.snippets.forEach((snippet, rawIndex) => {
+      const upgraded = upgradeRevisionTwoTheoremFactorySnippet(
+        snippet,
+        root.snippets as readonly unknown[],
+      );
+      if (
+        upgraded !== undefined &&
+        typeof upgraded.trigger === "string" &&
+        typeof upgraded.options === "string"
+      ) {
+        theoremTriggerUpgrades.push({
+          rawIndex,
+          trigger: upgraded.trigger,
+          options: upgraded.options,
+        });
+      }
+    });
+  }
+
   const factory = createDefaultSnippetLibrary();
   const factorySnippets = factory.snippets.filter(isObject);
-  const existingKeys = new Set(existing.snippets.map(rawSnippetKey));
+  const existingKeys = new Set(migratedExistingSnippets.map(rawSnippetKey));
   const additions: RawSnippetObject[] = [];
-  for (const snippet of [...legacy.snippets, ...factorySnippets]) {
+  const factoryCandidates = upgradingMaterializedRevisionOne
+    ? factorySnippets.filter(
+        (snippet) =>
+          typeof snippet.id === "string" &&
+          REVISION_TWO_FACTORY_SNIPPET_IDS.has(snippet.id),
+      )
+    : hasMaterializedFactoryRevision
+      ? []
+      : factorySnippets;
+  for (const snippet of [...legacy.snippets, ...factoryCandidates]) {
     const key = rawSnippetKey(snippet);
     if (!existingKeys.has(key)) {
       existingKeys.add(key);
       additions.push(snippet);
     }
   }
-  const variablesToAdd = { ...DEFAULT_VARIABLES, ...legacy.variables };
+  // Missing variables in a materialized file may be an intentional deletion.
+  // Revisions 2 and 3 introduce no variables, so leave that map alone.
+  const variablesToAdd = hasMaterializedFactoryRevision
+    ? {}
+    : { ...DEFAULT_VARIABLES, ...legacy.variables };
   const mergedVariables = { ...variablesToAdd, ...existing.variables };
-  const mergedSnippets = [...existing.snippets, ...additions];
+  const mergedSnippets = [...migratedExistingSnippets, ...additions];
   const formattingOptions = inferFormattingOptions(baselineText);
 
   if (isObject(root) && Array.isArray(root.snippets)) {
     let output = baselineText;
+    if (inlineTriggerUpgradeRawIndex >= 0) {
+      output = applyEdits(
+        output,
+        modify(
+          output,
+          ["snippets", inlineTriggerUpgradeRawIndex, "trigger"],
+          "lm",
+          { formattingOptions },
+        ),
+      );
+    }
+    for (const upgrade of theoremTriggerUpgrades) {
+      output = applyEdits(
+        output,
+        modify(
+          output,
+          ["snippets", upgrade.rawIndex, "trigger"],
+          upgrade.trigger,
+          { formattingOptions },
+        ),
+      );
+      output = applyEdits(
+        output,
+        modify(
+          output,
+          ["snippets", upgrade.rawIndex, "options"],
+          upgrade.options,
+          { formattingOptions },
+        ),
+      );
+    }
     for (const snippet of additions) {
       output = applyEdits(
         output,
@@ -1354,6 +1840,27 @@ function rawSnippetKey(snippet: RawSnippetObject): string {
   return typeof snippet.id === "string" && snippet.id.length > 0
     ? `id:${snippet.id}`
     : `trigger:${String(snippet.trigger)}:${String(snippet.options ?? "")}`;
+}
+
+function isRevisionOneFactoryInlineSnippet(
+  snippet: RawSnippetObject,
+): boolean {
+  const actualKeys = Object.keys(snippet);
+  return (
+    actualKeys.length === REVISION_ONE_FACTORY_INLINE_KEYS.size &&
+    actualKeys.every((key) => REVISION_ONE_FACTORY_INLINE_KEYS.has(key)) &&
+    snippet.id === "mode.inline" &&
+    snippet.trigger === "mk" &&
+    snippet.replacement === "\\(@0\\)" &&
+    snippet.options === "tA" &&
+    snippet.description === "Inline math" &&
+    snippet.category === "Math mode" &&
+    snippet.priority === undefined &&
+    snippet.flags === undefined &&
+    snippet.syntaxVersion === undefined &&
+    snippet.version === undefined &&
+    snippet.enabled === undefined
+  );
 }
 
 function joinRelativePath(base: vscode.Uri, relativePath: string): vscode.Uri {

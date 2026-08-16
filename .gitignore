@@ -1,6 +1,9 @@
 node_modules/
 .pnpm-store/
 vscode-ultra-math-preview/
+triforge-git/
+.wiki-publish/
+.release-publish/
 dist/
 out/
 .test-dist/

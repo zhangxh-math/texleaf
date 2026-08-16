@@ -223,7 +223,11 @@ export class SnippetMatcher {
   }
 
   public findAll(request: SnippetMatchRequest): readonly SnippetMatch[] {
-    if (request.context.inComment || request.context.inVerbatim) {
+    if (
+      request.context.inComment ||
+      request.context.inVerbatim ||
+      request.context.inSnippetSuppressedArgument
+    ) {
       return [];
     }
 

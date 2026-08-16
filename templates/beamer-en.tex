@@ -1,0 +1,72 @@
+% TeXLeaf editable English Beamer template.
+\documentclass[aspectratio=169]{beamer}
+
+\usetheme{CambridgeUS}
+\usecolortheme{whale}
+
+\usepackage{mathtools,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+
+% Beamer already provides theorem, corollary, lemma, definition, and example.
+\theoremstyle{plain}
+\newtheorem{axiom}[theorem]{Axiom}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{claim}[theorem]{Claim}
+\newtheorem{conjecture}[theorem]{Conjecture}
+\newtheorem{hypothesis}[theorem]{Hypothesis}
+
+\theoremstyle{definition}
+\newtheorem{assumption}[theorem]{Assumption}
+
+\theoremstyle{example}
+\newtheorem{exercise}[theorem]{Exercise}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+\title{@{0:Presentation Title}}
+\subtitle{@{1:Optional Subtitle}}
+\author{@{2:Author Name}}
+\institute{@{3:Affiliation}}
+\date{\today}
+
+\AtBeginSection[]{
+  \begin{frame}{Outline}
+    \tableofcontents[currentsection]
+  \end{frame}
+}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{Outline}
+  \tableofcontents
+\end{frame}
+
+\section{Introduction}
+
+\begin{frame}{@{4:Motivation}}
+  \begin{itemize}
+    \item @{5:First point}
+    \item @{6:Second point}
+  \end{itemize}
+\end{frame}
+
+\section{Main Results}
+
+\begin{frame}{@{7:Main result}}
+  @{8:Add the central argument, theorem, figure, or table here.}
+\end{frame}
+
+\section{Conclusion}
+
+\begin{frame}{Conclusion}
+  @{9:Summarize the main message and next steps.}
+\end{frame}
+
+@10
+\end{document}

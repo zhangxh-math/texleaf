@@ -23,7 +23,7 @@ type DefaultSnippetDefinition = Readonly<{
 
 export const DEFAULT_SNIPPETS: readonly DefaultSnippetDefinition[] = [
   // Math mode
-  { id: 'mode.inline', trigger: 'mk', replacement: '\\(@0\\)', options: 'tA', description: 'Inline math', category: 'Math mode' },
+  { id: 'mode.inline', trigger: 'lm', replacement: '\\(@0\\)', options: 'tA', description: 'Inline math', category: 'Math mode' },
   { id: 'mode.display', trigger: 'dm', replacement: '\\[\n@0\n\\]', options: 'tAw', description: 'Display math', category: 'Math mode' },
   { id: 'mode.environment', trigger: 'beg', replacement: '\\begin{@0}\n@1\n\\end{@0}', options: 'mA', description: 'LaTeX environment', category: 'Math mode' },
 
@@ -224,6 +224,23 @@ export const DEFAULT_SNIPPETS: readonly DefaultSnippetDefinition[] = [
   { id: 'environment.cases', trigger: 'cases', replacement: '\\begin{cases}\n@0\n\\end{cases}', options: 'mA', description: 'Cases environment', category: 'Environments' },
   { id: 'environment.align', trigger: 'align', replacement: '\\begin{align}\n@0\n\\end{align}', options: 'mA', description: 'Align environment', category: 'Environments' },
   { id: 'environment.array', trigger: 'array', replacement: '\\begin{array}\n@0\n\\end{array}', options: 'mA', description: 'Array environment', category: 'Environments' },
+
+  // Theorem-style environments (adapted from the user's declarative HSnips
+  // library). A leading backslash keeps the short names out of ordinary prose;
+  // once the complete command is typed, the environment expands automatically.
+  { id: 'environment.axiom', trigger: '\\axm', replacement: '\\begin{axiom}\n\t@0\n\\end{axiom}\n@1', options: 'tAw', description: 'Axiom environment', category: 'Theorem environments' },
+  { id: 'environment.definition', trigger: '\\dfn', replacement: '\\begin{definition}\n\t@0\n\\end{definition}\n@1', options: 'tAw', description: 'Definition environment', category: 'Theorem environments' },
+  { id: 'environment.lemma', trigger: '\\lem', replacement: '\\begin{lemma}\n\t@0\n\\end{lemma}\n@1', options: 'tAw', description: 'Lemma environment', category: 'Theorem environments' },
+  { id: 'environment.proposition', trigger: '\\prp', replacement: '\\begin{proposition}\n\t@0\n\\end{proposition}\n@1', options: 'tAw', description: 'Proposition environment', category: 'Theorem environments' },
+  { id: 'environment.theorem', trigger: '\\thm', replacement: '\\begin{theorem}\n\t@0\n\\end{theorem}\n@1', options: 'tAw', description: 'Theorem environment', category: 'Theorem environments' },
+  { id: 'environment.corollary', trigger: '\\cor', replacement: '\\begin{corollary}\n\t@0\n\\end{corollary}\n@1', options: 'tAw', description: 'Corollary environment', category: 'Theorem environments' },
+  { id: 'environment.claim', trigger: '\\clm', replacement: '\\begin{claim}\n\t@0\n\\end{claim}\n@1', options: 'tAw', description: 'Claim environment', category: 'Theorem environments' },
+  { id: 'environment.assumption', trigger: '\\asm', replacement: '\\begin{assumption}\n\t@0\n\\end{assumption}\n@1', options: 'tAw', description: 'Assumption environment', category: 'Theorem environments' },
+  { id: 'environment.example', trigger: '\\exm', replacement: '\\begin{example}\n\t@0\n\\end{example}\n@1', options: 'tAw', description: 'Example environment', category: 'Theorem environments' },
+  { id: 'environment.exercise', trigger: '\\exr', replacement: '\\begin{exercise}\n\t@0\n\\end{exercise}\n@1', options: 'tAw', description: 'Exercise environment', category: 'Theorem environments' },
+  { id: 'environment.conjecture', trigger: '\\cnj', replacement: '\\begin{conjecture}\n\t@0\n\\end{conjecture}\n@1', options: 'tAw', description: 'Conjecture environment', category: 'Theorem environments' },
+  { id: 'environment.hypothesis', trigger: '\\hyp', replacement: '\\begin{hypothesis}\n\t@0\n\\end{hypothesis}\n@1', options: 'tAw', description: 'Hypothesis environment', category: 'Theorem environments' },
+  { id: 'environment.remark', trigger: '\\rmk', replacement: '\\begin{remark}\n\t@0\n\\end{remark}\n@1', options: 'tAw', description: 'Remark environment', category: 'Theorem environments' },
 
   // Brackets
   { id: 'bracket.average', trigger: 'avg', replacement: '\\langle @0 \\rangle @1', options: 'mA', description: 'Angle brackets', category: 'Brackets' },

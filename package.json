@@ -1,8 +1,8 @@
 {
   "name": "texleaf",
   "displayName": "TeXLeaf — Fast LaTeX Snippets",
-  "description": "安全、可定制的 LaTeX 自动片段与数学编辑增强。",
-  "version": "0.3.0",
+  "description": "安全、可定制的 LaTeX 自动片段、Math Preview 与 Zotero 引用管理。",
+  "version": "0.7.1",
   "publisher": "local-lab",
   "license": "MIT",
   "repository": {
@@ -26,20 +26,28 @@
     "latex",
     "tex",
     "bibtex",
+    "zotero",
+    "citation",
     "math",
+    "preview",
     "snippets",
     "snippet-leaf"
   ],
   "main": "./dist/extension.js",
   "extensionKind": [
+    "ui",
     "workspace"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "TeXLeaf 在受限模式下继续使用用户的全局片段库；项目级附加文件会被禁用。",
+      "description": "TeXLeaf 在受限模式下继续使用用户的全局片段库；项目级附加文件与 Zotero 引用写入会被禁用。",
       "restrictedConfigurations": [
-        "texleaf.snippetFiles"
+        "texleaf.snippetFiles",
+        "texleaf.bibliographyFile",
+        "texleaf.zoteroPort",
+        "texleaf.zoteroLibrary",
+        "texleaf.mathPreview.macros"
       ]
     },
     "virtualWorkspaces": {
@@ -50,6 +58,11 @@
     "onLanguage:latex",
     "onLanguage:tex",
     "onLanguage:bibtex",
+    "onCommand:texleaf.openTemplateFile",
+    "onCommand:texleaf.pickCitation",
+    "onCommand:texleaf.refreshZotero",
+    "onCommand:texleaf.toggleMathPreview",
+    "onCommand:texleaf.refreshMathPreview",
     "onStartupFinished",
     "onView:texleaf.snippets"
   ],
@@ -58,15 +71,17 @@
     "watch": "node esbuild.mjs --watch",
     "check": "tsc -p tsconfig.json --noEmit",
     "test:compile": "tsc -p tsconfig.test.json",
-    "test": "pnpm run test:compile && node --test .test-dist/test/core.test.js .test-dist/test/defaultSnippets.test.js",
+    "test": "pnpm run test:compile && node --test .test-dist/test/core.test.js .test-dist/test/defaultSnippets.test.js .test-dist/test/defaultTemplates.test.js .test-dist/test/snippetManagerWebview.test.js .test-dist/test/citation.test.js .test-dist/test/mathPreview.test.js .test-dist/test/mathPreviewAppearance.test.js .test-dist/test/mathPreviewLayout.test.js .test-dist/test/referenceMatcher.test.js .test-dist/test/zoteroClient.test.js",
     "test:extension-host:run": "node test/run-extension-host.cjs",
     "test:extension-host": "pnpm run compile && pnpm run test:extension-host:run",
-    "test:bundle": "node test/bundle-smoke.cjs",
+    "test:bundle": "node test/bundle-smoke.cjs && node test/math-preview-worker.cjs",
     "verify": "pnpm run check && pnpm run test && pnpm run compile && pnpm run test:bundle",
     "release:verify": "pnpm run verify && pnpm run test:extension-host:run",
     "package": "pnpm run release:verify && vsce package --no-dependencies --allow-missing-repository --no-rewrite-relative-links"
   },
   "dependencies": {
+    "@mathjax/mathjax-newcm-font": "4.1.3",
+    "@mathjax/src": "4.1.3",
     "jsonc-parser": "^3.3.1"
   },
   "devDependencies": {
@@ -77,16 +92,29 @@
     "typescript": "^5.8.0"
   },
   "contributes": {
+    "configurationDefaults": {
+      "[latex]": {
+        "editor.wordBasedSuggestions": "off"
+      },
+      "[tex]": {
+        "editor.wordBasedSuggestions": "off"
+      }
+    },
     "commands": [
       {
         "command": "texleaf.openSnippetFile",
-        "title": "TeXLeaf: 打开全局 Snippet 配置文件",
+        "title": "TeXLeaf: 打开高级 Snippet JSONC",
         "icon": "$(json)"
       },
       {
         "command": "texleaf.openSnippetEditor",
-        "title": "TeXLeaf: 编辑全局 Snippet",
+        "title": "TeXLeaf: 管理 Snippet 与模板",
         "icon": "$(edit)"
+      },
+      {
+        "command": "texleaf.openTemplateFile",
+        "title": "TeXLeaf: 管理 TeX 模板",
+        "icon": "$(file-code)"
       },
       {
         "command": "texleaf.restoreDefaultSnippets",
@@ -129,7 +157,7 @@
       },
       {
         "command": "texleaf.matrixEnter",
-        "title": "TeXLeaf: 新建矩阵行"
+        "title": "TeXLeaf: 数学环境智能换行"
       },
       {
         "command": "texleaf.matrixExit",
@@ -142,9 +170,37 @@
       {
         "command": "texleaf.deleteEmptyMathDelimiters",
         "title": "TeXLeaf: 删除空数学定界符"
+      },
+      {
+        "command": "texleaf.pickCitation",
+        "title": "TeXLeaf: 显示参考文献补全",
+        "icon": "$(references)"
+      },
+      {
+        "command": "texleaf.refreshZotero",
+        "title": "TeXLeaf: 刷新 Zotero 参考文献缓存",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "texleaf.toggleMathPreview",
+        "title": "TeXLeaf: 切换 Math Preview"
+      },
+      {
+        "command": "texleaf.refreshMathPreview",
+        "title": "TeXLeaf: 刷新 Math Preview",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "texleaf.dismissMathPreview",
+        "title": "TeXLeaf: 关闭当前 Math Preview"
       }
     ],
     "keybindings": [
+      {
+        "command": "texleaf.handleTab",
+        "key": "tab",
+        "when": "texleaf.snippetTabActionAvailable && editorTextFocus && !editorReadonly && !editorTabMovesFocus && !renameInputVisible"
+      },
       {
         "command": "texleaf.handleTab",
         "key": "tab",
@@ -153,7 +209,7 @@
       {
         "command": "texleaf.matrixEnter",
         "key": "enter",
-        "when": "texleaf.matrixActionAvailable && editorTextFocus && !editorReadonly && !suggestWidgetVisible && !renameInputVisible"
+        "when": "texleaf.enterActionAvailable && editorTextFocus && !editorReadonly && !suggestWidgetVisible && !renameInputVisible"
       },
       {
         "command": "texleaf.matrixExit",
@@ -175,11 +231,17 @@
         "command": "texleaf.deleteEmptyMathDelimiters",
         "key": "backspace",
         "when": "texleaf.emptyMathDelimiters && editorTextFocus && !editorReadonly && !suggestWidgetVisible && !renameInputVisible && !inSnippetMode"
+      },
+      {
+        "command": "texleaf.dismissMathPreview",
+        "key": "escape",
+        "when": "texleaf.mathPreviewVisible && editorTextFocus && !suggestWidgetVisible && !renameInputVisible && !inlineSuggestionVisible"
       }
     ],
-    "configuration": {
-      "title": "TeXLeaf",
-      "properties": {
+    "configuration": [
+      {
+        "title": "TeXLeaf · 片段",
+        "properties": {
         "texleaf.enabled": {
           "scope": "resource",
           "type": "boolean",
@@ -234,7 +296,7 @@
           "scope": "resource",
           "type": "boolean",
           "default": true,
-          "description": "矩阵环境中 Tab 插入列、Enter 插入行、Shift+Enter 跳出。"
+          "description": "启用矩阵/align 的 Tab 插列、Enter 插行、Shift+Enter 跳出，以及可换行数学环境中匹配 \\left…\\right… 的安全跨行 Enter。"
         },
         "texleaf.tabout": {
           "scope": "resource",
@@ -365,6 +427,192 @@
         }
       }
     },
+    {
+      "title": "TeXLeaf · 文献",
+      "properties": {
+        "texleaf.zoteroCitations": {
+          "order": 1,
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "Zotero 引用功能总开关：启用项目 bibliography 与 Zotero 联动的原生引用补全。未信任工作区中始终停用。"
+        },
+        "texleaf.autoShowCitationPicker": {
+          "order": 4,
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "光标进入配置的 \\cite{…} 类命令参数时自动打开 VS Code 原生引用补全；关闭后仍可运行“TeXLeaf: 显示参考文献补全”。"
+        },
+        "texleaf.bibliographyFile": {
+          "order": 2,
+          "scope": "resource",
+          "type": "string",
+          "default": "reference.bib",
+          "description": "可自定义的项目内相对 .bib 路径，默认 reference.bib。简单文件名会优先使用从当前 TeX 文件向工作区根查找到的最近同名文件；不存在时在工作区根创建。"
+        },
+        "texleaf.citationCommands": {
+          "order": 5,
+          "scope": "resource",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^\\\\?[A-Za-z@]+\\*?$"
+          },
+          "default": [
+            "cite",
+            "citep",
+            "citet",
+            "Cite",
+            "Citet",
+            "autocite",
+            "parencite",
+            "textcite",
+            "footcite",
+            "supercite"
+          ],
+          "description": "触发原生引用补全的 LaTeX 命令名；可带或不带开头反斜杠，星号变体会自动兼容。"
+        },
+        "texleaf.zoteroPort": {
+          "order": 7,
+          "scope": "resource",
+          "type": "integer",
+          "default": 23119,
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Zotero/Better BibTeX 本机端口。连接固定限制为 127.0.0.1；Juris-M 通常使用 24119。"
+        },
+        "texleaf.zoteroLibrary": {
+          "order": 6,
+          "scope": "resource",
+          "type": "string",
+          "default": "My Library",
+          "description": "Zotero 库名称或内部数字 ID；默认读取 My Library，也可指定群组库。"
+        },
+        "texleaf.zoteroRequestTimeoutMs": {
+          "order": 8,
+          "scope": "resource",
+          "type": "integer",
+          "default": 10000,
+          "minimum": 500,
+          "maximum": 60000,
+          "description": "Zotero/Better BibTeX 本机请求的超时时间（毫秒）。"
+        },
+        "texleaf.zoteroCacheSeconds": {
+          "order": 9,
+          "scope": "resource",
+          "type": "integer",
+          "default": 30,
+          "minimum": 0,
+          "maximum": 3600,
+          "description": "Zotero 参考文献列表在内存中的缓存秒数；可随时运行刷新命令清除。"
+        },
+        "texleaf.bibliographyFormat": {
+          "order": 3,
+          "scope": "resource",
+          "type": "string",
+          "enum": [
+            "bibtex",
+            "biblatex"
+          ],
+          "enumDescriptions": [
+            "把 Zotero 新条目以 BibTeX 格式追加到 bibliography。",
+            "把 Zotero 新条目以 BibLaTeX 格式追加到 bibliography。"
+          ],
+          "default": "bibtex",
+          "description": "从 Zotero 导入新条目时使用的 bibliography 格式；默认 BibTeX，已有条目不会被重新格式化。"
+        }
+      }
+    },
+    {
+      "title": "TeXLeaf · 预览",
+      "properties": {
+        "texleaf.mathPreview.enabled": {
+          "order": 1,
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "启用 TeXLeaf 内置的实时数学公式预览。渲染器离线运行，不依赖 Ultra Math Preview 或 Hyperscopes Booster。"
+        },
+        "texleaf.mathPreview.presentation": {
+          "order": 2,
+          "scope": "resource",
+          "type": "string",
+          "enum": [
+            "cursor",
+            "hover",
+            "both"
+          ],
+          "enumDescriptions": [
+            "光标进入公式时，在公式旁显示 SVG 预览。",
+            "只在鼠标悬停时使用 VS Code 原生 Hover 显示预览。",
+            "同时启用光标预览与 Hover；若 LaTeX Workshop 也提供 Hover，可能出现两份内容。"
+          ],
+          "default": "cursor",
+          "description": "选择 Math Preview 的显示方式；默认只跟随活动光标，避免与其他 LaTeX 扩展的 Hover 重复。"
+        },
+        "texleaf.mathPreview.placement": {
+          "order": 3,
+          "scope": "resource",
+          "type": "string",
+          "enum": [
+            "auto",
+            "above",
+            "below"
+          ],
+          "enumDescriptions": [
+            "行内公式始终放在活动源码行下方；行间公式优先放在下方，下方可见空间不足时改到上方，上下均不足时仍保持在上方并保留公式尾部视图。",
+            "始终把光标预览放在公式上方。",
+            "始终把光标预览放在公式下方。"
+          ],
+          "default": "auto",
+          "description": "选择光标公式预览的浮动方向。行内公式默认位于活动源码行下方：起始行对齐定界符，后续行对齐该行首个非空白字符；行间公式对齐起始定界符。卡片不参与正文换行；VS Code 没有公开的横向视口尺寸或行间占位 API，因此超宽卡片右端可能被裁切，没有空白行时也可能临时遮住相邻行。"
+        },
+        "texleaf.mathPreview.debounceMs": {
+          "order": 4,
+          "scope": "resource",
+          "type": "integer",
+          "default": 120,
+          "minimum": 50,
+          "maximum": 2000,
+          "description": "停止键入或移动光标后等待多少毫秒再更新预览。较大的值更省电；大文档会自动至少使用 300 毫秒。"
+        },
+        "texleaf.mathPreview.scale": {
+          "order": 5,
+          "scope": "resource",
+          "type": "number",
+          "default": 1,
+          "minimum": 0.5,
+          "maximum": 3,
+          "description": "公式 SVG 的显示缩放倍数；光标预览超过 40em 宽度时会等比缩放，256em 高度仅作为异常 TeX 几何的绘制安全上限。"
+        },
+        "texleaf.mathPreview.maxSourceLength": {
+          "order": 6,
+          "scope": "resource",
+          "type": "integer",
+          "default": 8192,
+          "minimum": 256,
+          "maximum": 32768,
+          "description": "单条公式允许送入后台 MathJax 渲染器的最大 UTF-16 字符数，用于限制性能与宏展开风险。"
+        },
+        "texleaf.mathPreview.macros": {
+          "order": 7,
+          "scope": "resource",
+          "type": "object",
+          "default": {},
+          "maxProperties": 128,
+          "propertyNames": {
+            "pattern": "^[A-Za-z@]+$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "description": "可选的 MathJax 宏表：最多 128 项，键是不带反斜杠的命令名，值是替换文本；会自动从替换文本中的 #1…#9 推断参数个数。为匹配后台渲染器的安全边界，序列化后总长度超过 16384 个 UTF-16 字符时会按键名顺序忽略超出的定义。文档前言中的 newcommand、renewcommand、providecommand 和 DeclareMathOperator 会覆盖同名设置。"
+        }
+      }
+    }
+  ],
     "viewsContainers": {
       "activitybar": [
         {
@@ -385,13 +633,16 @@
     "viewsWelcome": [
       {
         "view": "texleaf.snippets",
-        "contents": "没有可显示的片段。\n[编辑全局 Snippet](command:texleaf.openSnippetEditor)\n[打开全局 JSONC 文件](command:texleaf.openSnippetFile)\n[恢复默认片段](command:texleaf.restoreDefaultSnippets)\n[重新加载](command:texleaf.reloadSnippets)"
+        "contents": "没有可显示的片段。\n[管理 Snippet 与模板](command:texleaf.openSnippetEditor)\n[管理 TeX 模板](command:texleaf.openTemplateFile)\n[打开高级 JSONC](command:texleaf.openSnippetFile)\n[恢复默认片段](command:texleaf.restoreDefaultSnippets)\n[重新加载](command:texleaf.reloadSnippets)"
       }
     ],
     "menus": {
       "commandPalette": [
         {
           "command": "texleaf.openSnippetFile"
+        },
+        {
+          "command": "texleaf.openTemplateFile"
         },
         {
           "command": "texleaf.restoreDefaultSnippets"
@@ -414,24 +665,29 @@
           "group": "navigation@3"
         },
         {
-          "command": "texleaf.importSnippets",
+          "command": "texleaf.openTemplateFile",
           "when": "view == texleaf.snippets",
           "group": "navigation@4"
         },
         {
-          "command": "texleaf.exportSnippets",
+          "command": "texleaf.importSnippets",
           "when": "view == texleaf.snippets",
           "group": "navigation@5"
         },
         {
-          "command": "texleaf.reloadSnippets",
+          "command": "texleaf.exportSnippets",
           "when": "view == texleaf.snippets",
           "group": "navigation@6"
         },
         {
-          "command": "texleaf.restoreDefaultSnippets",
+          "command": "texleaf.reloadSnippets",
           "when": "view == texleaf.snippets",
           "group": "navigation@7"
+        },
+        {
+          "command": "texleaf.restoreDefaultSnippets",
+          "when": "view == texleaf.snippets",
+          "group": "navigation@8"
         }
       ],
       "view/item/context": [

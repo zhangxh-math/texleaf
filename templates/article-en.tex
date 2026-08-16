@@ -1,0 +1,64 @@
+% TeXLeaf editable English article template.
+\documentclass[11pt,reqno]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{mathtools,amssymb,amsthm}
+\usepackage{mathrsfs}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\allowdisplaybreaks
+\numberwithin{equation}{section}
+
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{axiom}[theorem]{Axiom}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{claim}[theorem]{Claim}
+\newtheorem{conjecture}[theorem]{Conjecture}
+\newtheorem{hypothesis}[theorem]{Hypothesis}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+\newtheorem{example}[theorem]{Example}
+\newtheorem{exercise}[theorem]{Exercise}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+\title{@{0:Article Title}}
+\author{@{1:Author Name}\\
+  \small @{2:Affiliation}}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+@{3:Write the abstract here.}
+\end{abstract}
+
+\section{Introduction}
+
+@{4:Introduce the problem, context, and main contribution.}
+
+\section{Main Results}
+
+@{5:State and discuss the main results.}
+
+\section{Conclusion}
+
+@{6:Summarize the conclusions and possible future work.}
+
+\bibliographystyle{alpha}
+\bibliography{reference}
+
+@7
+\end{document}

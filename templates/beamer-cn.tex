@@ -1,0 +1,72 @@
+% TeXLeaf 可编辑中文 Beamer 模板。
+\documentclass[UTF8,aspectratio=169]{ctexbeamer}
+
+\usetheme{CambridgeUS}
+\usecolortheme{whale}
+
+\usepackage{mathtools,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+
+% Beamer 已提供 theorem、corollary、lemma、definition 和 example。
+\theoremstyle{plain}
+\newtheorem{axiom}[theorem]{公理}
+\newtheorem{proposition}[theorem]{命题}
+\newtheorem{claim}[theorem]{断言}
+\newtheorem{conjecture}[theorem]{猜想}
+\newtheorem{hypothesis}[theorem]{假设}
+
+\theoremstyle{definition}
+\newtheorem{assumption}[theorem]{假定}
+
+\theoremstyle{example}
+\newtheorem{exercise}[theorem]{练习}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{注}
+
+\title{@{0:演示文稿题目}}
+\subtitle{@{1:副标题（可选）}}
+\author{@{2:作者姓名}}
+\institute{@{3:单位}}
+\date{\today}
+
+\AtBeginSection[]{
+  \begin{frame}{目录}
+    \tableofcontents[currentsection]
+  \end{frame}
+}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{目录}
+  \tableofcontents
+\end{frame}
+
+\section{引言}
+
+\begin{frame}{@{4:研究动机}}
+  \begin{itemize}
+    \item @{5:第一点}
+    \item @{6:第二点}
+  \end{itemize}
+\end{frame}
+
+\section{主要结果}
+
+\begin{frame}{@{7:主要结果}}
+  @{8:在此加入核心论证、定理、图片或表格。}
+\end{frame}
+
+\section{结论}
+
+\begin{frame}{结论}
+  @{9:总结主要内容与后续工作。}
+\end{frame}
+
+@10
+\end{document}

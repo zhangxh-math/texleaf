@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type * as vscode from "vscode";
 import { parse, type ParseError } from "jsonc-parser";
 import { serializeDefaultSnippetLibrary } from "./defaultLibrary";
+import { TEMPLATE_LIBRARY_STATE_KEY } from "./templateLibrary";
 
 /**
  * Files under ExtensionContext.globalStorageUri are deliberately not part of
@@ -370,7 +371,10 @@ export class SnippetSyncController implements vscode.Disposable {
 
     // Calling this with the complete set on every activation is intentional:
     // VS Code stores the registration per extension version.
-    this.context.globalState.setKeysForSync([SNIPPET_SYNC_STATE_KEY]);
+    this.context.globalState.setKeysForSync([
+      SNIPPET_SYNC_STATE_KEY,
+      TEMPLATE_LIBRARY_STATE_KEY,
+    ]);
 
     this.disposables.push(
       this.repository.onDidChange(() => {

@@ -3,12 +3,9 @@ import path from "node:path";
 
 const watch = process.argv.includes("--watch");
 const workspaceRoot = process.cwd();
-const options = {
+const commonOptions = {
   absWorkingDir: workspaceRoot,
-  entryPoints: [path.join(workspaceRoot, "src", "extension.ts")],
   bundle: true,
-  outfile: path.join(workspaceRoot, "dist", "extension.js"),
-  external: ["vscode"],
   format: "cjs",
   // jsonc-parser publishes a UMD `main` whose aliased `require` calls cannot
   // be statically bundled. Prefer its ESM entry so every implementation
@@ -23,10 +20,29 @@ const options = {
   logLevel: "info",
 };
 
+const extensionOptions = {
+  ...commonOptions,
+  entryPoints: [path.join(workspaceRoot, "src", "extension.ts")],
+  outfile: path.join(workspaceRoot, "dist", "extension.js"),
+  external: ["vscode"],
+};
+
+const workerOptions = {
+  ...commonOptions,
+  entryPoints: [path.join(workspaceRoot, "src", "mathPreviewWorker.ts")],
+  outfile: path.join(workspaceRoot, "dist", "mathPreviewWorker.js"),
+};
+
 if (watch) {
-  const context = await esbuild.context(options);
-  await context.watch();
+  const contexts = await Promise.all([
+    esbuild.context(extensionOptions),
+    esbuild.context(workerOptions),
+  ]);
+  await Promise.all(contexts.map((context) => context.watch()));
   console.log("TeXLeaf is watching for changes...");
 } else {
-  await esbuild.build(options);
+  await Promise.all([
+    esbuild.build(extensionOptions),
+    esbuild.build(workerOptions),
+  ]);
 }

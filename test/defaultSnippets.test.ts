@@ -12,10 +12,12 @@ import {
   DEFAULT_VARIABLES,
   FACTORY_DEFAULTS_REVISION,
   serializeDefaultSnippetLibrary,
+  THEOREM_ENVIRONMENT_FACTORY_SNIPPET_IDS,
+  upgradeRevisionTwoTheoremFactorySnippet,
 } from "../src/defaultLibrary";
 
 test("factory library remains complete, unique, and declarative", () => {
-  assert.equal(DEFAULT_SNIPPETS.length, 199);
+  assert.equal(DEFAULT_SNIPPETS.length, 212);
   assert.equal(DEFAULT_SNIPPETS.filter((snippet) => snippet.options.includes("r")).length, 35);
   assert.equal(DEFAULT_SNIPPETS.filter((snippet) => snippet.options.includes("v")).length, 9);
 
@@ -24,9 +26,155 @@ test("factory library remains complete, unique, and declarative", () => {
   assert.ok(DEFAULT_SNIPPETS.every((snippet) => typeof snippet.replacement === "string"));
 
   const byTrigger = new Map(DEFAULT_SNIPPETS.map((snippet) => [snippet.trigger, snippet]));
-  assert.equal(byTrigger.get("mk")?.replacement, "\\(@0\\)");
+  assert.equal(byTrigger.has("mk"), false);
+  assert.equal(byTrigger.get("lm")?.replacement, "\\(@0\\)");
   assert.equal(byTrigger.get("//")?.replacement, "\\frac{@0}{@1}@2");
   assert.equal(byTrigger.get(";a")?.replacement, "\\alpha");
+
+  const theoremTriggers = new Map([
+    ["\\axm", "axiom"],
+    ["\\dfn", "definition"],
+    ["\\lem", "lemma"],
+    ["\\prp", "proposition"],
+    ["\\thm", "theorem"],
+    ["\\cor", "corollary"],
+    ["\\clm", "claim"],
+    ["\\asm", "assumption"],
+    ["\\exm", "example"],
+    ["\\exr", "exercise"],
+    ["\\cnj", "conjecture"],
+    ["\\hyp", "hypothesis"],
+    ["\\rmk", "remark"],
+  ]);
+  for (const [trigger, environment] of theoremTriggers) {
+    const snippet = byTrigger.get(trigger);
+    assert.equal(snippet?.options, "tAw", trigger);
+    assert.equal(
+      snippet?.replacement,
+      `\\begin{${environment}}\n\t@0\n\\end{${environment}}\n@1`,
+      trigger,
+    );
+    assert.equal(byTrigger.has(trigger.slice(1)), false, trigger);
+  }
+});
+
+test("revision-2 theorem defaults upgrade only when the complete record is untouched", () => {
+  assert.equal(FACTORY_DEFAULTS_REVISION, 3);
+  assert.equal(THEOREM_ENVIRONMENT_FACTORY_SNIPPET_IDS.length, 13);
+
+  for (const id of THEOREM_ENVIRONMENT_FACTORY_SNIPPET_IDS) {
+    const current = DEFAULT_SNIPPETS.find((snippet) => snippet.id === id);
+    assert.ok(current, id);
+    const oldFactoryRecord = {
+      ...current,
+      trigger:
+        id === "environment.definition" ? "def" : current.trigger.slice(1),
+      options: "tw",
+    };
+    const untouchedSnapshot = structuredClone(oldFactoryRecord);
+    assert.deepEqual(
+      upgradeRevisionTwoTheoremFactorySnippet(oldFactoryRecord),
+      current,
+      `${id} must migrate from the exact revision-2 factory record`,
+    );
+    assert.deepEqual(
+      oldFactoryRecord,
+      untouchedSnapshot,
+      `${id} migration must not mutate the parsed user record`,
+    );
+
+    const customizedRecords = [
+      { ...oldFactoryRecord, trigger: `custom-${oldFactoryRecord.trigger}` },
+      { ...oldFactoryRecord, options: "tAw" },
+      {
+        ...oldFactoryRecord,
+        replacement: `${oldFactoryRecord.replacement}% custom`,
+      },
+      { ...oldFactoryRecord, description: "Custom description" },
+      { ...oldFactoryRecord, category: "Custom category" },
+      { ...oldFactoryRecord, enabled: false },
+      { ...oldFactoryRecord, enabled: true },
+      { ...oldFactoryRecord, priority: 100 },
+      { ...oldFactoryRecord, customMetadata: "keep me" },
+    ];
+    const { category: _category, ...missingFactoryField } = oldFactoryRecord;
+    customizedRecords.push(missingFactoryField as typeof oldFactoryRecord);
+    for (const customized of customizedRecords) {
+      assert.equal(
+        upgradeRevisionTwoTheoremFactorySnippet(customized),
+        undefined,
+        `${id} customization must block the narrow migration`,
+      );
+    }
+  }
+
+  const customSameId = {
+    id: "environment.theorem",
+    trigger: "thm",
+    replacement: "\\operatorname{MyTheorem}",
+    options: "tw",
+    description: "Theorem environment",
+    category: "Theorem environments",
+  };
+  assert.equal(
+    upgradeRevisionTwoTheoremFactorySnippet(customSameId),
+    undefined,
+    "a customized record with a factory ID must remain user-owned",
+  );
+
+  const currentTheorem = DEFAULT_SNIPPETS.find(
+    (snippet) => snippet.id === "environment.theorem",
+  );
+  assert.ok(currentTheorem);
+  const oldTheorem = { ...currentTheorem, trigger: "thm", options: "tw" };
+  for (const conflictingSnippet of [
+    {
+      id: "user.literal-theorem",
+      trigger: "\\thm",
+      replacement: "custom",
+      options: "tA",
+      enabled: false,
+    },
+    {
+      id: "user.regex-theorem",
+      trigger: { kind: "regex", source: "\\\\thm", flags: "" },
+      replacement: "custom",
+      options: "rtA",
+    },
+  ]) {
+    assert.equal(
+      upgradeRevisionTwoTheoremFactorySnippet(oldTheorem, [
+        oldTheorem,
+        conflictingSnippet,
+      ]),
+      undefined,
+      `${conflictingSnippet.id} must protect its occupied \\thm trigger`,
+    );
+  }
+  assert.deepEqual(
+    upgradeRevisionTwoTheoremFactorySnippet(oldTheorem, [
+      oldTheorem,
+      {
+        id: "user.other-trigger",
+        trigger: "\\other",
+        replacement: "custom",
+        options: "tA",
+      },
+    ]),
+    currentTheorem,
+    "an unrelated custom trigger must not block the narrow theorem upgrade",
+  );
+  assert.equal(upgradeRevisionTwoTheoremFactorySnippet(null), undefined);
+  assert.equal(upgradeRevisionTwoTheoremFactorySnippet([]), undefined);
+  assert.equal(
+    upgradeRevisionTwoTheoremFactorySnippet({
+      id: "user.theorem",
+      trigger: "thm",
+      replacement: "custom",
+      options: "tw",
+    }),
+    undefined,
+  );
 });
 
 test("every factory definition validates and compiles through the production core", () => {
@@ -61,10 +209,54 @@ test("every factory definition validates and compiles through the production cor
   );
 
   const matcher = new SnippetMatcher(compiled.value);
+  const textContext = {
+    mathMode: "text" as const,
+    inComment: false,
+    inVerbatim: false,
+    inSnippetSuppressedArgument: false,
+    snippetSuppressionCommand: undefined,
+    environments: [],
+    matrixEnvironment: undefined,
+  };
+  for (const [trigger, environment] of [
+    ["\\thm", "theorem"],
+    ["\\dfn", "definition"],
+  ] as const) {
+    const match = matcher.match({
+      textBefore: trigger,
+      context: textContext,
+      activation: "auto",
+    });
+    assert.equal(match?.matchedText, trigger);
+    assert.equal(
+      replacementPartsToText(match?.replacement ?? []),
+      `\\begin{${environment}}\n\t\n\\end{${environment}}\n`,
+    );
+    assert.equal(
+      matcher.match({
+        textBefore: trigger.slice(1),
+        context: textContext,
+        activation: "auto",
+      }),
+      undefined,
+      `${trigger} must retain its leading backslash requirement`,
+    );
+  }
+  assert.equal(
+    matcher.match({
+      textBefore: "\\def",
+      context: textContext,
+      activation: "auto",
+    }),
+    undefined,
+    "the TeX primitive \\def must not be claimed by the definition shortcut",
+  );
   const inlineMathContext = {
     mathMode: "inline" as const,
     inComment: false,
     inVerbatim: false,
+    inSnippetSuppressedArgument: false,
+    snippetSuppressionCommand: undefined,
     environments: [],
     matrixEnvironment: undefined,
   };
