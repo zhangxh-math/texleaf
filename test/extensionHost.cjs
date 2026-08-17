@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
 const vscode = require("vscode");
@@ -30,7 +31,7 @@ function contributedConfigurationProperties(extension) {
 async function waitFor(predicate, description, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (predicate()) {
+    if (await predicate()) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
@@ -57,9 +58,167 @@ async function settlesWithin(promise, description, timeoutMs = 1_500) {
   }
 }
 
+function assertNoAiDiagnostics(document, description) {
+  assert.deepEqual(
+    vscode.languages
+      .getDiagnostics(document.uri)
+      .filter((diagnostic) => diagnostic.source === "TeXLeaf AI"),
+    [],
+    description,
+  );
+}
+
+function hoverContentsText(hover) {
+  return hover.contents
+    .map((content) => typeof content === "string" ? content : content.value ?? "")
+    .join("\n");
+}
+
+function texLeafAiHover(hovers) {
+  return Array.isArray(hovers) ? hovers.find((hover) =>
+    hoverContentsText(hover).includes("TeXLeaf AI")
+  ) : undefined;
+}
+
+async function hasTexLeafAiHover(document, offset) {
+  const hovers = await vscode.commands.executeCommand(
+    "vscode.executeHoverProvider",
+    document.uri,
+    document.positionAt(offset),
+  );
+  return texLeafAiHover(hovers) !== undefined;
+}
+
+async function getTexLeafAiHover(document, offset) {
+  return texLeafAiHover(await vscode.commands.executeCommand(
+    "vscode.executeHoverProvider",
+    document.uri,
+    document.positionAt(offset),
+  ));
+}
+
+async function hasTexLeafAiQuickFix(document, start, end) {
+  return (await texLeafAiQuickFix(document, start, end)) !== undefined;
+}
+
+async function texLeafAiQuickFix(document, start, end) {
+  return (await texLeafAiQuickFixes(document, start, end)).find((action) =>
+    action.command?.command === "texleaf.aiWriting.applyIssue"
+  );
+}
+
+async function texLeafAiQuickFixes(document, start, end) {
+  const actions = await vscode.commands.executeCommand(
+    "vscode.executeCodeActionProvider",
+    document.uri,
+    new vscode.Range(document.positionAt(start), document.positionAt(end)),
+    vscode.CodeActionKind.QuickFix.value,
+  );
+  return Array.isArray(actions) ? actions.filter((action) =>
+    action.command?.command === "texleaf.aiWriting.applyIssue" ||
+    action.command?.command === "texleaf.aiWriting.ignoreIssue"
+  ) : [];
+}
+
+function markdownCommandLink(markdown, command) {
+  const links = [...markdown.value.matchAll(/\]\((command:[^)]+)\)/gu)]
+    .map((match) => match[1])
+    .filter((link) => {
+      try {
+        const uri = vscode.Uri.parse(link);
+        return uri.scheme === "command" && uri.path === command;
+      } catch {
+        return false;
+      }
+    });
+  assert.equal(
+    links.length,
+    1,
+    `the Hover must expose exactly one ${command} command link`,
+  );
+  return links[0];
+}
+
+function commandArgumentsFromLink(link) {
+  const commandUri = vscode.Uri.parse(link);
+  for (const query of [commandUri.query, decodeURIComponent(commandUri.query)]) {
+    try {
+      const parsed = JSON.parse(query);
+      if (Array.isArray(parsed)) {
+        return { command: commandUri.path, arguments: parsed };
+      }
+    } catch {
+      // Try the once-decoded form next. VS Code preserves percent escapes in
+      // Uri.query while Markdown command links encode JSON as a URI query.
+    }
+  }
+  assert.fail("the Hover command link must contain a JSON argument array");
+}
+
+async function writeAiIssueSnapshotForSource(
+  globalSnippetUri,
+  uri,
+  source,
+  original,
+  documentVersion = 1,
+  replacement = "poor",
+  category = "word-choice",
+) {
+  const start = source.indexOf(original);
+  assert.ok(start >= 0, "the persistence fixture original must exist");
+  const uriText = uri.toString();
+  const fingerprint = createHash("sha256")
+    .update(`${uriText}\0${start}\0${original}`, "utf8")
+    .digest("hex");
+  const record = {
+    schema: 1,
+    uri: uriText,
+    sourceHash: createHash("sha256").update(source, "utf8").digest("hex"),
+    sourceLength: source.length,
+    documentVersion,
+    savedAt: Date.now(),
+    issues: [{
+      id: `texleaf-ai-${fingerprint}`,
+      fingerprint,
+      start,
+      end: start + original.length,
+      original,
+      replacement,
+      message: "建议修改用词",
+      explanation: "这里使用更准确的表达。",
+      category,
+      severity: vscode.DiagnosticSeverity.Warning,
+    }],
+  };
+  const storageDirectory = vscode.Uri.joinPath(
+    globalSnippetUri,
+    "..",
+    "ai-writing-issues-v1",
+  );
+  await vscode.workspace.fs.createDirectory(storageDirectory);
+  const fileName = `${createHash("sha256").update(uriText, "utf8").digest("hex")}.json`;
+  const cacheUri = vscode.Uri.joinPath(storageDirectory, fileName);
+  await vscode.workspace.fs.writeFile(
+    cacheUri,
+    new TextEncoder().encode(`${JSON.stringify(record)}\n`),
+  );
+  return cacheUri;
+}
+
 async function replaceDocument(editor, text, cursorOffset) {
   const document = editor.document;
-  const replaced = await editor.edit(
+  const targetEditor =
+    vscode.window.activeTextEditor?.document.uri.toString() ===
+      document.uri.toString()
+      ? editor
+      : await vscode.window.showTextDocument(document, { preview: false });
+  await waitFor(
+    () =>
+      vscode.window.activeTextEditor?.document.uri.toString() ===
+      document.uri.toString(),
+    "the target editor to receive test keyboard input",
+  );
+  const replaced = await targetEditor.edit(
     (builder) => {
       builder.replace(
         new vscode.Range(
@@ -78,13 +237,37 @@ async function replaceDocument(editor, text, cursorOffset) {
     prefixLines.length - 1,
     prefixLines.at(-1)?.length ?? 0,
   );
-  editor.selection = new vscode.Selection(cursor, cursor);
+  targetEditor.selection = new vscode.Selection(cursor, cursor);
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
 
-async function typeEach(text) {
+async function typeEach(text, expectedEditor) {
   for (const character of text) {
+    const expectedDocument = expectedEditor?.document;
+    if (
+      expectedDocument !== undefined &&
+      vscode.window.activeTextEditor?.document.uri.toString() !==
+        expectedDocument.uri.toString()
+    ) {
+      await vscode.window.showTextDocument(expectedDocument, { preview: false });
+    }
+    if (expectedDocument !== undefined) {
+      await waitFor(
+        () =>
+          vscode.window.activeTextEditor?.document.uri.toString() ===
+          expectedDocument.uri.toString(),
+        `the expected editor before typing ${JSON.stringify(character)}`,
+      );
+    }
+
+    const versionBeforeType = expectedDocument?.version;
     await vscode.commands.executeCommand("type", { text: character });
+    if (expectedDocument !== undefined && versionBeforeType !== undefined) {
+      await waitFor(
+        () => expectedDocument.version > versionBeforeType,
+        `the expected document change after typing ${JSON.stringify(character)}`,
+      );
+    }
   }
 }
 
@@ -626,7 +809,7 @@ async function run() {
       const fixture = `\\begin{equation}${commandSyntax}}\\end{equation}`;
       const argumentOffset = fixture.indexOf(commandSyntax) + commandSyntax.length;
       await replaceDocument(editor, fixture, argumentOffset);
-      await typeEach(";a");
+      await typeEach(";a", editor);
       await new Promise((resolve) => setTimeout(resolve, 150));
       assert.equal(
         document.getText(),
@@ -645,7 +828,7 @@ async function run() {
     const equationFixture = "\\begin{equation}\\label{eq:test}\\end{equation}";
     const equationBodyOffset = equationFixture.indexOf("\\end{equation}");
     await replaceDocument(editor, equationFixture, equationBodyOffset);
-    await typeEach(";a");
+    await typeEach(";a", editor);
     await waitFor(
       () =>
         document.getText() ===
@@ -664,8 +847,184 @@ async function run() {
     assert.ok(commands.includes("texleaf.toggleMathPreview"));
     assert.ok(commands.includes("texleaf.refreshMathPreview"));
     assert.ok(commands.includes("texleaf.dismissMathPreview"));
+    assert.ok(commands.includes("texleaf.aiWriting.toggle"));
+    assert.ok(commands.includes("texleaf.aiWriting.setApiKey"));
+    assert.ok(commands.includes("texleaf.aiWriting.clearApiKey"));
+    assert.ok(commands.includes("texleaf.aiWriting.reviewParagraph"));
+    assert.ok(commands.includes("texleaf.aiWriting.reviewDocument"));
+    assert.ok(commands.includes("texleaf.aiWriting.rewriteSelection"));
+    assert.ok(commands.includes("texleaf.aiWriting.triggerCompletion"));
+    assert.ok(commands.includes("texleaf.aiWriting.clearDiagnostics"));
+    assert.ok(commands.includes("texleaf.aiWriting.showIssues"));
+    assert.ok(commands.includes("texleaf.aiWriting.applyAll"));
+    assert.ok(commands.includes("texleaf.aiWriting.revealIssue"));
+    assert.ok(commands.includes("texleaf.aiWriting.applyIssue"));
+    assert.ok(commands.includes("texleaf.aiWriting.ignoreIssue"));
+    assert.ok(commands.includes("texleaf.aiIssues.reveal"));
+    assert.ok(commands.includes("texleaf.aiIssues.apply"));
+    assert.ok(commands.includes("texleaf.aiIssues.ignore"));
     assert.ok(commands.includes("default:replacePreviousChar"));
     assert.ok(commands.includes("default:compositionType"));
+    await settlesWithin(
+      vscode.commands.executeCommand("texleaf.aiWriting.showIssues"),
+      "opening the dedicated AI issue list",
+    );
+    await settlesWithin(
+      vscode.commands.executeCommand("texleaf.aiIssues.apply", {
+        kind: "status",
+      }),
+      "rejecting a non-issue tree item without editing",
+    );
+    await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assertNoAiDiagnostics(
+      document,
+      "default-off AI writing must not create diagnostics in an edited .tex document",
+    );
+    const originalFetch = globalThis.fetch;
+    assert.equal(typeof originalFetch, "function");
+    let aiFetchCount = 0;
+    const customDeepSeekEndpoint =
+      "https://example.invalid/deepseek/chat/completions";
+    const customResponsesEndpoint = "https://example.invalid/compatible/v1/responses";
+    globalThis.fetch = async (input, init) => {
+      if (
+        String(input) === "https://api.deepseek.com/chat/completions" ||
+        String(input) === "https://workspace.invalid/deepseek/chat/completions" ||
+        String(input) === customDeepSeekEndpoint ||
+        String(input) === "https://api.openai.com/v1/responses" ||
+        String(input) === "https://workspace.invalid/v1/responses" ||
+        String(input) === customResponsesEndpoint
+      ) {
+        aiFetchCount += 1;
+        throw new Error("default-off AI attempted a forbidden test request");
+      }
+      return originalFetch(input, init);
+    };
+    try {
+      const offlineFixture = "Default-off AI must keep this prose local.";
+      await replaceDocument(editor, offlineFixture, offlineFixture.length);
+      await document.save();
+      await new Promise((resolve) => setTimeout(resolve, 1_800));
+
+      const aiConfiguration = vscode.workspace.getConfiguration(
+        "texleaf",
+        document.uri,
+      );
+      assert.deepEqual(
+        {
+          enabled: aiConfiguration.get("aiWriting.enabled"),
+          automaticReview: aiConfiguration.get("aiWriting.automaticReview"),
+          inlineCompletions: aiConfiguration.get("aiWriting.inlineCompletions"),
+          provider: aiConfiguration.get("aiWriting.provider"),
+          deepseekModel: aiConfiguration.get("aiWriting.deepseekModel"),
+          deepseekBaseUrl: aiConfiguration.get("aiWriting.deepseekBaseUrl"),
+          openaiModel: aiConfiguration.get("aiWriting.openaiModel"),
+          openaiBaseUrl: aiConfiguration.get("aiWriting.openaiBaseUrl"),
+          language: aiConfiguration.get("aiWriting.language"),
+          style: aiConfiguration.get("aiWriting.style"),
+          reviewDelayMs: aiConfiguration.get("aiWriting.reviewDelayMs"),
+          completionDelayMs: aiConfiguration.get("aiWriting.completionDelayMs"),
+          maxParagraphLength: aiConfiguration.get("aiWriting.maxParagraphLength"),
+          maxDocumentLength: aiConfiguration.get("aiWriting.maxDocumentLength"),
+        },
+        {
+          enabled: false,
+          automaticReview: true,
+          inlineCompletions: true,
+          provider: "deepseek",
+          deepseekModel: "deepseek-v4-flash",
+          deepseekBaseUrl: "https://api.deepseek.com",
+          openaiModel: "gpt-5.6-luna",
+          openaiBaseUrl: "https://api.openai.com/v1",
+          language: "auto",
+          style: "academic",
+          reviewDelayMs: 900,
+          completionDelayMs: 500,
+          maxParagraphLength: 6_000,
+          maxDocumentLength: 30_000,
+        },
+        "workspace settings must not enable, redirect, or change the cost profile of AI writing",
+      );
+      await aiConfiguration.update(
+        "aiWriting.enabled",
+        true,
+        vscode.ConfigurationTarget.Global,
+      );
+      await waitFor(
+        () => vscode.workspace
+          .getConfiguration("texleaf", document.uri)
+          .get("aiWriting.enabled") === true,
+        "AI setting-only enablement",
+      );
+      const noConsentFixture = "A setting alone must not grant upload consent.";
+      await replaceDocument(editor, noConsentFixture, noConsentFixture.length);
+      await document.save();
+      await new Promise((resolve) => setTimeout(resolve, 1_800));
+
+      await aiConfiguration.update(
+        "aiWriting.deepseekBaseUrl",
+        "https://example.invalid/deepseek",
+        vscode.ConfigurationTarget.Global,
+      );
+      const noCustomDeepSeekConsentFixture =
+        "A custom DeepSeek endpoint must require independent consent and key.";
+      await replaceDocument(
+        editor,
+        noCustomDeepSeekConsentFixture,
+        noCustomDeepSeekConsentFixture.length,
+      );
+      await document.save();
+      await new Promise((resolve) => setTimeout(resolve, 1_800));
+
+      await aiConfiguration.update(
+        "aiWriting.provider",
+        "openai",
+        vscode.ConfigurationTarget.Global,
+      );
+      await aiConfiguration.update(
+        "aiWriting.openaiBaseUrl",
+        "https://example.invalid/compatible/v1",
+        vscode.ConfigurationTarget.Global,
+      );
+      const noOpenAIConsentFixture =
+        "A custom endpoint must require its own explicit consent and key.";
+      await replaceDocument(
+        editor,
+        noOpenAIConsentFixture,
+        noOpenAIConsentFixture.length,
+      );
+      await document.save();
+      await new Promise((resolve) => setTimeout(resolve, 1_800));
+
+      await aiConfiguration.update(
+        "aiWriting.enabled",
+        false,
+        vscode.ConfigurationTarget.Global,
+      );
+      await aiConfiguration.update(
+        "aiWriting.provider",
+        undefined,
+        vscode.ConfigurationTarget.Global,
+      );
+      await aiConfiguration.update(
+        "aiWriting.deepseekBaseUrl",
+        undefined,
+        vscode.ConfigurationTarget.Global,
+      );
+      await aiConfiguration.update(
+        "aiWriting.openaiBaseUrl",
+        undefined,
+        vscode.ConfigurationTarget.Global,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    assert.equal(
+      aiFetchCount,
+      0,
+      "default-off and setting-only-without-consent AI must never call any provider",
+    );
 
     const tabKeybindings = extension.packageJSON.contributes.keybindings.filter(
       (keybinding) =>
@@ -740,6 +1099,36 @@ async function run() {
       contributedCommands.get("texleaf.refreshZotero"),
       "TeXLeaf: 刷新 Zotero 参考文献缓存",
     );
+    assert.deepEqual(
+      [...contributedCommands]
+        .filter(([id]) => id.startsWith("texleaf.aiWriting.")),
+      [
+        ["texleaf.aiWriting.toggle", "TeXLeaf: 切换 AI 写作助手"],
+        ["texleaf.aiWriting.setApiKey", "TeXLeaf: 设置当前 AI 服务商 API Key"],
+        ["texleaf.aiWriting.clearApiKey", "TeXLeaf: 清除当前 AI 服务商 API Key"],
+        ["texleaf.aiWriting.reviewParagraph", "TeXLeaf: AI 检查当前段落或选区"],
+        ["texleaf.aiWriting.reviewDocument", "TeXLeaf: AI 检查当前文档"],
+        ["texleaf.aiWriting.rewriteSelection", "TeXLeaf: AI 改写选区或当前句"],
+        ["texleaf.aiWriting.triggerCompletion", "TeXLeaf: 触发 AI 行内补全"],
+        ["texleaf.aiWriting.clearDiagnostics", "TeXLeaf: 清除 AI 写作问题"],
+        ["texleaf.aiWriting.showIssues", "TeXLeaf: 显示 AI 写作问题列表"],
+        ["texleaf.aiWriting.applyAll", "TeXLeaf: 应用当前全部 AI 建议"],
+      ],
+      "all public AI writing commands must have stable titles",
+    );
+    assert.deepEqual(
+      [
+        "texleaf.aiIssues.reveal",
+        "texleaf.aiIssues.apply",
+        "texleaf.aiIssues.ignore",
+      ].map((id) => [id, contributedCommands.get(id)]),
+      [
+        ["texleaf.aiIssues.reveal", "TeXLeaf: 定位 AI 写作问题"],
+        ["texleaf.aiIssues.apply", "TeXLeaf: 应用这条 AI 建议"],
+        ["texleaf.aiIssues.ignore", "TeXLeaf: 本次会话忽略这条 AI 建议"],
+      ],
+      "tree-only AI issue commands must have stable titles",
+    );
     assert.equal(
       configurationProperties["texleaf.bibliographyFile"].default,
       "reference.bib",
@@ -796,6 +1185,23 @@ async function run() {
       true,
       "the empty snippet tree must offer the guarded restore command",
     );
+    assert.equal(
+      extension.packageJSON.contributes.views.texleaf.some(
+        (view) =>
+          view.id === "texleaf.aiIssues" && view.name === "AI 写作问题",
+      ),
+      true,
+      "the TeXLeaf container must expose a dedicated AI issue list",
+    );
+    assert.equal(
+      extension.packageJSON.contributes.viewsWelcome.some(
+        (item) =>
+          item.view === "texleaf.aiIssues" &&
+          item.contents.includes("command:texleaf.aiWriting.reviewDocument"),
+      ),
+      true,
+      "the empty AI issue list must explain how to start a review",
+    );
     assert.deepEqual(
       configurationProperties["texleaf.snippetFiles"].default,
       [],
@@ -818,6 +1224,20 @@ async function run() {
         "texleaf.zoteroPort",
         "texleaf.zoteroLibrary",
         "texleaf.mathPreview.macros",
+        "texleaf.aiWriting.enabled",
+        "texleaf.aiWriting.automaticReview",
+        "texleaf.aiWriting.inlineCompletions",
+        "texleaf.aiWriting.provider",
+        "texleaf.aiWriting.deepseekModel",
+        "texleaf.aiWriting.deepseekBaseUrl",
+        "texleaf.aiWriting.openaiModel",
+        "texleaf.aiWriting.openaiBaseUrl",
+        "texleaf.aiWriting.language",
+        "texleaf.aiWriting.style",
+        "texleaf.aiWriting.reviewDelayMs",
+        "texleaf.aiWriting.completionDelayMs",
+        "texleaf.aiWriting.maxParagraphLength",
+        "texleaf.aiWriting.maxDocumentLength",
       ],
       "untrusted projects must not inject snippet or Zotero connection settings",
     );
@@ -831,9 +1251,10 @@ async function run() {
       [
         "TeXLeaf · 片段",
         "TeXLeaf · 文献",
+        "TeXLeaf · AI 写作",
         "TeXLeaf · 预览",
       ],
-      "Settings UI must expose exactly the snippet, reference, and preview categories",
+      "Settings UI must expose exactly the snippet, reference, AI writing, and preview categories",
     );
     assert.deepEqual(
       configurationGroups.map((group) => Object.keys(group.properties)),
@@ -874,6 +1295,22 @@ async function run() {
           "texleaf.bibliographyFormat",
         ],
         [
+          "texleaf.aiWriting.enabled",
+          "texleaf.aiWriting.automaticReview",
+          "texleaf.aiWriting.inlineCompletions",
+          "texleaf.aiWriting.provider",
+          "texleaf.aiWriting.deepseekModel",
+          "texleaf.aiWriting.deepseekBaseUrl",
+          "texleaf.aiWriting.openaiModel",
+          "texleaf.aiWriting.openaiBaseUrl",
+          "texleaf.aiWriting.language",
+          "texleaf.aiWriting.style",
+          "texleaf.aiWriting.reviewDelayMs",
+          "texleaf.aiWriting.completionDelayMs",
+          "texleaf.aiWriting.maxParagraphLength",
+          "texleaf.aiWriting.maxDocumentLength",
+        ],
+        [
           "texleaf.mathPreview.enabled",
           "texleaf.mathPreview.presentation",
           "texleaf.mathPreview.placement",
@@ -889,6 +1326,96 @@ async function run() {
       configurationProperties["texleaf.zoteroCitations"].default,
       true,
       "the Zotero category must expose a master switch",
+    );
+    assert.equal(
+      configurationProperties["texleaf.aiWriting.enabled"].default,
+      false,
+      "AI writing must remain explicit opt-in and make no default network requests",
+    );
+    assert.equal(
+      configurationProperties["texleaf.aiWriting.provider"].default,
+      "deepseek",
+    );
+    assert.deepEqual(
+      configurationProperties["texleaf.aiWriting.provider"].enum,
+      ["deepseek", "openai"],
+    );
+    assert.equal(
+      configurationProperties["texleaf.aiWriting.deepseekModel"].default,
+      "deepseek-v4-flash",
+    );
+    assert.deepEqual(
+      configurationProperties["texleaf.aiWriting.deepseekModel"].enum,
+      ["deepseek-v4-flash", "deepseek-v4-pro"],
+    );
+    assert.equal(
+      configurationProperties["texleaf.aiWriting.deepseekBaseUrl"].default,
+      "https://api.deepseek.com",
+    );
+    assert.equal(
+      configurationProperties["texleaf.aiWriting.openaiModel"].default,
+      "gpt-5.6-luna",
+    );
+    assert.equal(
+      configurationProperties["texleaf.aiWriting.openaiBaseUrl"].default,
+      "https://api.openai.com/v1",
+    );
+    assert.equal(
+      Object.hasOwn(configurationProperties, "texleaf.aiWriting.model"),
+      false,
+      "the ambiguous 0.8.0 model setting must remain runtime-only compatibility input",
+    );
+    assert.equal(
+      configurationProperties["texleaf.aiWriting.automaticReview"].default,
+      true,
+    );
+    assert.equal(
+      configurationProperties["texleaf.aiWriting.inlineCompletions"].default,
+      true,
+    );
+    assert.equal(
+      configurationProperties["texleaf.aiWriting.reviewDelayMs"].default,
+      900,
+      "automatic review should default to a responsive but debounced delay",
+    );
+    for (const key of Object.keys(
+      configurationGroups.find((group) => group.title === "TeXLeaf · AI 写作")
+        .properties,
+    )) {
+      assert.equal(
+        configurationProperties[key].scope,
+        "application",
+        `${key} must remain a user/Profile-only AI transmission setting`,
+      );
+    }
+    for (const key of [
+      "texleaf.aiWriting.reviewDelayMs",
+      "texleaf.aiWriting.completionDelayMs",
+      "texleaf.aiWriting.maxParagraphLength",
+      "texleaf.aiWriting.maxDocumentLength",
+    ]) {
+      assert.equal(Number.isInteger(configurationProperties[key].default), true);
+      assert.equal(Number.isInteger(configurationProperties[key].minimum), true);
+      assert.equal(Number.isInteger(configurationProperties[key].maximum), true);
+    }
+    assert.deepEqual(
+      extension.packageJSON.contributes.menus.commandPalette
+        .filter((item) => item.when !== "false")
+        .map((item) => item.command)
+        .filter((command) => command.startsWith("texleaf.aiWriting.")),
+      [
+        "texleaf.aiWriting.toggle",
+        "texleaf.aiWriting.setApiKey",
+        "texleaf.aiWriting.clearApiKey",
+        "texleaf.aiWriting.reviewParagraph",
+        "texleaf.aiWriting.reviewDocument",
+        "texleaf.aiWriting.rewriteSelection",
+        "texleaf.aiWriting.triggerCompletion",
+        "texleaf.aiWriting.clearDiagnostics",
+        "texleaf.aiWriting.showIssues",
+        "texleaf.aiWriting.applyAll",
+      ],
+      "only public AI commands belong in the Command Palette",
     );
     assert.equal(
       configurationProperties["texleaf.mathPreview.enabled"].default,
@@ -2775,6 +3302,10 @@ async function run() {
       /\\documentclass/u,
       "document templates must remain limited to saved .tex files",
     );
+    assertNoAiDiagnostics(
+      bib.document,
+      ".bib files must never receive AI writing diagnostics",
+    );
 
     const orphan = await openTestFile(orphanRoot, "orphan.tex");
     assert.equal(
@@ -2809,6 +3340,10 @@ async function run() {
       "lm",
       "a LaTeX-language .md file must not run TeXLeaf snippets",
     );
+    assertNoAiDiagnostics(
+      markdown.document,
+      "Markdown files must never receive AI writing diagnostics",
+    );
 
     const untitledDocument = await vscode.workspace.openTextDocument({
       language: "latex",
@@ -2828,6 +3363,752 @@ async function run() {
       "tmpa-en",
       "an untitled LaTeX editor must not run document templates",
     );
+    assertNoAiDiagnostics(
+      untitledDocument,
+      "untitled LaTeX editors must never receive AI writing diagnostics",
+    );
+
+    // Persisted issue snapshots are restored only for the exact source and
+    // only while the feature gate is open. Use never-before-opened documents
+    // so onDidOpen exercises the real activation restoration path.
+    const persistenceConfiguration = vscode.workspace.getConfiguration(
+      "texleaf",
+      document.uri,
+    );
+    await persistenceConfiguration.update(
+      "aiWriting.enabled",
+      true,
+      vscode.ConfigurationTarget.Global,
+    );
+    await waitFor(
+      () => vscode.workspace
+        .getConfiguration("texleaf", document.uri)
+        .get("aiWriting.enabled") === true,
+      "AI persistence fixture enablement",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+
+    // The ordinary TeXLeaf master switch remains resource-scoped for snippet
+    // behavior, but a workspace must not use it to override a user/Profile
+    // master disable and reactivate AI uploads or persisted AI UI.
+    await persistenceConfiguration.update(
+      "enabled",
+      false,
+      vscode.ConfigurationTarget.Global,
+    );
+    await waitFor(
+      () => persistenceConfiguration.inspect("enabled")?.globalValue === false,
+      "user/Profile TeXLeaf master disable",
+    );
+    assert.equal(
+      persistenceConfiguration.get("enabled"),
+      true,
+      "the hostile workspace fixture must demonstrate the resource-effective override",
+    );
+    const masterBlockedFixture = "This hidden prose is bad.";
+    const masterBlockedUri = vscode.Uri.joinPath(
+      texProjectRoot,
+      "ai-master-disabled.tex",
+    );
+    await vscode.workspace.fs.writeFile(
+      masterBlockedUri,
+      new TextEncoder().encode(masterBlockedFixture),
+    );
+    await writeAiIssueSnapshotForSource(
+      globalSnippetUri,
+      masterBlockedUri,
+      masterBlockedFixture,
+      "bad",
+    );
+    let masterBlockedDocument = await vscode.workspace.openTextDocument(
+      masterBlockedUri,
+    );
+    if (masterBlockedDocument.languageId !== "latex") {
+      masterBlockedDocument = await vscode.languages.setTextDocumentLanguage(
+        masterBlockedDocument,
+        "latex",
+      );
+    }
+    const masterBlockedStart = masterBlockedFixture.indexOf("bad");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(
+      await hasTexLeafAiHover(masterBlockedDocument, masterBlockedStart),
+      false,
+      "workspace texleaf.enabled=true must not override a user/Profile master disable for AI Hover",
+    );
+    assert.equal(
+      await hasTexLeafAiQuickFix(
+        masterBlockedDocument,
+        masterBlockedStart,
+        masterBlockedStart + "bad".length,
+      ),
+      false,
+      "workspace texleaf.enabled=true must not override a user/Profile master disable for AI Quick Fix",
+    );
+    await persistenceConfiguration.update(
+      "enabled",
+      undefined,
+      vscode.ConfigurationTarget.Global,
+    );
+    await waitFor(
+      () => persistenceConfiguration.inspect("enabled")?.globalValue === undefined,
+      "restoring the user/Profile TeXLeaf master default",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    await persistenceConfiguration.update(
+      "languageIds",
+      ["bibtex"],
+      vscode.ConfigurationTarget.Global,
+    );
+    await waitFor(
+      () => JSON.stringify(
+        persistenceConfiguration.inspect("languageIds")?.globalValue,
+      ) === JSON.stringify(["bibtex"]),
+      "user/Profile LaTeX language exclusion",
+    );
+    assert.deepEqual(
+      persistenceConfiguration.get("languageIds"),
+      ["latex", "tex", "bibtex"],
+      "the hostile workspace fixture must demonstrate its languageIds override",
+    );
+    const languageBlockedFixture = "This language-scoped prose is bad.";
+    const languageBlockedUri = vscode.Uri.joinPath(
+      texProjectRoot,
+      "ai-language-disabled.tex",
+    );
+    await vscode.workspace.fs.writeFile(
+      languageBlockedUri,
+      new TextEncoder().encode(languageBlockedFixture),
+    );
+    await writeAiIssueSnapshotForSource(
+      globalSnippetUri,
+      languageBlockedUri,
+      languageBlockedFixture,
+      "bad",
+    );
+    let languageBlockedDocument = await vscode.workspace.openTextDocument(
+      languageBlockedUri,
+    );
+    if (languageBlockedDocument.languageId !== "latex") {
+      languageBlockedDocument = await vscode.languages.setTextDocumentLanguage(
+        languageBlockedDocument,
+        "latex",
+      );
+    }
+    const languageBlockedStart = languageBlockedFixture.indexOf("bad");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(
+      await hasTexLeafAiHover(languageBlockedDocument, languageBlockedStart),
+      false,
+      "workspace languageIds must not override a user/Profile LaTeX exclusion for AI Hover",
+    );
+    await persistenceConfiguration.update(
+      "languageIds",
+      undefined,
+      vscode.ConfigurationTarget.Global,
+    );
+    await waitFor(
+      () => persistenceConfiguration.inspect("languageIds")?.globalValue === undefined,
+      "restoring the user/Profile language defaults",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    const persistenceFixture = "This prose is bad.";
+    assert.equal(vscode.workspace.isTrusted, true);
+    const persistenceUri = vscode.Uri.joinPath(
+      texProjectRoot,
+      "ai-persistence.tex",
+    );
+    await vscode.workspace.fs.writeFile(
+      persistenceUri,
+      new TextEncoder().encode(persistenceFixture),
+    );
+    const aiIssueCacheUri = await writeAiIssueSnapshotForSource(
+      globalSnippetUri,
+      persistenceUri,
+      persistenceFixture,
+      "bad",
+    );
+    assert.ok((await vscode.workspace.fs.stat(aiIssueCacheUri)).size > 0);
+    let reopenedPersistenceDocument = await vscode.workspace.openTextDocument(
+      persistenceUri,
+    );
+    if (reopenedPersistenceDocument.languageId !== "latex") {
+      reopenedPersistenceDocument = await vscode.languages.setTextDocumentLanguage(
+        reopenedPersistenceDocument,
+        "latex",
+      );
+    }
+    editor = await vscode.window.showTextDocument(reopenedPersistenceDocument, {
+      preview: false,
+    });
+    const badStart = reopenedPersistenceDocument.getText().indexOf("bad");
+    await waitFor(
+      () => hasTexLeafAiHover(reopenedPersistenceDocument, badStart),
+      "exact-source persisted AI issue restoration",
+    );
+    assert.equal(
+      await hasTexLeafAiQuickFix(
+        reopenedPersistenceDocument,
+        badStart,
+        badStart + 3,
+      ),
+      true,
+      "a restored issue must provide the same safe Quick Fix as a live issue",
+    );
+    assertNoAiDiagnostics(
+      reopenedPersistenceDocument,
+      "restored AI issues must remain decorations rather than duplicate diagnostics",
+    );
+
+    await vscode.commands.executeCommand("texleaf.aiWriting.clearDiagnostics");
+    await waitFor(
+      async () => !(await hasTexLeafAiHover(reopenedPersistenceDocument, badStart)),
+      "cleared persisted AI hover",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    const clearedRecord = JSON.parse(new TextDecoder().decode(
+      await vscode.workspace.fs.readFile(aiIssueCacheUri),
+    ));
+    assert.deepEqual(clearedRecord.issues, []);
+    assert.equal(
+      await hasTexLeafAiHover(reopenedPersistenceDocument, badStart),
+      false,
+      "a durable clear must remove the restored Hover immediately",
+    );
+
+    // Ctrl+. asks providers at the editor's collapsed selection, not across
+    // the issue's full range. Keep this distinct from the persisted-clear
+    // fixture above so applying the Hover action also proves durable consume.
+    const hoverApplyFixture = "This wording is bad.";
+    const hoverApplyOriginal = "bad";
+    const hoverApplyReplacement = "poor";
+    const hoverAppliedSource = hoverApplyFixture.replace(
+      hoverApplyOriginal,
+      hoverApplyReplacement,
+    );
+    const hoverApplyUri = vscode.Uri.joinPath(
+      texProjectRoot,
+      "ai-persistence-hover-apply.tex",
+    );
+    await vscode.workspace.fs.writeFile(
+      hoverApplyUri,
+      new TextEncoder().encode(hoverApplyFixture),
+    );
+    const hoverApplyCacheUri = await writeAiIssueSnapshotForSource(
+      globalSnippetUri,
+      hoverApplyUri,
+      hoverApplyFixture,
+      hoverApplyOriginal,
+      1,
+      hoverApplyReplacement,
+      "grammar",
+    );
+    let hoverApplyDocument = await vscode.workspace.openTextDocument(
+      hoverApplyUri,
+    );
+    if (hoverApplyDocument.languageId !== "latex") {
+      hoverApplyDocument = await vscode.languages.setTextDocumentLanguage(
+        hoverApplyDocument,
+        "latex",
+      );
+    }
+    editor = await vscode.window.showTextDocument(hoverApplyDocument, {
+      preview: false,
+    });
+    const hoverApplyStart = hoverApplyDocument.getText().indexOf(
+      hoverApplyOriginal,
+    );
+    const hoverApplyEnd = hoverApplyStart + hoverApplyOriginal.length;
+    await waitFor(
+      () => hasTexLeafAiHover(hoverApplyDocument, hoverApplyStart),
+      "clickable persisted AI Hover restoration",
+    );
+
+    const expectedQuickFixCommands = [
+      "texleaf.aiWriting.applyIssue",
+      "texleaf.aiWriting.ignoreIssue",
+    ];
+    for (const [offset, description] of [
+      [hoverApplyStart, "issue start"],
+      [hoverApplyStart + 1, "issue interior"],
+      [hoverApplyEnd - 1, "issue final character"],
+      [hoverApplyEnd, "issue end boundary"],
+    ]) {
+      const actions = await texLeafAiQuickFixes(
+        hoverApplyDocument,
+        offset,
+        offset,
+      );
+      assert.deepEqual(
+        actions.map((action) => action.command?.command).sort(),
+        expectedQuickFixCommands,
+        `a collapsed cursor at the ${description} must expose Apply and Ignore`,
+      );
+    }
+    for (const [offset, description] of [
+      [hoverApplyStart - 1, "character before the issue"],
+      [hoverApplyEnd + 1, "character after the issue"],
+    ]) {
+      assert.deepEqual(
+        await texLeafAiQuickFixes(hoverApplyDocument, offset, offset),
+        [],
+        `a collapsed cursor at the ${description} must not expose TeXLeaf actions`,
+      );
+    }
+    assertNoAiDiagnostics(
+      hoverApplyDocument,
+      "collapsed-cursor Quick Fixes must not require duplicate AI diagnostics",
+    );
+
+    const quickFixCursor = hoverApplyDocument.positionAt(hoverApplyStart + 1);
+    editor.selection = new vscode.Selection(quickFixCursor, quickFixCursor);
+    const sourceBeforeEditorQuickFix = hoverApplyDocument.getText();
+    await settlesWithin(
+      vscode.commands.executeCommand("editor.action.quickFix"),
+      "the editor Quick Fix command at a persisted AI issue",
+      5_000,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await settlesWithin(
+      vscode.commands.executeCommand("hideCodeActionWidget"),
+      "closing the editor Quick Fix widget without accepting an action",
+    );
+    assert.equal(
+      hoverApplyDocument.getText(),
+      sourceBeforeEditorQuickFix,
+      "opening and dismissing Ctrl+. must not edit the document",
+    );
+
+    const hover = await getTexLeafAiHover(
+      hoverApplyDocument,
+      hoverApplyStart + 1,
+    );
+    assert.ok(hover, "the restored issue must expose a TeXLeaf Hover");
+    const hoverMarkdown = hover.contents.find((content) =>
+      typeof content !== "string" && content.value.includes("TeXLeaf AI")
+    );
+    assert.ok(
+      hoverMarkdown,
+      "the TeXLeaf Hover must keep its content in one auditable MarkdownString",
+    );
+    assert.deepEqual(
+      hoverMarkdown.isTrusted,
+      { enabledCommands: ["texleaf.aiWriting.applyIssue"] },
+      "the Hover must trust only the internal apply command, never arbitrary commands",
+    );
+    const hoverCommandLink = markdownCommandLink(
+      hoverMarkdown,
+      "texleaf.aiWriting.applyIssue",
+    );
+    const hoverCommand = commandArgumentsFromLink(hoverCommandLink);
+    const hoverQuickFix = await texLeafAiQuickFix(
+      hoverApplyDocument,
+      hoverApplyStart,
+      hoverApplyEnd,
+    );
+    assert.ok(hoverQuickFix, "the clickable Hover fixture must retain its Quick Fix");
+    assert.deepEqual(
+      hoverCommand,
+      {
+        command: "texleaf.aiWriting.applyIssue",
+        arguments: [
+          hoverApplyUri.toString(),
+          hoverQuickFix.command.arguments[1],
+        ],
+      },
+      "the Hover link must encode only the current document and opaque issue ID",
+    );
+
+    await vscode.commands.executeCommand(
+      hoverCommand.command,
+      ...hoverCommand.arguments,
+    );
+    await waitFor(
+      () => hoverApplyDocument.getText() === hoverAppliedSource,
+      "the real Hover apply command to edit the exact persisted issue",
+    );
+    await waitFor(
+      async () => !(
+        await hasTexLeafAiHover(hoverApplyDocument, hoverApplyStart)
+      ),
+      "the accepted Hover issue to disappear",
+    );
+    assert.equal(
+      await hasTexLeafAiQuickFix(
+        hoverApplyDocument,
+        hoverApplyStart,
+        hoverApplyStart + hoverApplyReplacement.length,
+      ),
+      false,
+      "the accepted Hover issue must no longer expose a Quick Fix",
+    );
+    await waitFor(async () => {
+      try {
+        const record = JSON.parse(new TextDecoder().decode(
+          await vscode.workspace.fs.readFile(hoverApplyCacheUri),
+        ));
+        return record.sourceLength === hoverAppliedSource.length &&
+          record.sourceHash === createHash("sha256")
+            .update(hoverAppliedSource, "utf8")
+            .digest("hex") &&
+          Array.isArray(record.issues) &&
+          record.issues.length === 0;
+      } catch {
+        return false;
+      }
+    }, "durable removal of the issue accepted through its Hover link");
+    await vscode.commands.executeCommand(
+      hoverCommand.command,
+      ...hoverCommand.arguments,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(
+      hoverApplyDocument.getText(),
+      hoverAppliedSource,
+      "replaying a consumed Hover command link must not apply the replacement twice",
+    );
+
+    // A retained issue keeps the same user-facing lineage even when an edit
+    // before it changes every absolute offset. Hold the actual Tree node from
+    // the preceding snapshot, shift the issue, and invoke the real Tree
+    // wrapper after the controller has remapped its live range. The nested
+    // prefix-style correction can itself be reported by VS Code as a single
+    // insertion at the old issue's right edge (`one take` -> `one takes`).
+    const prefixApplyFixture = "Note that one take the limit.";
+    const prefixApplyOriginal = "one take";
+    const prefixApplyReplacement = "one takes";
+    const retainedPrefix = "Earlier context. ";
+    const prefixAppliedSource = `${retainedPrefix}${prefixApplyFixture.replace(
+      prefixApplyOriginal,
+      prefixApplyReplacement,
+    )}`;
+    const prefixApplyUri = vscode.Uri.joinPath(
+      texProjectRoot,
+      "ai-persistence-prefix-apply.tex",
+    );
+    await vscode.workspace.fs.writeFile(
+      prefixApplyUri,
+      new TextEncoder().encode(prefixApplyFixture),
+    );
+    const prefixApplyCacheUri = await writeAiIssueSnapshotForSource(
+      globalSnippetUri,
+      prefixApplyUri,
+      prefixApplyFixture,
+      prefixApplyOriginal,
+      1,
+      prefixApplyReplacement,
+      "grammar",
+    );
+    let prefixApplyDocument = await vscode.workspace.openTextDocument(prefixApplyUri);
+    if (prefixApplyDocument.languageId !== "latex") {
+      prefixApplyDocument = await vscode.languages.setTextDocumentLanguage(
+        prefixApplyDocument,
+        "latex",
+      );
+    }
+    editor = await vscode.window.showTextDocument(prefixApplyDocument, {
+      preview: false,
+    });
+    const prefixApplyStart = prefixApplyDocument.getText().indexOf(
+      prefixApplyOriginal,
+    );
+    await waitFor(
+      () => hasTexLeafAiHover(prefixApplyDocument, prefixApplyStart),
+      "prefix-style persisted AI issue restoration",
+    );
+    let prefixQuickFix;
+    await waitFor(async () => {
+      prefixQuickFix = await texLeafAiQuickFix(
+        prefixApplyDocument,
+        prefixApplyStart,
+        prefixApplyStart + prefixApplyOriginal.length,
+      );
+      return prefixQuickFix !== undefined;
+    }, "prefix-style AI Quick Fix");
+    assert.equal(
+      prefixQuickFix.command?.command,
+      "texleaf.aiWriting.applyIssue",
+      "the prefix-style regression must invoke TeXLeaf's real apply command",
+    );
+    const prefixIssueId = prefixQuickFix.command.arguments?.[1];
+    assert.equal(
+      typeof prefixIssueId,
+      "string",
+      "the real Quick Fix must expose an opaque issue ID to the Tree wrapper",
+    );
+    const stalePrefixTreeNode = {
+      kind: "issue",
+      id: `texleaf-ai-issue:${prefixApplyUri.toString()}:${prefixIssueId}`,
+      uriText: prefixApplyUri.toString(),
+      issue: {
+        id: prefixIssueId,
+        range: new vscode.Range(
+          prefixApplyDocument.positionAt(prefixApplyStart),
+          prefixApplyDocument.positionAt(
+            prefixApplyStart + prefixApplyOriginal.length,
+          ),
+        ),
+        original: prefixApplyOriginal,
+        replacement: prefixApplyReplacement,
+        message: "建议修改用词",
+        explanation: "这里使用更准确的表达。",
+        category: "grammar",
+        severity: vscode.DiagnosticSeverity.Warning,
+      },
+    };
+    const versionBeforeRemap = prefixApplyDocument.version;
+    const remapped = await editor.edit((builder) => {
+      builder.insert(prefixApplyDocument.positionAt(0), retainedPrefix);
+    });
+    assert.equal(remapped, true, "the stale Tree fixture prefix insertion failed");
+    await waitFor(
+      () => prefixApplyDocument.version > versionBeforeRemap,
+      "the retained issue document version to advance",
+    );
+    const remappedPrefixApplyStart = prefixApplyStart + retainedPrefix.length;
+    let remappedQuickFix;
+    await waitFor(async () => {
+      remappedQuickFix = await texLeafAiQuickFix(
+        prefixApplyDocument,
+        remappedPrefixApplyStart,
+        remappedPrefixApplyStart + prefixApplyOriginal.length,
+      );
+      return remappedQuickFix !== undefined;
+    }, "the retained issue Quick Fix after an earlier insertion");
+    assert.equal(
+      remappedQuickFix.command?.arguments?.[1],
+      prefixIssueId,
+      "a safely retained issue must keep its Tree command lineage across offset remapping",
+    );
+    const versionAfterFirstRemap = prefixApplyDocument.version;
+    const restoredSameSource = await editor.edit((builder) => {
+      builder.delete(new vscode.Range(
+        prefixApplyDocument.positionAt(0),
+        prefixApplyDocument.positionAt(retainedPrefix.length),
+      ));
+    });
+    assert.equal(
+      restoredSameSource,
+      true,
+      "the same-source Tree lineage fixture prefix deletion failed",
+    );
+    await waitFor(
+      () => prefixApplyDocument.version > versionAfterFirstRemap &&
+        prefixApplyDocument.getText() === prefixApplyFixture,
+      "the document to return to the same source at a later version",
+    );
+    let sameSourceQuickFix;
+    await waitFor(async () => {
+      sameSourceQuickFix = await texLeafAiQuickFix(
+        prefixApplyDocument,
+        prefixApplyStart,
+        prefixApplyStart + prefixApplyOriginal.length,
+      );
+      return sameSourceQuickFix !== undefined;
+    }, "the retained Quick Fix at the later same-source version");
+    assert.equal(
+      sameSourceQuickFix?.command?.arguments?.[1],
+      prefixIssueId,
+      "a later document version with identical source must keep the old Tree lineage actionable",
+    );
+    const versionBeforeFinalRemap = prefixApplyDocument.version;
+    const finalRemap = await editor.edit((builder) => {
+      builder.insert(prefixApplyDocument.positionAt(0), retainedPrefix);
+    });
+    assert.equal(finalRemap, true, "the final stale Tree fixture remap failed");
+    await waitFor(
+      () => prefixApplyDocument.version > versionBeforeFinalRemap,
+      "the final retained issue version to advance",
+    );
+    await waitFor(async () => {
+      remappedQuickFix = await texLeafAiQuickFix(
+        prefixApplyDocument,
+        remappedPrefixApplyStart,
+        remappedPrefixApplyStart + prefixApplyOriginal.length,
+      );
+      return remappedQuickFix?.command?.arguments?.[1] === prefixIssueId;
+    }, "the stable Tree lineage after the final offset remap");
+    const revealCursor = prefixApplyDocument.positionAt(
+      prefixApplyDocument.getText().length,
+    );
+    editor.selection = new vscode.Selection(revealCursor, revealCursor);
+    const selectionBeforeTreeReveal = {
+      anchor: prefixApplyDocument.offsetAt(editor.selection.anchor),
+      active: prefixApplyDocument.offsetAt(editor.selection.active),
+    };
+    await settlesWithin(
+      vscode.commands.executeCommand(
+        "texleaf.aiIssues.reveal",
+        stalePrefixTreeNode,
+      ),
+      "Tree reveal of a stable issue after offset remapping",
+      5_000,
+    );
+    assert.deepEqual(
+      {
+        anchor: prefixApplyDocument.offsetAt(editor.selection.anchor),
+        active: prefixApplyDocument.offsetAt(editor.selection.active),
+      },
+      selectionBeforeTreeReveal,
+      "Tree reveal must scroll/highlight the live remapped issue without moving the cursor",
+    );
+    await vscode.commands.executeCommand(
+      "texleaf.aiIssues.apply",
+      stalePrefixTreeNode,
+    );
+    await waitFor(
+      () => prefixApplyDocument.getText() === prefixAppliedSource,
+      "stale Tree node application against the retained live issue",
+    );
+    await waitFor(
+      async () => !(
+        await hasTexLeafAiHover(prefixApplyDocument, remappedPrefixApplyStart)
+      ),
+      "consumed prefix-style AI Hover",
+    );
+    assert.equal(
+      await hasTexLeafAiQuickFix(
+        prefixApplyDocument,
+        remappedPrefixApplyStart,
+        remappedPrefixApplyStart + prefixApplyReplacement.length,
+      ),
+      false,
+      "an accepted prefix-style issue must no longer expose a Quick Fix",
+    );
+    await vscode.commands.executeCommand(
+      "texleaf.aiIssues.apply",
+      stalePrefixTreeNode,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(
+      prefixApplyDocument.getText(),
+      prefixAppliedSource,
+      "replaying a consumed stale Tree node must not append a second suffix",
+    );
+    await waitFor(async () => {
+      try {
+        const record = JSON.parse(new TextDecoder().decode(
+          await vscode.workspace.fs.readFile(prefixApplyCacheUri),
+        ));
+        return record.sourceLength === prefixAppliedSource.length &&
+          record.sourceHash === createHash("sha256")
+            .update(prefixAppliedSource, "utf8")
+            .digest("hex") &&
+          Array.isArray(record.issues) &&
+          record.issues.length === 0;
+      } catch {
+        return false;
+      }
+    }, "durable removal of the accepted prefix-style AI issue");
+
+    await persistenceConfiguration.update(
+      "aiWriting.enabled",
+      false,
+      vscode.ConfigurationTarget.Global,
+    );
+    await waitFor(
+      () => vscode.workspace
+        .getConfiguration("texleaf", reopenedPersistenceDocument.uri)
+        .get("aiWriting.enabled") === false,
+      "AI persistence fixture disablement",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    const disabledUri = vscode.Uri.joinPath(
+      texProjectRoot,
+      "ai-persistence-disabled.tex",
+    );
+    await vscode.workspace.fs.writeFile(
+      disabledUri,
+      new TextEncoder().encode(persistenceFixture),
+    );
+    await writeAiIssueSnapshotForSource(
+      globalSnippetUri,
+      disabledUri,
+      persistenceFixture,
+      "bad",
+    );
+    reopenedPersistenceDocument = await vscode.workspace.openTextDocument(disabledUri);
+    if (reopenedPersistenceDocument.languageId !== "latex") {
+      reopenedPersistenceDocument = await vscode.languages.setTextDocumentLanguage(
+        reopenedPersistenceDocument,
+        "latex",
+      );
+    }
+    editor = await vscode.window.showTextDocument(reopenedPersistenceDocument, {
+      preview: false,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(
+      await hasTexLeafAiHover(reopenedPersistenceDocument, badStart),
+      false,
+      "disabled AI must not restore or expose a stale cached Hover",
+    );
+    assert.equal(
+      await hasTexLeafAiQuickFix(
+        reopenedPersistenceDocument,
+        badStart,
+        badStart + 3,
+      ),
+      false,
+      "disabled AI must not expose a cached Quick Fix hidden from the issue tree",
+    );
+
+    const closedCacheUri = vscode.Uri.joinPath(
+      texProjectRoot,
+      "ai-persistence-closed.tex",
+    );
+    await vscode.workspace.fs.writeFile(
+      closedCacheUri,
+      new TextEncoder().encode(persistenceFixture),
+    );
+    const closedRecordUri = await writeAiIssueSnapshotForSource(
+      globalSnippetUri,
+      closedCacheUri,
+      persistenceFixture,
+      "bad",
+    );
+    await persistenceConfiguration.update(
+      "aiWriting.enabled",
+      true,
+      vscode.ConfigurationTarget.Global,
+    );
+    await waitFor(
+      () => vscode.workspace
+        .getConfiguration("texleaf", document.uri)
+        .get("aiWriting.enabled") === true,
+      "closed-document global cache invalidation",
+    );
+    await waitFor(async () => {
+      try {
+        await vscode.workspace.fs.stat(closedRecordUri);
+        return false;
+      } catch {
+        return true;
+      }
+    }, "closed-document AI cache file deletion");
+    reopenedPersistenceDocument = await vscode.workspace.openTextDocument(closedCacheUri);
+    if (reopenedPersistenceDocument.languageId !== "latex") {
+      reopenedPersistenceDocument = await vscode.languages.setTextDocumentLanguage(
+        reopenedPersistenceDocument,
+        "latex",
+      );
+    }
+    editor = await vscode.window.showTextDocument(reopenedPersistenceDocument, {
+      preview: false,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(
+      await hasTexLeafAiHover(reopenedPersistenceDocument, badStart),
+      false,
+      "a global AI setting change must clear cached issues for closed documents too",
+    );
+    await persistenceConfiguration.update(
+      "aiWriting.enabled",
+      false,
+      vscode.ConfigurationTarget.Global,
+    );
 
     assert.deepEqual(
       await vscode.workspace.fs.readFile(legacyWorkspaceSnippetUri),
@@ -2836,7 +4117,7 @@ async function run() {
     );
 
     console.log(
-      "Extension-host smoke test passed: grouped native settings, worker-backed Math Preview/toggle/safe SVG, native citation completion/filtering/ranges/configuration, complete global factory seeding, one-time migration/backup, no hidden built-ins, watcher reload/LKG, dirty import/export/restore guards, Qhat/IME, per-root extras, .tex/.bib scope, fractions, LF/CRLF align shortcuts, and safe left/right Enter splitting work.",
+      "Extension-host smoke test passed: grouped native settings, default-off and persisted AI writing gates/clear/reopen, collapsed-cursor Quick Fix and safe Hover apply, worker-backed Math Preview/toggle/safe SVG, native citation completion/filtering/ranges/configuration, complete global factory seeding, one-time migration/backup, no hidden built-ins, watcher reload/LKG, dirty import/export/restore guards, Qhat/IME, per-root extras, .tex/.bib scope, fractions, LF/CRLF align shortcuts, and safe left/right Enter splitting work.",
     );
   } finally {
     if (rootAConfiguration !== undefined) {

@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import {
+  isAIWritingSourceUri,
   isTeXLeafSourceUri,
   sanitizeMathPreviewConfiguredMacros,
 } from "./core";
@@ -8,6 +9,10 @@ import type { MathPreviewPlacement } from "./mathPreviewLayout";
 export type ManualTrigger = "tab" | "space";
 export type BibliographyFormat = "bibtex" | "biblatex";
 export type MathPreviewPresentation = "cursor" | "hover" | "both";
+export type AIWritingProvider = "deepseek" | "openai";
+export type AIWritingDeepSeekModel = "deepseek-v4-flash" | "deepseek-v4-pro";
+export type AIWritingLanguage = "auto" | "english" | "chinese";
+export type AIWritingStyle = "academic" | "general" | "concise";
 
 export interface TeXLeafConfig {
   readonly enabled: boolean;
@@ -48,6 +53,22 @@ export interface TeXLeafConfig {
   readonly mathPreviewScale: number;
   readonly mathPreviewMaxSourceLength: number;
   readonly mathPreviewMacros: Readonly<Record<string, string>>;
+  readonly aiWritingEnabled: boolean;
+  readonly aiWritingAutomaticReview: boolean;
+  readonly aiWritingInlineCompletions: boolean;
+  readonly aiWritingProvider: AIWritingProvider;
+  readonly aiWritingDeepSeekModel: AIWritingDeepSeekModel;
+  readonly aiWritingDeepSeekBaseUrl: string;
+  readonly aiWritingOpenAIModel: string;
+  readonly aiWritingOpenAIBaseUrl: string;
+  /** The configured model for the currently selected provider. */
+  readonly aiWritingModel: string;
+  readonly aiWritingLanguage: AIWritingLanguage;
+  readonly aiWritingStyle: AIWritingStyle;
+  readonly aiWritingReviewDelayMs: number;
+  readonly aiWritingCompletionDelayMs: number;
+  readonly aiWritingMaxParagraphLength: number;
+  readonly aiWritingMaxDocumentLength: number;
 }
 
 const DEFAULT_LANGUAGE_IDS = ["latex", "tex", "bibtex"] as const;
@@ -67,6 +88,25 @@ const DEFAULT_CITATION_COMMANDS = [
 export function readConfig(uri?: vscode.Uri): TeXLeafConfig {
   const config = vscode.workspace.getConfiguration("texleaf", uri);
   const manual = config.get<string>("manualTrigger", "tab");
+  const aiWritingProvider = readAIWritingProvider(
+    readGlobalConfigurationValue(config, "aiWriting.provider", "deepseek"),
+  );
+  const aiWritingDeepSeekModel = readAIWritingDeepSeekModel(config);
+  const aiWritingDeepSeekBaseUrl = readGlobalConfigurationValue(
+    config,
+    "aiWriting.deepseekBaseUrl",
+    "https://api.deepseek.com",
+  ).trim();
+  const aiWritingOpenAIModel = readGlobalConfigurationValue(
+    config,
+    "aiWriting.openaiModel",
+    "gpt-5.6-luna",
+  ).trim();
+  const aiWritingOpenAIBaseUrl = readGlobalConfigurationValue(
+    config,
+    "aiWriting.openaiBaseUrl",
+    "https://api.openai.com/v1",
+  ).trim();
 
   return {
     enabled: config.get<boolean>("enabled", true),
@@ -204,6 +244,58 @@ export function readConfig(uri?: vscode.Uri): TeXLeafConfig {
     mathPreviewMacros: sanitizeMathPreviewConfiguredMacros(
       config.get<Readonly<Record<string, string>>>("mathPreview.macros", {}),
     ),
+    // Every network-, credential-, and billing-relevant AI option is read only
+    // from the user/Profile layer. A repository's .vscode/settings.json must
+    // never be able to enable requests or redirect/change their cost profile.
+    aiWritingEnabled: readGlobalConfigurationValue(
+      config,
+      "aiWriting.enabled",
+      false,
+    ),
+    aiWritingAutomaticReview: readGlobalConfigurationValue(
+      config,
+      "aiWriting.automaticReview",
+      true,
+    ),
+    aiWritingInlineCompletions: readGlobalConfigurationValue(
+      config,
+      "aiWriting.inlineCompletions",
+      true,
+    ),
+    aiWritingProvider,
+    aiWritingDeepSeekModel,
+    aiWritingDeepSeekBaseUrl,
+    aiWritingOpenAIModel,
+    aiWritingOpenAIBaseUrl,
+    aiWritingModel: aiWritingProvider === "openai"
+      ? aiWritingOpenAIModel
+      : aiWritingDeepSeekModel,
+    aiWritingLanguage: readAIWritingLanguage(
+      readGlobalConfigurationValue(config, "aiWriting.language", "auto"),
+    ),
+    aiWritingStyle: readAIWritingStyle(
+      readGlobalConfigurationValue(config, "aiWriting.style", "academic"),
+    ),
+    aiWritingReviewDelayMs: clamp(
+      readGlobalConfigurationValue(config, "aiWriting.reviewDelayMs", 900),
+      500,
+      10_000,
+    ),
+    aiWritingCompletionDelayMs: clamp(
+      readGlobalConfigurationValue(config, "aiWriting.completionDelayMs", 500),
+      100,
+      5_000,
+    ),
+    aiWritingMaxParagraphLength: clamp(
+      readGlobalConfigurationValue(config, "aiWriting.maxParagraphLength", 6_000),
+      500,
+      20_000,
+    ),
+    aiWritingMaxDocumentLength: clamp(
+      readGlobalConfigurationValue(config, "aiWriting.maxDocumentLength", 30_000),
+      1_000,
+      100_000,
+    ),
   };
 }
 
@@ -216,6 +308,38 @@ export function isSupportedDocument(
     !document.isClosed &&
     isTeXLeafSourceUri(document.uri.scheme, document.uri.path) &&
     config.languageIds.includes(document.languageId)
+  );
+}
+
+/** AI writing deliberately excludes BibTeX and editors without a file URI. */
+export function isAIWritingDocument(
+  document: vscode.TextDocument,
+  config = readConfig(document.uri),
+): boolean {
+  const rawConfiguration = vscode.workspace.getConfiguration(
+    "texleaf",
+    document.uri,
+  );
+  const userMasterEnabled = readGlobalConfigurationValue(
+    rawConfiguration,
+    "enabled",
+    true,
+  );
+  const inspectedLanguageIds = rawConfiguration.inspect<readonly string[]>(
+    "languageIds",
+  );
+  const userLanguageIds = cleanStringArray(
+    inspectedLanguageIds?.globalValue ?? inspectedLanguageIds?.defaultValue,
+    DEFAULT_LANGUAGE_IDS,
+  );
+  return (
+    // A workspace may opt out, but it must never override a user/Profile-level
+    // master disable or language exclusion to reactivate network access.
+    userMasterEnabled &&
+    userLanguageIds.includes(document.languageId) &&
+    isSupportedDocument(document, config) &&
+    isAIWritingSourceUri(document.uri.scheme, document.uri.path) &&
+    (document.languageId === "latex" || document.languageId === "tex")
   );
 }
 
@@ -331,6 +455,61 @@ function readMathPreviewPresentation(value: string): MathPreviewPresentation {
 
 function readMathPreviewPlacement(value: string): MathPreviewPlacement {
   return value === "above" || value === "below" ? value : "auto";
+}
+
+function readAIWritingProvider(value: string): AIWritingProvider {
+  return value === "openai" ? "openai" : "deepseek";
+}
+
+function readAIWritingDeepSeekModel(
+  config: vscode.WorkspaceConfiguration,
+): AIWritingDeepSeekModel {
+  const current = config.inspect<string>("aiWriting.deepseekModel");
+  if (hasExplicitGlobalConfigurationValue(current)) {
+    return normalizeAIWritingDeepSeekModel(
+      current?.globalValue,
+    );
+  }
+
+  // TeXLeaf 0.8.0 exposed aiWriting.model. Keep an explicitly configured
+  // value working without continuing to expose the ambiguous setting in UI.
+  const legacy = config.inspect<string>("aiWriting.model");
+  if (hasExplicitGlobalConfigurationValue(legacy)) {
+    return normalizeAIWritingDeepSeekModel(
+      legacy?.globalValue,
+    );
+  }
+  return normalizeAIWritingDeepSeekModel(current?.defaultValue);
+}
+
+/** Read a setting only from VS Code's user/Profile layer plus its default. */
+function readGlobalConfigurationValue<T>(
+  config: vscode.WorkspaceConfiguration,
+  section: string,
+  fallback: T,
+): T {
+  const inspected = config.inspect<T>(section);
+  return inspected?.globalValue ?? inspected?.defaultValue ?? fallback;
+}
+
+function hasExplicitGlobalConfigurationValue(
+  inspected: ReturnType<vscode.WorkspaceConfiguration["inspect"]>,
+): boolean {
+  return inspected?.globalValue !== undefined;
+}
+
+function normalizeAIWritingDeepSeekModel(
+  value: string | undefined,
+): AIWritingDeepSeekModel {
+  return value === "deepseek-v4-pro" ? value : "deepseek-v4-flash";
+}
+
+function readAIWritingLanguage(value: string): AIWritingLanguage {
+  return value === "english" || value === "chinese" ? value : "auto";
+}
+
+function readAIWritingStyle(value: string): AIWritingStyle {
+  return value === "general" || value === "concise" ? value : "academic";
 }
 
 function decodeControlCharacters(value: string): string {

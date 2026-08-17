@@ -18,6 +18,10 @@ triforge-git/**
 *.vsix
 *.tgz
 *.log
+.env
+.env.*
+*.pem
+*.key
 **/*.map
 *.ts
 *.tsbuildinfo

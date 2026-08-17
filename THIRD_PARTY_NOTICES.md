@@ -77,7 +77,7 @@ SOFTWARE.
 ## MathJax New Computer Modern Font
 
 - 组件：`@mathjax/mathjax-newcm-font` 4.1.3
-- 项目：https://github.com/mathjax/MathJax-fonts
+- 项目：https://www.npmjs.com/package/@mathjax/mathjax-newcm-font
 - 用途：MathJax SVG 输出所使用的本地字体数据
 - 作者：MathJax Consortium
 - 许可证：Apache License 2.0

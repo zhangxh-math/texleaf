@@ -7,27 +7,43 @@ import {
   SnippetDefinitionInput,
   SnippetMatcher,
   SnippetMatcherOptions,
+  advanceAiDirtyReviewProgress,
+  aiIssueRangesOverlap,
+  aiIssueMatchesCapturedIdentity,
+  aiWritingLanguageLabel,
+  aiProseSentenceSegments,
   compileSnippetFile,
+  captureAiIssueIdentity,
+  chooseAiIssueRetentionPreparation,
+  choosePendingAiAutomaticReviewTarget,
+  createAiIssueActionId,
   createLatexScanState,
+  extractAiProseDocument,
   expandSnippetVariables,
   findFractionNumerator,
   isTeXLeafSourceUri,
+  isAIWritingSourceUri,
   latexContextFromState,
   materializeReplacement,
   optimisticRevisionStatus,
   parseReplacementTemplate,
   parseSnippetOptions,
+  planAiIssueRetention,
   planAutoEnlarge,
   planLeftRightEnter,
   planTabout,
+  remapAiIssueOffsetRange,
   remapTabstopsForVsCode,
   replacementPartsToText,
   scanLatexContext,
   scanLatexRegions,
   scanLatexSegment,
+  selectAiProseSentenceSegmentsForRanges,
   selectScopedResources,
   SerialTaskQueue,
+  shouldReplaceAiIssueAfterReview,
   toPortableSnippetObject,
+  tryReserveAiAutomaticReviewKey,
   validateMigratableSnippetLibraryText,
   validateSnippetFile,
 } from '../src/core';
@@ -37,6 +53,737 @@ import {
   decodeSyncedSnippetEnvelope,
   hashSnippetContent,
 } from '../src/snippetSync';
+
+test('AI writing language preferences stay within the client protocol label', () => {
+  assert.equal(aiWritingLanguageLabel('auto'), 'auto');
+  assert.equal(aiWritingLanguageLabel('english'), 'English');
+  assert.equal(aiWritingLanguageLabel('chinese'), 'Chinese');
+  for (const preference of ['auto', 'english', 'chinese'] as const) {
+    const label = aiWritingLanguageLabel(preference);
+    assert.ok(label.length <= 64);
+    assert.doesNotMatch(label, /[\r\n\u0000]/u);
+  }
+});
+
+test('oversized AI retention buffers discard without entering fallback extraction', () => {
+  const maximum = 1_000_000;
+  assert.equal(
+    chooseAiIssueRetentionPreparation(maximum, maximum + 1, 1, maximum),
+    'discard',
+  );
+  assert.equal(
+    chooseAiIssueRetentionPreparation(maximum + 1, maximum, 1, maximum),
+    'discard',
+  );
+  assert.equal(
+    chooseAiIssueRetentionPreparation(undefined, maximum + 1, 1, maximum),
+    'discard',
+  );
+  assert.equal(
+    chooseAiIssueRetentionPreparation(undefined, maximum, 1, maximum),
+    'fallback',
+  );
+  assert.equal(
+    chooseAiIssueRetentionPreparation(maximum, maximum, 0, maximum),
+    'fallback',
+  );
+  assert.equal(
+    chooseAiIssueRetentionPreparation(maximum, maximum, 1, maximum),
+    'retain',
+  );
+});
+
+test('AI issue retention invalidates only the edited issue neighborhood', () => {
+  const oldSource = 'First bad sentence. Second wrong sentence.\n\nThird poor sentence.';
+  const changeStart = oldSource.indexOf('bad');
+  const newSource = oldSource.slice(0, changeStart) + 'weak' +
+    oldSource.slice(changeStart + 'bad'.length);
+  const issues = [
+    { key: 'bad', start: changeStart, end: changeStart + 3, original: 'bad' },
+    {
+      key: 'wrong',
+      start: oldSource.indexOf('wrong'),
+      end: oldSource.indexOf('wrong') + 5,
+      original: 'wrong',
+    },
+    {
+      key: 'poor',
+      start: oldSource.indexOf('poor'),
+      end: oldSource.indexOf('poor') + 4,
+      original: 'poor',
+    },
+  ];
+  const plan = planAiIssueRetention(
+    oldSource,
+    newSource,
+    [{ rangeOffset: changeStart, rangeLength: 3, text: 'weak' }],
+    issues,
+  );
+  assert.ok(plan);
+  assert.deepEqual(
+    plan.retained.map((issue) => ({ key: issue.key, start: issue.start, end: issue.end })),
+    [
+      {
+        key: 'wrong',
+        start: newSource.indexOf('wrong'),
+        end: newSource.indexOf('wrong') + 5,
+      },
+      {
+        key: 'poor',
+        start: newSource.indexOf('poor'),
+        end: newSource.indexOf('poor') + 4,
+      },
+    ],
+  );
+  assert.deepEqual(
+    plan.dirtySegments.map((segment) => segment.text),
+    ['First weak sentence.'],
+  );
+  assert.deepEqual(plan.dirtyRanges, [{
+    start: newSource.indexOf('weak'),
+    end: newSource.indexOf('weak') + 4,
+  }]);
+});
+
+test('AI issue retention invalidates a target fixed by a right-endpoint insertion', () => {
+  const oldSource =
+    'Note that if one take the operator, another poor phrase remains.';
+  const targetStart = oldSource.indexOf('one take');
+  const targetEnd = targetStart + 'one take'.length;
+  const remoteStart = oldSource.indexOf('poor');
+  const newSource = oldSource.slice(0, targetEnd) + 's' + oldSource.slice(targetEnd);
+  const plan = planAiIssueRetention(
+    oldSource,
+    newSource,
+    [{ rangeOffset: targetEnd, rangeLength: 0, text: 's' }],
+    [
+      {
+        key: 'applied-target',
+        start: targetStart,
+        end: targetEnd,
+        original: 'one take',
+      },
+      {
+        key: 'same-sentence-remote',
+        start: remoteStart,
+        end: remoteStart + 'poor'.length,
+        original: 'poor',
+      },
+    ],
+  );
+
+  assert.ok(plan);
+  assert.deepEqual(plan.retained, [{
+    key: 'same-sentence-remote',
+    start: remoteStart + 1,
+    end: remoteStart + 1 + 'poor'.length,
+  }]);
+  assert.deepEqual(plan.dirtyRanges, [{ start: targetEnd, end: targetEnd + 1 }]);
+  assert.deepEqual(
+    plan.dirtySegments.map((segment) => segment.text),
+    [newSource],
+  );
+});
+
+test('retained AI action lineage cannot rebind to a fresh issue at its historical offset', () => {
+  const original = 'one take';
+  const replacement = 'one takes';
+  const category = 'grammar';
+  const oldSource = 'Lead. one take remains.';
+  const oldOffset = oldSource.indexOf(original);
+  const insertedPrefix = 'Fresh one take. ';
+  const newSource = insertedPrefix + oldSource;
+  assert.equal(
+    newSource.indexOf(original),
+    oldOffset,
+    'the inserted fresh occurrence must occupy A\'s historical offset',
+  );
+
+  const historicalFingerprint = `fixture:${oldOffset}:${original}:${replacement}:${category}`;
+  const retainedActionId = createAiIssueActionId(
+    historicalFingerprint,
+    1,
+    'retained-a-lineage',
+  );
+  const retention = planAiIssueRetention(
+    oldSource,
+    newSource,
+    [{ rangeOffset: 0, rangeLength: 0, text: insertedPrefix }],
+    [{
+      key: retainedActionId,
+      start: oldOffset,
+      end: oldOffset + original.length,
+      original,
+    }],
+  );
+  assert.ok(retention);
+  assert.equal(retention.retained.length, 1);
+  const retainedRange = retention.retained[0];
+  assert.ok(retainedRange);
+  assert.equal(retainedRange.key, retainedActionId);
+  assert.deepEqual(
+    { start: retainedRange.start, end: retainedRange.end },
+    {
+      start: oldOffset + insertedPrefix.length,
+      end: oldOffset + insertedPrefix.length + original.length,
+    },
+    'safe retention must move A while preserving its opaque action lineage',
+  );
+
+  const retained = {
+    id: retainedActionId,
+    fingerprint:
+      `fixture:${retainedRange.start}:${original}:${replacement}:${category}`,
+    documentVersion: 2,
+    sourceStart: retainedRange.start,
+    sourceEnd: retainedRange.end,
+    original,
+    replacement,
+    category,
+  };
+  const fresh = {
+    id: createAiIssueActionId(
+      historicalFingerprint,
+      2,
+      'fresh-b-lineage',
+    ),
+    fingerprint: historicalFingerprint,
+    documentVersion: 2,
+    sourceStart: oldOffset,
+    sourceEnd: oldOffset + original.length,
+    original,
+    replacement,
+    category,
+  };
+  assert.notEqual(
+    fresh.id,
+    retainedActionId,
+    'a fresh issue at the same historical location and with the same suggestion must get a new action ID',
+  );
+  assert.deepEqual(
+    [retained, fresh]
+      .filter((issue) => issue.id === retainedActionId)
+      .map((issue) => [issue.sourceStart, issue.sourceEnd]),
+    [[retained.sourceStart, retained.sourceEnd]],
+    'an old Tree action ID may resolve only the safely retained occurrence',
+  );
+
+  const batchCapture = captureAiIssueIdentity(retained);
+  assert.equal(aiIssueMatchesCapturedIdentity(retained, batchCapture), true);
+  assert.equal(
+    aiIssueMatchesCapturedIdentity(fresh, batchCapture),
+    false,
+    'Apply All must not substitute a fresh issue for the issue captured before its modal prompt',
+  );
+  assert.equal(
+    aiIssueMatchesCapturedIdentity({
+      ...fresh,
+      id: retainedActionId,
+    }, batchCapture),
+    false,
+    'even an injected duplicate action ID must fail the full captured-identity check',
+  );
+  assert.equal(
+    aiIssueMatchesCapturedIdentity({
+      ...retained,
+      documentVersion: retained.documentVersion + 1,
+    }, batchCapture),
+    false,
+    'Apply All must reject an identity that advanced while its modal prompt was open',
+  );
+});
+
+test('AI issue retention follows sentence splits and merges', () => {
+  const splitOld = 'First bad clause and second wrong clause.';
+  const splitAt = splitOld.indexOf(' and ');
+  const splitNew = `${splitOld.slice(0, splitAt)}. ${splitOld.slice(splitAt + 1)}`;
+  const splitPlan = planAiIssueRetention(
+    splitOld,
+    splitNew,
+    [{ rangeOffset: splitAt, rangeLength: 1, text: '. ' }],
+    [
+      {
+        key: 'bad',
+        start: splitOld.indexOf('bad'),
+        end: splitOld.indexOf('bad') + 3,
+        original: 'bad',
+      },
+      {
+        key: 'wrong',
+        start: splitOld.indexOf('wrong'),
+        end: splitOld.indexOf('wrong') + 5,
+        original: 'wrong',
+      },
+    ],
+  );
+  assert.ok(splitPlan);
+  assert.deepEqual(splitPlan.retained.map((issue) => issue.key), ['bad', 'wrong']);
+  assert.equal(splitPlan.dirtySegments.length, 2);
+
+  const mergeOld = 'First bad. Second wrong.';
+  const mergeAt = mergeOld.indexOf('. ');
+  const mergeNew = mergeOld.slice(0, mergeAt) + mergeOld.slice(mergeAt + 2);
+  const mergePlan = planAiIssueRetention(
+    mergeOld,
+    mergeNew,
+    [{ rangeOffset: mergeAt, rangeLength: 2, text: '' }],
+    [
+      {
+        key: 'bad',
+        start: mergeOld.indexOf('bad'),
+        end: mergeOld.indexOf('bad') + 3,
+        original: 'bad',
+      },
+      {
+        key: 'wrong',
+        start: mergeOld.indexOf('wrong'),
+        end: mergeOld.indexOf('wrong') + 5,
+        original: 'wrong',
+      },
+    ],
+  );
+  assert.ok(mergePlan);
+  assert.deepEqual(mergePlan.retained.map((issue) => issue.key), ['bad', 'wrong']);
+  assert.deepEqual(
+    mergePlan.dirtySegments.map((segment) => segment.text),
+    ['First badSecond wrong.'],
+  );
+});
+
+test('dirty review progress survives a partial failure and a later retry', () => {
+  const prose = extractAiProseDocument('第一句。第二句。');
+  const sentences = aiProseSentenceSegments(prose);
+  assert.equal(sentences.length, 2);
+  const first = sentences[0];
+  const second = sentences[1];
+  assert.ok(first);
+  assert.ok(second);
+  assert.equal(first.sourceEnd, second.sourceStart);
+  const dirty = [{ start: second.sourceStart, end: second.sourceStart }];
+
+  const afterFirst = advanceAiDirtyReviewProgress(
+    prose,
+    dirty,
+    new Set(),
+    [first],
+  );
+  assert.deepEqual(afterFirst.remainingRanges, dirty);
+  assert.equal(afterFirst.reviewedSentenceKeys.size, 1);
+
+  // Model the second request failing before commit, then succeeding in a new
+  // request. The first request's progress must still satisfy half the boundary.
+  const afterRetry = advanceAiDirtyReviewProgress(
+    prose,
+    afterFirst.remainingRanges,
+    afterFirst.reviewedSentenceKeys,
+    [second],
+  );
+  assert.deepEqual(afterRetry.remainingRanges, []);
+  assert.equal(afterRetry.reviewedSentenceKeys.size, 0);
+});
+
+test('dirty review progress accumulates across bounded batches', () => {
+  const source = Array.from({ length: 12 }, (_unused, index) => `第${index}句。`).join('');
+  const prose = extractAiProseDocument(source);
+  const sentences = aiProseSentenceSegments(prose);
+  assert.equal(sentences.length, 12);
+  const dirty = [{ start: 0, end: source.length }];
+  const firstBatch = advanceAiDirtyReviewProgress(
+    prose,
+    dirty,
+    new Set(),
+    sentences.slice(0, 8),
+  );
+  assert.deepEqual(firstBatch.remainingRanges, dirty);
+  assert.equal(firstBatch.reviewedSentenceKeys.size, 8);
+  const secondBatch = advanceAiDirtyReviewProgress(
+    prose,
+    firstBatch.remainingRanges,
+    firstBatch.reviewedSentenceKeys,
+    sentences.slice(8),
+  );
+  assert.deepEqual(secondBatch.remainingRanges, []);
+});
+
+test('a manual paragraph review covers its pending sentence contexts', () => {
+  const source = 'First sentence. Second sentence.';
+  const prose = extractAiProseDocument(source);
+  const paragraph = prose.segments[0];
+  assert.ok(paragraph);
+  const dirtyStart = source.indexOf('Second');
+  const progress = advanceAiDirtyReviewProgress(
+    prose,
+    [{ start: dirtyStart, end: dirtyStart + 'Second'.length }],
+    new Set(),
+    [paragraph],
+  );
+  assert.deepEqual(progress.remainingRanges, []);
+});
+
+test('a right-endpoint zero-width dirty range keeps its next-sentence affinity', () => {
+  const original = 'One bad. XTwo wrong.';
+  const deletedAt = original.indexOf('X');
+  const afterDeletion = original.slice(0, deletedAt) + original.slice(deletedAt + 1);
+  const firstPlan = planAiIssueRetention(
+    original,
+    afterDeletion,
+    [{ rangeOffset: deletedAt, rangeLength: 1, text: '' }],
+    [],
+  );
+  assert.ok(firstPlan);
+  assert.deepEqual(firstPlan.dirtyRanges, [{ start: 9, end: 9 }]);
+
+  const punctuationStart = afterDeletion.indexOf('. ');
+  const afterPunctuation = afterDeletion.slice(0, punctuationStart) + '! ' +
+    afterDeletion.slice(punctuationStart + 2);
+  const secondPlan = planAiIssueRetention(
+    afterDeletion,
+    afterPunctuation,
+    [{ rangeOffset: punctuationStart, rangeLength: 2, text: '! ' }],
+    [],
+    firstPlan.dirtyRanges,
+  );
+  assert.ok(secondPlan);
+  assert.deepEqual(secondPlan.dirtyRanges, [
+    { start: 7, end: 9 },
+    { start: 9, end: 9 },
+  ]);
+  assert.deepEqual(
+    selectAiProseSentenceSegmentsForRanges(secondPlan.prose, secondPlan.dirtyRanges)
+      .map((sentence) => sentence.text),
+    ['One bad!', 'Two wrong.'],
+  );
+});
+
+test('AI issue review replaces only dirty or intersecting suggestions in one sentence', () => {
+  const existing = [
+    { key: 'left', start: 2, end: 6 },
+    { key: 'edited', start: 12, end: 16 },
+    { key: 'rediscovered', start: 24, end: 29 },
+    { key: 'insertion', start: 34, end: 34 },
+  ];
+  const dirty = [{ start: 11, end: 17 }];
+  const returned = [
+    { start: 23, end: 28 },
+    { start: 34, end: 34 },
+  ];
+  assert.deepEqual(
+    existing
+      .filter((issue) => shouldReplaceAiIssueAfterReview(issue, dirty, returned))
+      .map((issue) => issue.key),
+    ['edited', 'rediscovered', 'insertion'],
+  );
+});
+
+test('AI issue retention handles multiple edits and carries pending dirty sentences', () => {
+  const oldSource = 'A bad one. B wrong two. C poor three. D weak four.';
+  const bad = oldSource.indexOf('bad');
+  const weak = oldSource.indexOf('weak');
+  const changes = [
+    { rangeOffset: bad, rangeLength: 3, text: 'good' },
+    { rangeOffset: weak, rangeLength: 4, text: 'strong' },
+  ];
+  const newSource = 'A good one. B wrong two. C poor three. D strong four.';
+  const plan = planAiIssueRetention(
+    oldSource,
+    newSource,
+    changes,
+    [
+      {
+        key: 'wrong',
+        start: oldSource.indexOf('wrong'),
+        end: oldSource.indexOf('wrong') + 5,
+        original: 'wrong',
+      },
+      {
+        key: 'poor',
+        start: oldSource.indexOf('poor'),
+        end: oldSource.indexOf('poor') + 4,
+        original: 'poor',
+      },
+    ],
+    [{ start: oldSource.indexOf('B wrong'), end: oldSource.indexOf('two.') + 4 }],
+  );
+  assert.ok(plan);
+  assert.deepEqual(plan.retained.map((issue) => issue.key), ['poor']);
+  assert.deepEqual(
+    plan.dirtySegments.map((segment) => segment.text),
+    ['A good one.', 'B wrong two.', 'D strong four.'],
+  );
+});
+
+test('AI issue retention isolates adjacent CJK sentences without whitespace', () => {
+  const oldSource = '第一处有错。第二处错误！第三处正常？';
+  const changedStart = oldSource.indexOf('有错');
+  const newSource = oldSource.slice(0, changedStart) + '正确' +
+    oldSource.slice(changedStart + '有错'.length);
+  const secondStart = oldSource.indexOf('错误');
+  const plan = planAiIssueRetention(
+    oldSource,
+    newSource,
+    [{ rangeOffset: changedStart, rangeLength: '有错'.length, text: '正确' }],
+    [
+      {
+        key: 'first',
+        start: changedStart,
+        end: changedStart + '有错'.length,
+        original: '有错',
+      },
+      {
+        key: 'second',
+        start: secondStart,
+        end: secondStart + '错误'.length,
+        original: '错误',
+      },
+    ],
+  );
+  assert.ok(plan);
+  assert.deepEqual(plan.retained, [{
+    key: 'second',
+    start: newSource.indexOf('错误'),
+    end: newSource.indexOf('错误') + '错误'.length,
+  }]);
+  assert.deepEqual(
+    plan.dirtySegments.map((segment) => segment.text),
+    ['第一处正确。'],
+  );
+});
+
+test('AI issue retention handles many sparse edits without scanning every sentence per edit', () => {
+  const sentenceCount = 12_000;
+  const oldSource = Array.from(
+    { length: sentenceCount },
+    (_unused, index) => `S${index} bad.`,
+  ).join(' ');
+  const changes: Array<{ rangeOffset: number; rangeLength: number; text: string }> = [];
+  let searchFrom = 0;
+  for (let sentence = 0; sentence < sentenceCount - 1; sentence += 97) {
+    const marker = `S${sentence} bad.`;
+    const markerStart = oldSource.indexOf(marker, searchFrom);
+    assert.notEqual(markerStart, -1);
+    changes.push({
+      rangeOffset: markerStart + marker.indexOf('bad'),
+      rangeLength: 3,
+      text: 'good',
+    });
+    searchFrom = markerStart + marker.length;
+  }
+  const chunks: string[] = [];
+  let oldCursor = 0;
+  for (const change of changes) {
+    chunks.push(oldSource.slice(oldCursor, change.rangeOffset), change.text);
+    oldCursor = change.rangeOffset + change.rangeLength;
+  }
+  chunks.push(oldSource.slice(oldCursor));
+  const newSource = chunks.join('');
+  const lastIssueStart = oldSource.lastIndexOf('bad');
+  const plan = planAiIssueRetention(
+    oldSource,
+    newSource,
+    changes,
+    [{
+      key: 'last-unaffected',
+      start: lastIssueStart,
+      end: lastIssueStart + 3,
+      original: 'bad',
+    }],
+  );
+  assert.ok(plan);
+  assert.equal(plan.dirtySegments.length, changes.length);
+  const mappedLast = newSource.lastIndexOf('bad');
+  assert.deepEqual(plan.retained, [{
+    key: 'last-unaffected',
+    start: mappedLast,
+    end: mappedLast + 3,
+  }]);
+});
+
+test('AI issue retention fails closed for pathological change transactions', () => {
+  const source = 'a'.repeat(1025);
+  const changes = Array.from({ length: 1025 }, (_unused, index) => ({
+    rangeOffset: index,
+    rangeLength: 1,
+    text: 'a',
+  }));
+  assert.equal(planAiIssueRetention(source, source, changes, []), undefined);
+  assert.equal(
+    planAiIssueRetention(
+      'Safe sentence.',
+      'Safe sentence!',
+      [{ rangeOffset: 13, rangeLength: 1, text: '!' }],
+      [],
+      [{ start: 0, end: 99 }],
+    ),
+    undefined,
+  );
+});
+
+test('AI issue ranges survive only exact non-overlapping single edits', () => {
+  assert.deepEqual(
+    remapAiIssueOffsetRange(
+      { start: 20, end: 25 },
+      { rangeOffset: 5, rangeLength: 0, insertedLength: 3 },
+    ),
+    { start: 23, end: 28 },
+  );
+  assert.deepEqual(
+    remapAiIssueOffsetRange(
+      { start: 2, end: 7 },
+      { rangeOffset: 10, rangeLength: 2, insertedLength: 5 },
+    ),
+    { start: 2, end: 7 },
+  );
+  assert.deepEqual(
+    remapAiIssueOffsetRange(
+      { start: 20, end: 25 },
+      { rangeOffset: 5, rangeLength: 4, insertedLength: 1 },
+    ),
+    { start: 17, end: 22 },
+  );
+  assert.equal(
+    remapAiIssueOffsetRange(
+      { start: 20, end: 25 },
+      { rangeOffset: 22, rangeLength: 0, insertedLength: 1 },
+    ),
+    undefined,
+  );
+  assert.equal(
+    remapAiIssueOffsetRange(
+      { start: 20, end: 25 },
+      { rangeOffset: 18, rangeLength: 4, insertedLength: 1 },
+    ),
+    undefined,
+  );
+});
+
+test('AI issue offsets retain unaffected document-review results across common edits', () => {
+  const original = { start: 80, end: 85 };
+  const scenarios = [
+    {
+      name: 'insertion',
+      change: { rangeOffset: 10, rangeLength: 0, insertedLength: 4 },
+      expected: { start: 84, end: 89 },
+    },
+    {
+      name: 'deletion',
+      change: { rangeOffset: 10, rangeLength: 6, insertedLength: 0 },
+      expected: { start: 74, end: 79 },
+    },
+    {
+      name: 'replacement',
+      change: { rangeOffset: 10, rangeLength: 3, insertedLength: 8 },
+      expected: { start: 85, end: 90 },
+    },
+    {
+      name: 'blank-line insertion',
+      change: { rangeOffset: 10, rangeLength: 0, insertedLength: 2 },
+      expected: { start: 82, end: 87 },
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    assert.deepEqual(
+      remapAiIssueOffsetRange(original, scenario.change),
+      scenario.expected,
+      `${scenario.name} must move an unrelated later issue by the exact UTF-16 delta`,
+    );
+  }
+});
+
+test('zero-width AI insertion suggestions survive unrelated edits', () => {
+  assert.deepEqual(
+    remapAiIssueOffsetRange(
+      { start: 80, end: 80 },
+      { rangeOffset: 10, rangeLength: 0, insertedLength: 4 },
+    ),
+    { start: 84, end: 84 },
+    'a punctuation-insertion suggestion after the edit must move with the text',
+  );
+  assert.deepEqual(
+    remapAiIssueOffsetRange(
+      { start: 10, end: 10 },
+      { rangeOffset: 80, rangeLength: 3, insertedLength: 1 },
+    ),
+    { start: 10, end: 10 },
+    'a punctuation-insertion suggestion before the edit must remain valid',
+  );
+});
+
+test('AI issue batch ranges fail closed for zero-width boundary conflicts', () => {
+  assert.equal(
+    aiIssueRangesOverlap(
+      { start: 12, end: 12 },
+      { start: 12, end: 12 },
+    ),
+    true,
+    'two insertion suggestions at the same point cannot both be applied',
+  );
+  assert.equal(
+    aiIssueRangesOverlap(
+      { start: 12, end: 12 },
+      { start: 12, end: 18 },
+    ),
+    true,
+    'an insertion touching the left edge of a replacement must conflict',
+  );
+  assert.equal(
+    aiIssueRangesOverlap(
+      { start: 18, end: 18 },
+      { start: 12, end: 18 },
+    ),
+    true,
+    'an insertion touching the right edge of a replacement must conflict',
+  );
+  assert.equal(
+    aiIssueRangesOverlap(
+      { start: 12, end: 18 },
+      { start: 18, end: 24 },
+    ),
+    false,
+    'adjacent non-empty half-open replacements remain safe',
+  );
+  assert.equal(
+    aiIssueRangesOverlap(
+      { start: 11, end: 11 },
+      { start: 12, end: 18 },
+    ),
+    false,
+    'a separated insertion remains safe',
+  );
+});
+
+test('an unchecked AI edit target cannot be stolen by cursor navigation', () => {
+  const edit = { offset: 42, reason: 'edit' as const };
+  const navigation = { offset: 200, reason: 'navigation' as const };
+  assert.equal(choosePendingAiAutomaticReviewTarget(edit, navigation), edit);
+  assert.deepEqual(
+    choosePendingAiAutomaticReviewTarget(navigation, edit),
+    edit,
+  );
+  assert.deepEqual(
+    choosePendingAiAutomaticReviewTarget(edit, { offset: 50, reason: 'edit' }),
+    { offset: 50, reason: 'edit' },
+  );
+  assert.deepEqual(
+    choosePendingAiAutomaticReviewTarget(navigation, {
+      offset: 220,
+      reason: 'navigation',
+    }),
+    { offset: 220, reason: 'navigation' },
+  );
+});
+
+test('automatic AI review keys use a hard per-version request cap', () => {
+  const keys = new Set<string>();
+  assert.equal(tryReserveAiAutomaticReviewKey(keys, 'a', 2), true);
+  assert.equal(tryReserveAiAutomaticReviewKey(keys, 'a', 2), false);
+  assert.equal(tryReserveAiAutomaticReviewKey(keys, 'b', 2), true);
+  assert.equal(tryReserveAiAutomaticReviewKey(keys, 'c', 2), false);
+  assert.deepEqual([...keys], ['a', 'b']);
+  keys.delete('b');
+  assert.equal(tryReserveAiAutomaticReviewKey(keys, 'c', 2), true);
+  assert.equal(tryReserveAiAutomaticReviewKey(new Set(), 'a', 0), false);
+});
 
 test('document scope accepts only saved .tex/.bib resources', () => {
   assert.equal(isTeXLeafSourceUri('file', '/paper/main.tex'), true);
@@ -49,6 +796,16 @@ test('document scope accepts only saved .tex/.bib resources', () => {
   assert.equal(isTeXLeafSourceUri('file', '/paper/main'), false);
   assert.equal(isTeXLeafSourceUri('untitled', 'Untitled-1.tex'), false);
   assert.equal(isTeXLeafSourceUri('UNTITLED', '/draft.bib'), false);
+
+  assert.equal(isAIWritingSourceUri('file', '/paper/main.tex'), true);
+  assert.equal(
+    isAIWritingSourceUri('vscode-remote', '/home/me/chapter.TeX'),
+    true,
+  );
+  assert.equal(isAIWritingSourceUri('file', '/paper/references.bib'), false);
+  assert.equal(isAIWritingSourceUri('untitled', 'Untitled-1.tex'), false);
+  assert.equal(isAIWritingSourceUri('git', '/paper/main.tex'), false);
+  assert.equal(isAIWritingSourceUri('vscode-vfs', '/paper/main.tex'), false);
 });
 
 test('resource libraries isolate workspace extras by owning root', () => {

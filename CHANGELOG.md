@@ -2,6 +2,160 @@
 
 TeXLeaf 的所有重要变更都会记录在此文件中。版本格式遵循语义化版本。
 
+## [0.8.9] - 2026-08-17
+
+### Fixed
+
+- 修复微软拼音处于中文模式时，`Ctrl+.` 被输入法优先用于切换中英文标点、因而看起来像 TeXLeaf Quick Fix 没有响应的交互盲点。这不是 AI 建议缺失、Code Action Provider 返回空、用户键位被重绑或其他扩展冲突；切换输入法到英文模式后可继续使用 `Ctrl+.`，也可以从 `F1` / Command Palette 运行“快速修复...”、右键选择“快速修复...”或点击灯泡。
+- 点击已经真正失效的问题树节点或 Quick Fix 时只刷新问题树、装饰线和状态栏，不弹出通知，也不播放音效；仍然安全有效、只是发生位置平移的问题继续按稳定 lineage ID 解析。
+
+### Added
+
+- TeXLeaf 专用 Hover 新增“应用这条建议”链接，无需依赖可能被中文输入法占用的 `Ctrl+.`。该链接只允许调用 TeXLeaf 白名单中的内部应用命令，模型提供的文字仍按不受信任内容渲染；点击后后端仍会重新验证当前文档版本、问题身份、范围、exact `original` 与可编辑 LaTeX 正文，失效建议不会修改文件。
+- 在活动栏“AI 写作问题”列表点击某条建议后，对应正文会叠加主题自适应的背景与轮廓，其他问题仍保留下划线，便于在长文中确认当前审阅对象。定位与高亮不移动主光标、不触发原生 Diagnostic 音效；选择状态沿稳定 issue lineage 跟随无关前文编辑造成的安全平移，并在建议被应用、忽略、清除、判定失效或关闭 AI 后自动移除。
+- 新增 `texleaf.aiWriting.deepseekBaseUrl`。DeepSeek 默认使用 `https://api.deepseek.com`，也可指向安全的兼容服务，并始终请求规范化后的 `{Base URL}/chat/completions`；OpenAI 继续独立使用 `{Base URL}/responses` 与 Structured Outputs，不在两个协议之间自动回退。
+
+### Security and configuration
+
+- AI 写作设置由 13 项增加到 14 项；全部 `texleaf.aiWriting.*` 配置均改为 application 级，只能由用户/Profile 设置控制。普通配置可以随 VS Code Settings Sync 同步，但工作区、文件夹和 `.vscode/settings.json` 不能开启 AI、重定向目标、切换 Provider/模型或改变费用相关参数；运行时还会只读取全局值作为纵深防护。
+- 每一个规范化 DeepSeek 与 OpenAI Base URL 都使用独立的正文传输 consent 和 SecretStorage Key。默认 DeepSeek 官方地址继续兼容已有的 `v1` Key/consent；任意自定义 DeepSeek 地址使用新的目标专用记录，绝不会复用官方凭据，OpenAI 各地址以及两个 Provider 之间也互不复用。
+- 两种 Base URL 使用相同的安全边界：远程目标必须为 HTTPS，HTTP 只允许 `localhost`、`127.0.0.1` 与 `[::1]`；拒绝 URL credentials、query、fragment、主机名尾随点和路径已经以对应 endpoint 结尾的地址，请求不跟随 HTTP 重定向。API Key 与 consent 不进入普通设置，也不随 Settings Sync 跨设备复制。
+
+## [0.8.8] - 2026-08-17
+
+### Fixed
+
+- 修复连续应用 AI 建议时，前方一次安全编辑会平移后续问题、却因绝对 offset 变化重建全部内部 ID，导致已经显示的问题树节点或 Quick Fix 误报“文档已变化”的问题。增量保留已经证明未受影响的建议现在维持稳定的 lineage ID，同时仍更新 fingerprint、文档版本、范围和 UTF-16 offset，并在应用前继续逐字核对当前 `original`。
+- 真正失效的旧问题树节点或 Quick Fix 不再弹出误导性的信息通知；TeXLeaf 会刷新当前问题树、装饰线与状态，并仅在状态栏短暂显示“问题列表已更新；旧建议已失效”。AI 总开关关闭、工作区不受信任或文档作用域不支持时仍分别给出准确原因。
+- “应用当前全部 AI 建议”在模态确认后不再依赖 `DocumentIssues` 对象引用完全相同。它会按确认前捕获的稳定 ID 在当前安全状态中逐条重新解析，并重新验证文档版本、范围、原文和重叠；仅发生等价状态对象刷新时可以继续，确认前捕获的任一建议已移除、失效或无法唯一解析，或者文档正文发生变化时仍整批 fail closed。确认后新出现、未被确认的其他建议不属于本批操作。
+
+### Reliability
+
+- 隔离 VS Code Extension Host 回归现在覆盖真实旧问题树节点：先在问题前插入文字使范围整体平移，再通过刷新前保存的节点应用建议，验证正文只修改一次、问题立即消费、持久缓存清空；同时覆盖失效节点静默刷新与“应用全部”确认期间等价状态刷新的行为。
+
+## [0.8.7] - 2026-08-17
+
+### Fixed
+
+- 修复接受词尾追加型 AI 建议后旧问题仍留在装饰线、Hover、活动栏列表或重启缓存中的问题。像 `one take` → `one takes` 这样的单条 Quick Fix，以及确认后的“应用全部”，现在会在正文写入成功后立即消费对应问题，不再依赖后续异步文档变更事件代为清理。
+- 修复增量保留对右端点插入判断过宽的问题。在问题范围末端追加字符已经改变该建议所描述的词形时，旧问题会立即失效；同一句中真正与编辑无关、仍逐字匹配的问题仍按既有精确重映射规则保留。
+- 在线结果与本地恢复都会拒绝“截短范围”伪问题：如果 `replacement` 已经由模型给出的 `original` 范围加紧邻上下文完整存在（例如当前正文已经是 `takes`，候选却只锚定 `take` 并仍建议 `takes`），该候选不会进入或重新出现在 UI。旧的精确源码缓存也会在恢复时逐条执行这一过滤。
+
+## [0.8.6] - 2026-08-17
+
+### Fixed
+
+- 修复所有 AI 写作入口都可能立即报告 `configuration/language-too-long` 的回归。根因不是 API Key、余额、模型、Base URL 或论文长度，而是控制器把“按正文语言处理，并用简体中文解释建议”等完整输出指令误传成客户端 `language` 协议标签；该字符串超过 64 字符安全上限，被 DeepSeek/OpenAI 客户端在 HTTP 请求前一致拒绝。
+- 语言设置现在通过单一映射转换为有界短标签：`auto` → `auto`、`english` → `English`、`chinese` → `Chinese`。自动句子检查、手动段落/选区检查、整篇检查、安全改写和行内补全均使用同一映射，DeepSeek 官方端点与 OpenAI 官方/自定义 Responses 地址都恢复可用。
+- Review 的中文展示要求没有被移入可变标签或删除：`message` 与 `explanation` 仍由固定 system prompt 要求使用简体中文，`replacement` 仍保持被检查正文的原语言。
+
+### Reliability and safety
+
+- 增加短标签映射的边界回归覆盖，并保留两个客户端原有的联网前校验：64 字符标签可以进入 mock fetch，65 字符或含换行/控制字符的标签会以 `language-too-long` / `invalid-language` 在本地失败，mock fetch 调用数保持为 0。修复只纠正控制器传参，不放宽不受信任输入、模型名称、Base URL 或正文长度限制。
+
+## [0.8.5] - 2026-08-17
+
+### Fixed
+
+- 自动增量检查不再因为一句中的局部编辑而清除该句所有旧建议。TeXLeaf 仍以旧句与新句并集提供完整语境，但失效范围收窄为实际 UTF-16 编辑区：只有与编辑相交、或与新返回建议相交的旧问题会被替换；同句其他问题只有在 `original` 与新正文逐字一致、仍位于可编辑正文且可严格平移时才保留。
+- 数学公式改为受保护的等长语义占位符。公式源码不会发送给模型，也不能成为建议范围；占位符会告诉模型此处存在不可编辑的 inline/display formula，避免把 `Take` 后的行间公式误报为“缺少宾语”，同时保持源码 offset 的 UTF-16 一一映射。
+- Review 提示现在明确要求 `message` 与 `explanation` 使用简体中文，`replacement` 保持被检查正文的原语言，不因中文解释而翻译作者文字。
+
+### Changed
+
+- AI 写作问题不再发布为 VS Code 原生 Diagnostic，也不再出现在 Problems 面板，从而避免原生诊断 Hover 与 TeXLeaf Hover 重复，以及 Error/Warning accessibility signal。编辑器改用无音频的装饰线标记；类别、解释、替换预览与真实严重性由 TeXLeaf 专用 Hover 和活动栏问题树显示，灯泡 Quick Fix 仍可安全应用或忽略单条建议。
+- 当前问题列表会在扩展私有的本机 `globalStorage` 中跨文档关闭和 VS Code 重启恢复；它不写入工作区、不进入 Settings Sync，也不保存论文全文。只有当前完整源码的 UTF-16 长度与 SHA-256 都和快照完全一致时，才按精确 offset 逐条恢复；文件被外部修改、hash/长度不匹配或单条范围/原文/可编辑区校验失败时一律 fail closed 丢弃并要求重新检查，不跨源搜索相同短语。
+- “清除 AI 写作诊断”在界面中更名为“清除 AI 写作问题”；既有命令 ID `texleaf.aiWriting.clearDiagnostics` 保持兼容。
+
+### Performance, safety and limits
+
+- 句子级发送上下文与问题级失效范围继续分离；句号/空行 split/merge、同一事务多处编辑、累计 pending 和零宽边界均按精确范围处理。无法重建的事务、超过 100 万 UTF-16 字符的同步增量扫描或超过 1024 个 change 的异常事务会 fail closed，而不是猜测旧问题位置。
+- 本地恢复沿用与在线结果同等级的字段、控制字符、TeX replacement 和可编辑区校验。单文档最多保留 2048 条问题；单个持久化记录最多 2 MiB；当前 Profile 最多保留 256 个文档记录且总量最多 32 MiB，超限时按最近修改时间清理旧记录。
+- AI 总开关仍默认关闭；只有用户明确同意并配置所选服务商 Key 后才可能联网和产生费用。自动检查仍为每批最多 8 句、每版本最多 64 个不同句子，手动整篇每次最多 32 个正文段；成功句逐句提交，后续请求失败不回滚已成功结果。
+
+## [0.8.4] - 2026-08-17
+
+### Fixed
+
+- 修复整篇检查后只修改一处正文就清空其他问题的回归。增量失效现在以句子为单位：仅把文本事务涉及的旧句子与新句子并集标为待复检，其他全文问题在 `original` 与可编辑正文仍逐字成立时原样保留，并按同一事务的 UTF-16 位移精确平移。
+- 句号或空行的插入/删除可能把一句拆成多句或把多句合并；TeXLeaf 会把 split/merge 两侧关联的旧句与新句全部纳入局部复检。一个 VS Code 事务中的多处编辑会一起精确重建，无法无歧义重建时才 fail closed 清除不再可靠的结果。
+- 保存、dirty-state/编码转换等没有正文 `contentChanges` 的通知不再清空已完成的全文结果或待复检队列；同文档文本未变而版本推进时，已有问题与 pending 句子会安全迁移到新版本。
+- TeXLeaf 本身不包含或播放检查音效。AI Diagnostic 统一以 VS Code `Information` 发布，避免新增 Error/Warning 标记或主光标进入其所在行时触发 VS Code 的 accessibility signal；TeXLeaf 问题树仍显示模型建议的真实严重性。点击树中问题现在只滚动到对应范围，不移动主光标或夺走列表焦点。
+
+### Changed
+
+- 自动检查从“当前段落”改为改动句子级队列；中文 `。！？` 即使句间没有空格也会正确分句，并兼容句末中英文引号和括号。`texleaf.aiWriting.maxParagraphLength` 设置名为兼容既有配置继续保留，但自动模式按单句应用该长度上限。
+- 每个句子成功返回后立即与现有问题列表合并并从 pending 队列移除；如果同批后续 API 请求失败，已经成功的前句结果不会回滚或在重试时重复付费。仍未成功复检的句子会在活动栏与状态栏明确显示为“等待局部复检”，其他问题继续保留。
+- 自动调度每批最多处理 8 个改动句子，同一文档版本最多自动请求 64 个不同句子；达到上限不会逐出旧去重记录后重复收费。手动检查多段选区或整篇文档仍保持每次最多 32 个正文段，并同时受单段与总字符上限约束。
+
+### Privacy and cost
+
+- AI 写作总开关仍默认关闭；Provider consent、按目标隔离的 SecretStorage、workspace trust、正文遮罩、API 独立计费和“不保证无延迟实时检查”的边界没有放宽。自动检查与行内补全只有在用户显式开启总开关、同意传输并配置对应 API Key 后才可能产生请求和费用。
+
+## [0.8.3] - 2026-08-17
+
+### Added
+
+- 在 TeXLeaf 活动栏容器中新增 **AI 写作问题**列表。它针对当前活动 `.tex` 展示检查排队/进行中状态、可审阅问题数量、行号、类别、严重性、诊断、`original → replacement` 预览和解释；单击条目定位原文，条目操作可单独应用或在本次会话忽略。
+- 新增公开命令 **TeXLeaf: 显示 AI 写作问题列表**（`texleaf.aiWriting.showIssues`）与 **TeXLeaf: 应用当前全部 AI 建议**（`texleaf.aiWriting.applyAll`）。批量应用前使用模态确认，并再次核对文档版本、每条 original 与建议范围；任何过期或重叠都会让整批操作停止。
+- 问题列表新增 fail-closed 拒绝摘要。像“42 个可审阅问题；另忽略 20 条建议”这样的提示表示同批模型候选中有 42 条通过精确、安全映射，另 20 条因重复、重叠、字段无效或无法唯一定位而被本地丢弃；这不是 API Key、余额或认证错误，未主动应用前原文没有修改。
+
+### Changed
+
+- 自动段落检查的默认防抖从 1500 ms 调整为 900 ms，允许范围仍为 500–10000 ms。停止输入、打开/保存文档、切换活动编辑器，以及把光标移入另一个正文段落都会调度检查；继续输入会重置定时器并取消旧请求。尚未触发的编辑目标优先于纯光标导航，写完一句后立即按 Enter、输入空行或点击别处不会漏掉刚编辑的段落。
+- 同一文档版本、相同段落内容和相同 Provider/模型/语言/风格组合只自动请求一次。光标在同一段落内来回移动不会重复调用 API，因此自动检查不是“每按一个键就联网”。
+- 同一未修改文档版本最多自动检查 64 个不同段落；达到上限后直接停止新的自动请求，不会把旧去重记录当成 LRU 逐出后再次产生费用。
+- 单次普通编辑只清除受影响正文段落的旧诊断；其他段落中仍逐字匹配的诊断会按文本位移安全平移并保留。多重编辑、版本跳变或无法精确重映射时仍保守清除，避免展示过期建议。
+
+### Performance and safety
+
+- 状态栏与活动栏列表会显示“待检查”“检查中”、当前问题数量和拒绝摘要，但不会为了刷新 UI 额外发起网络请求。网络往返、模型推理、服务商限流与账户配额决定实际响应速度和费用，因此该功能只能提供经过防抖的近实时反馈，不能保证本地语法引擎式的逐键即时响应。
+- 列表中的单条应用、批量应用和点击定位都重新验证当前文档版本与 exact original；被安全忽略的候选没有可执行操作，也不会自动修改原文。列表 tooltip 不信任模型 Markdown，拒绝摘要只显示数量和脱敏原因码。
+- 显式检查多段选区或整篇文档，除字符和单段长度限制外，再增加单次最多 32 个正文段落的硬上限；超过上限会停止并提示，其余正文不发送，避免大量极短段落造成无界的串行付费请求。单个文档的本地问题状态也设有防御性上限。
+
+## [0.8.2] - 2026-08-17
+
+### Fixed
+
+- 修复 DeepSeek/OpenAI 已成功返回检查结果，却因模型使用不同字符计数方式而触发 `issue-original-mismatch`、整批不显示建议的问题。新的精确定位器会在零/一基的 UTF-16 code unit、Unicode code point、UTF-8 byte，以及原始/CRLF 视为单换行的坐标解释中收集候选；只有所有可行解释收敛到同一个逐字源码范围时才采用。
+- 当上报 offset 无法直接匹配时，只允许把非空 `original` 回退到全文中唯一的逐字 occurrence。找不到时使用 `issue-original-not-found`，多种解释或重复原文无法消除歧义时使用 `issue-location-ambiguous`；非法范围与非法锚点分别使用 `invalid-issue-offset` 和 `invalid-original`。
+
+### Reliability and safety
+
+- Review 响应改为逐条校验：单条字段、位置或安全校验失败只丢弃该条，独立且不重叠的有效建议继续成为 Diagnostic；真正相交的区间按连通冲突组整组丢弃。完全相同的重复 issue 去重保留一条，多余项计为 `duplicate-issue`。顶层 `issues` 非数组、超过 64 项、JSON/响应无效时仍整批 fail closed。
+- `original` 必须是非空、单行、长度受限且逐字匹配的原文锚点。Review prompt 要求模型把纯插入表示为包含相邻不变原文的范围，并在 replacement 中保留锚点；本地不会用“所有 replacement 必须包含 original”这种规则误伤普通替换。
+- 精确定位不会做大小写、引号、Unicode 或空白/换行内容归一化，也不会做模糊相似度匹配；CRLF 兼容只改变 offset 的计数解释。含孤立 surrogate 的文本禁用 UTF-8 byte 解释，避免不可靠映射。
+- 客户端只把被丢弃建议的数量和去重安全子码交给控制器；Output/通知不记录 `original`、请求/响应正文、API Key 或底层解析异常。全部建议被安全忽略时给出明确提示，部分有效时说明保留数量与忽略数量，原文仍只会在用户主动应用 Quick Fix 后修改。
+
+## [0.8.1] - 2026-08-17
+
+### Added
+
+- 新增默认关闭、显式同意后才联网的 AI 写作助手：自动或手动检查 `.tex` 正文中的拼写、语法、标点、清晰度、措辞和风格，并通过 VS Code Diagnostic、Problems、Hover 与 Quick Fix 展示和应用建议。
+- 新增当前段落/选区检查、整篇分段检查、安全句子改写、词语/句子行内补全、会话忽略和清除诊断，以及设置/清除当前 AI 服务商 API Key 等 Command Palette 命令；既有公开命令 ID 保持稳定。
+- AI 写作支持 DeepSeek 官方 Chat Completions 与 OpenAI Responses 双 Provider。DeepSeek 默认 `deepseek-v4-flash`，可选择 `deepseek-v4-pro`；OpenAI 默认 `gpt-5.6-luna`，默认 Base URL 为 `https://api.openai.com/v1`，也可配置安全的 Responses-compatible 地址。
+- 独立的 `TeXLeaf · AI 写作` 设置组现精确包含总开关、自动检查、行内补全、Provider、两个服务商各自的模型设置、OpenAI Base URL、语言、风格、两个防抖和两个发送长度上限共 13 项。
+
+### Security and privacy
+
+- API Key 只存入 VS Code SecretStorage，不进入普通设置、日志、项目、Git、Snippet Settings Sync 或 `globalState`，也不通过普通 Settings Sync 跨设备同步；每个 Profile/Remote 环境需分别设置。DeepSeek 使用独立 Secret；每一个规范化 OpenAI Base URL 也使用独立 Secret 和 consent，官方 OpenAI Key 不会自动复用于代理地址。
+- 自定义 OpenAI 地址只允许 `{Base URL}/responses` 与 Structured Outputs 契约，不回退到 Chat Completions。远程地址必须使用 HTTPS，HTTP 只允许 `localhost`、`127.0.0.1` 与 `[::1]` 回环服务；拒绝 URL credentials、query、fragment 和已经带 `/responses` 的地址，请求不会跟随 HTTP 重定向。
+- AI 联网只允许当前 VS Code 窗口受信任时、已经有文件名和路径的本地 `file:` 或 `vscode-remote:` `.tex`；自动检查与补全可能发送当前编辑器中尚未写入磁盘的最新正文。`.bib`、untitled、Git/其他虚拟 URI 与未信任窗口始终停用。总开关默认关闭，首次使用每个实际接收者还需分别确认正文传输与独立计费。
+- 发送前在本地遮罩数学、注释、代码/未知环境、引用、标签、URL、文件参数和未知宏参数；只有明确的正文命令参数会保留。模型返回的范围、原文、重叠和 replacement 控制字符全部经过本地验证，失效或危险建议不会成为编辑。
+- 继续输入、切换 Provider/Base URL、关闭功能或清除当前 Key 会取消旧请求；所有异步结果在显示或应用前复核文档版本、原文、配置、workspace trust、目标 consent 和 Secret 指纹。诊断状态及必要原文片段只存在于当前扩展宿主内存，不写入磁盘。
+- OpenAI Responses 请求显式携带 `store:false`；这只是 TeXLeaf 发出的不存储请求，自定义第三方代理如何保留、处理或使用正文仍由其自身实现和政策决定。
+
+### Reliability
+
+- DeepSeek 空 content 或非法 JSON 只会自动重试一次；恰好一层、完整包裹结果的 ```` ```json … ``` ```` 围栏可以被安全剥离，围栏外有内容、嵌套围栏、字段/范围/原文/重叠错误均不会宽松提取或重试。
+- AI 客户端只向控制器提供认证、权限、计费、限流、网络、超时、取消、拒绝、截断和无效响应等安全分类及内部子码；API Key、论文正文、原始响应和底层解析异常不会写入错误或日志。
+- OpenAI 客户端使用 Responses `text.format` 的严格 JSON Schema，仍在本地复核模型输出；完成状态、拒绝、截断、空白或非法结构、响应体上限、超时与取消都有 fail-closed 处理。
+
+### Compatibility
+
+- DeepSeek 接入采用官方 Chat Completions 与 JSON Output，默认 `deepseek-v4-flash` 非思考模式；OpenAI 接入只采用官方定义的 Responses + Structured Outputs 请求形状。ChatGPT Plus/Pro、Codex 使用额度与 OpenAI API 分别计费，不能被插件读取或复用为 API 授权，也不能支付 DeepSeek 或自定义代理费用。
+- 此功能覆盖 Grammarly 风格的核心校对、Quick Fix、改写和补全闭环，但不声称兼容 Grammarly 的专有词典、团队风格指南或账户服务。
+
 ## [0.7.2] - 2026-08-16
 
 ### Fixed

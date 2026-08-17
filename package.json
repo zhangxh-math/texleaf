@@ -1,8 +1,8 @@
 {
   "name": "texleaf",
   "displayName": "TeXLeaf — Fast LaTeX Snippets",
-  "description": "安全、可定制的 LaTeX 自动片段、Math Preview 与 Zotero 引用管理。",
-  "version": "0.7.2",
+  "description": "安全、可定制的 LaTeX 自动片段、AI 写作检查、Math Preview 与 Zotero 引用管理。",
+  "version": "0.8.9",
   "publisher": "zhangxh-math",
   "author": {
     "name": "zhangxh-math",
@@ -42,7 +42,11 @@
     "math",
     "preview",
     "snippets",
-    "snippet-leaf"
+    "snippet-leaf",
+    "grammar",
+    "writing",
+    "deepseek",
+    "openai"
   ],
   "main": "./dist/extension.js",
   "extensionKind": [
@@ -52,13 +56,27 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "TeXLeaf 在受限模式下继续使用用户的全局片段库；项目级附加文件与 Zotero 引用写入会被禁用。",
+      "description": "TeXLeaf 在受限模式下继续使用用户的全局片段库；项目级附加文件、Zotero 引用写入与会发送正文的 AI 写作助手会被禁用。",
       "restrictedConfigurations": [
         "texleaf.snippetFiles",
         "texleaf.bibliographyFile",
         "texleaf.zoteroPort",
         "texleaf.zoteroLibrary",
-        "texleaf.mathPreview.macros"
+        "texleaf.mathPreview.macros",
+        "texleaf.aiWriting.enabled",
+        "texleaf.aiWriting.automaticReview",
+        "texleaf.aiWriting.inlineCompletions",
+        "texleaf.aiWriting.provider",
+        "texleaf.aiWriting.deepseekModel",
+        "texleaf.aiWriting.deepseekBaseUrl",
+        "texleaf.aiWriting.openaiModel",
+        "texleaf.aiWriting.openaiBaseUrl",
+        "texleaf.aiWriting.language",
+        "texleaf.aiWriting.style",
+        "texleaf.aiWriting.reviewDelayMs",
+        "texleaf.aiWriting.completionDelayMs",
+        "texleaf.aiWriting.maxParagraphLength",
+        "texleaf.aiWriting.maxDocumentLength"
       ]
     },
     "virtualWorkspaces": {
@@ -75,14 +93,15 @@
     "onCommand:texleaf.toggleMathPreview",
     "onCommand:texleaf.refreshMathPreview",
     "onStartupFinished",
-    "onView:texleaf.snippets"
+    "onView:texleaf.snippets",
+    "onView:texleaf.aiIssues"
   ],
   "scripts": {
     "compile": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "check": "tsc -p tsconfig.json --noEmit",
     "test:compile": "tsc -p tsconfig.test.json",
-    "test": "pnpm run test:compile && node --test .test-dist/test/core.test.js .test-dist/test/defaultSnippets.test.js .test-dist/test/defaultTemplates.test.js .test-dist/test/snippetManagerWebview.test.js .test-dist/test/citation.test.js .test-dist/test/mathPreview.test.js .test-dist/test/mathPreviewAppearance.test.js .test-dist/test/mathPreviewLayout.test.js .test-dist/test/referenceMatcher.test.js .test-dist/test/zoteroClient.test.js",
+    "test": "pnpm run test:compile && node --test .test-dist/test/core.test.js .test-dist/test/aiProse.test.js .test-dist/test/aiIssuePersistence.test.js .test-dist/test/deepseekClient.test.js .test-dist/test/openaiClient.test.js .test-dist/test/issueLocation.test.js .test-dist/test/providerIdentity.test.js .test-dist/test/defaultSnippets.test.js .test-dist/test/defaultTemplates.test.js .test-dist/test/snippetManagerWebview.test.js .test-dist/test/citation.test.js .test-dist/test/mathPreview.test.js .test-dist/test/mathPreviewAppearance.test.js .test-dist/test/mathPreviewLayout.test.js .test-dist/test/referenceMatcher.test.js .test-dist/test/zoteroClient.test.js",
     "test:extension-host:run": "node test/run-extension-host.cjs",
     "test:extension-host": "pnpm run compile && pnpm run test:extension-host:run",
     "test:bundle": "node test/bundle-smoke.cjs && node test/math-preview-worker.cjs",
@@ -204,6 +223,66 @@
       {
         "command": "texleaf.dismissMathPreview",
         "title": "TeXLeaf: 关闭当前 Math Preview"
+      },
+      {
+        "command": "texleaf.aiWriting.toggle",
+        "title": "TeXLeaf: 切换 AI 写作助手",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "texleaf.aiWriting.setApiKey",
+        "title": "TeXLeaf: 设置当前 AI 服务商 API Key"
+      },
+      {
+        "command": "texleaf.aiWriting.clearApiKey",
+        "title": "TeXLeaf: 清除当前 AI 服务商 API Key"
+      },
+      {
+        "command": "texleaf.aiWriting.reviewParagraph",
+        "title": "TeXLeaf: AI 检查当前段落或选区"
+      },
+      {
+        "command": "texleaf.aiWriting.reviewDocument",
+        "title": "TeXLeaf: AI 检查当前文档",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "texleaf.aiWriting.rewriteSelection",
+        "title": "TeXLeaf: AI 改写选区或当前句"
+      },
+      {
+        "command": "texleaf.aiWriting.triggerCompletion",
+        "title": "TeXLeaf: 触发 AI 行内补全"
+      },
+      {
+        "command": "texleaf.aiWriting.clearDiagnostics",
+        "title": "TeXLeaf: 清除 AI 写作问题",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "texleaf.aiWriting.showIssues",
+        "title": "TeXLeaf: 显示 AI 写作问题列表",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "texleaf.aiWriting.applyAll",
+        "title": "TeXLeaf: 应用当前全部 AI 建议",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "texleaf.aiIssues.reveal",
+        "title": "TeXLeaf: 定位 AI 写作问题",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "texleaf.aiIssues.apply",
+        "title": "TeXLeaf: 应用这条 AI 建议",
+        "icon": "$(check)"
+      },
+      {
+        "command": "texleaf.aiIssues.ignore",
+        "title": "TeXLeaf: 本次会话忽略这条 AI 建议",
+        "icon": "$(close)"
       }
     ],
     "keybindings": [
@@ -536,6 +615,155 @@
       }
     },
     {
+      "title": "TeXLeaf · AI 写作",
+      "properties": {
+        "texleaf.aiWriting.enabled": {
+          "order": 1,
+          "scope": "application",
+          "type": "boolean",
+          "default": false,
+          "description": "AI 写作助手总开关。默认关闭；首次使用还必须确认会发送已命名 .tex 的当前编辑器正文（可能含尚未保存的编辑），并在 VS Code SecretStorage 中保存当前服务商的 API Key。未信任工作区中始终停用。"
+        },
+        "texleaf.aiWriting.automaticReview": {
+          "order": 2,
+          "scope": "application",
+          "type": "boolean",
+          "default": true,
+          "description": "启用总开关后，停止键入时自动检查当前改动的 LaTeX 正文句子。完整句子只作为检查上下文；与局部编辑不相交且仍精确有效的同句及其他问题会继续保留。"
+        },
+        "texleaf.aiWriting.inlineCompletions": {
+          "order": 3,
+          "scope": "application",
+          "type": "boolean",
+          "default": true,
+          "description": "启用总开关后，为正文提供 AI 词语和句子行内补全。每次实际请求都可能产生 API 用量。"
+        },
+        "texleaf.aiWriting.provider": {
+          "order": 4,
+          "scope": "application",
+          "type": "string",
+          "enum": [
+            "deepseek",
+            "openai"
+          ],
+          "enumDescriptions": [
+            "使用 DeepSeek Chat Completions API；可单独配置官方或兼容服务的 Base URL。",
+            "使用 OpenAI Responses API；可配置完整兼容 Responses 与 Structured Outputs 的 Base URL。"
+          ],
+          "default": "deepseek",
+          "description": "AI 写作请求使用的协议。切换服务商或任一 Base URL 后，都需要为规范化后的目标单独确认正文传输并设置对应 API Key。"
+        },
+        "texleaf.aiWriting.deepseekModel": {
+          "order": 5,
+          "scope": "application",
+          "type": "string",
+          "enum": [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro"
+          ],
+          "enumDescriptions": [
+            "低延迟、低成本，适合实时语法检查和行内补全。",
+            "质量优先，延迟和费用更高，适合精细改写。"
+          ],
+          "default": "deepseek-v4-flash",
+          "description": "DeepSeek Chat Completions 模型；请求固定使用非思考模式和低随机性结构化输出。兼容服务必须接受所选模型 ID。"
+        },
+        "texleaf.aiWriting.deepseekBaseUrl": {
+          "order": 6,
+          "scope": "application",
+          "type": "string",
+          "default": "https://api.deepseek.com",
+          "description": "DeepSeek Chat Completions API 的 Base URL；TeXLeaf 只请求 {Base URL}/chat/completions。禁止用户名、密码、查询参数、片段和重定向；远程地址必须使用 HTTPS，仅 localhost/127.0.0.1/::1 可使用 HTTP。每个规范化地址都要单独确认并设置 Key；自定义服务的计费、存储和数据政策由其运营方负责。"
+        },
+        "texleaf.aiWriting.openaiModel": {
+          "order": 7,
+          "scope": "application",
+          "type": "string",
+          "default": "gpt-5.6-luna",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+          "patternErrorMessage": "模型 ID 只能包含字母、数字、点、下划线、冒号、斜杠和连字符，长度为 1–128。",
+          "description": "OpenAI Responses 模型 ID。默认 gpt-5.6-luna；也可填写当前 OpenAI Responses 模型或自定义兼容服务的模型 ID。"
+        },
+        "texleaf.aiWriting.openaiBaseUrl": {
+          "order": 8,
+          "scope": "application",
+          "type": "string",
+          "default": "https://api.openai.com/v1",
+          "description": "OpenAI Responses API 的 Base URL；TeXLeaf 只请求 {Base URL}/responses，不兼容仅提供 /chat/completions 的代理。禁止用户名、密码、查询参数、片段和重定向；远程地址必须使用 HTTPS，仅 localhost/127.0.0.1/::1 可使用 HTTP。每个规范化地址都要单独确认并设置 Key；自定义服务的计费、存储和数据政策由其运营方负责。"
+        },
+        "texleaf.aiWriting.language": {
+          "order": 9,
+          "scope": "application",
+          "type": "string",
+          "enum": [
+            "auto",
+            "english",
+            "chinese"
+          ],
+          "enumDescriptions": [
+            "由模型按当前待检查正文自动识别语言。",
+            "按英语论文检查，并用中文解释问题。",
+            "按中文学术写作检查。"
+          ],
+          "default": "auto",
+          "description": "写作检查语言。"
+        },
+        "texleaf.aiWriting.style": {
+          "order": 10,
+          "scope": "application",
+          "type": "string",
+          "enum": [
+            "academic",
+            "general",
+            "concise"
+          ],
+          "enumDescriptions": [
+            "学术论文：正式、准确并保留专业术语。",
+            "通用写作：自然、清晰。",
+            "简洁表达：优先删去冗余和含混措辞。"
+          ],
+          "default": "academic",
+          "description": "检查、改写和补全采用的写作风格。"
+        },
+        "texleaf.aiWriting.reviewDelayMs": {
+          "order": 11,
+          "scope": "application",
+          "type": "integer",
+          "default": 900,
+          "minimum": 500,
+          "maximum": 10000,
+          "description": "停止键入后等待多少毫秒再自动检查改动句子。继续输入会取消旧请求，相同句子内容不会在同一文档版本中重复请求。"
+        },
+        "texleaf.aiWriting.completionDelayMs": {
+          "order": 12,
+          "scope": "application",
+          "type": "integer",
+          "default": 500,
+          "minimum": 100,
+          "maximum": 5000,
+          "description": "自动行内补全发出请求前的额外等待时间。"
+        },
+        "texleaf.aiWriting.maxParagraphLength": {
+          "order": 13,
+          "scope": "application",
+          "type": "integer",
+          "default": 6000,
+          "minimum": 500,
+          "maximum": 20000,
+          "description": "单个自动检查句子或手动正文段最多发送的 UTF-16 字符数。设置名 maxParagraphLength 为兼容旧配置而保留；超出时要求缩小选区。"
+        },
+        "texleaf.aiWriting.maxDocumentLength": {
+          "order": 14,
+          "scope": "application",
+          "type": "integer",
+          "default": 30000,
+          "minimum": 1000,
+          "maximum": 100000,
+          "description": "手动检查整篇文档时，本次最多发送的正文 UTF-16 字符数。"
+        }
+      }
+    },
+    {
       "title": "TeXLeaf · 预览",
       "properties": {
         "texleaf.mathPreview.enabled": {
@@ -638,6 +866,10 @@
         {
           "id": "texleaf.snippets",
           "name": "片段库"
+        },
+        {
+          "id": "texleaf.aiIssues",
+          "name": "AI 写作问题"
         }
       ]
     },
@@ -645,6 +877,10 @@
       {
         "view": "texleaf.snippets",
         "contents": "没有可显示的片段。\n[管理 Snippet 与模板](command:texleaf.openSnippetEditor)\n[管理 TeX 模板](command:texleaf.openTemplateFile)\n[打开高级 JSONC](command:texleaf.openSnippetFile)\n[恢复默认片段](command:texleaf.restoreDefaultSnippets)\n[重新加载](command:texleaf.reloadSnippets)"
+      },
+      {
+        "view": "texleaf.aiIssues",
+        "contents": "AI 写作问题会在这里按当前 .tex 文档列出。\n[开启或关闭 AI 写作助手](command:texleaf.aiWriting.toggle)\n[检查当前段落或选区](command:texleaf.aiWriting.reviewParagraph)\n[检查当前文档](command:texleaf.aiWriting.reviewDocument)"
       }
     ],
     "menus": {
@@ -657,6 +893,48 @@
         },
         {
           "command": "texleaf.restoreDefaultSnippets"
+        },
+        {
+          "command": "texleaf.aiWriting.toggle"
+        },
+        {
+          "command": "texleaf.aiWriting.setApiKey"
+        },
+        {
+          "command": "texleaf.aiWriting.clearApiKey"
+        },
+        {
+          "command": "texleaf.aiWriting.reviewParagraph"
+        },
+        {
+          "command": "texleaf.aiWriting.reviewDocument"
+        },
+        {
+          "command": "texleaf.aiWriting.rewriteSelection"
+        },
+        {
+          "command": "texleaf.aiWriting.triggerCompletion"
+        },
+        {
+          "command": "texleaf.aiWriting.clearDiagnostics"
+        },
+        {
+          "command": "texleaf.aiWriting.showIssues"
+        },
+        {
+          "command": "texleaf.aiWriting.applyAll"
+        },
+        {
+          "command": "texleaf.aiIssues.reveal",
+          "when": "false"
+        },
+        {
+          "command": "texleaf.aiIssues.apply",
+          "when": "false"
+        },
+        {
+          "command": "texleaf.aiIssues.ignore",
+          "when": "false"
         }
       ],
       "view/title": [
@@ -699,6 +977,26 @@
           "command": "texleaf.restoreDefaultSnippets",
           "when": "view == texleaf.snippets",
           "group": "navigation@8"
+        },
+        {
+          "command": "texleaf.aiWriting.reviewDocument",
+          "when": "view == texleaf.aiIssues",
+          "group": "navigation@1"
+        },
+        {
+          "command": "texleaf.aiWriting.applyAll",
+          "when": "view == texleaf.aiIssues",
+          "group": "navigation@2"
+        },
+        {
+          "command": "texleaf.aiWriting.clearDiagnostics",
+          "when": "view == texleaf.aiIssues",
+          "group": "navigation@3"
+        },
+        {
+          "command": "texleaf.aiWriting.toggle",
+          "when": "view == texleaf.aiIssues",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -706,6 +1004,21 @@
           "command": "texleaf.insertSnippet",
           "when": "view == texleaf.snippets && viewItem == texleafSnippet",
           "group": "inline"
+        },
+        {
+          "command": "texleaf.aiIssues.apply",
+          "when": "view == texleaf.aiIssues && viewItem == texleafAiIssue",
+          "group": "inline@1"
+        },
+        {
+          "command": "texleaf.aiIssues.ignore",
+          "when": "view == texleaf.aiIssues && viewItem == texleafAiIssue",
+          "group": "inline@2"
+        },
+        {
+          "command": "texleaf.aiIssues.reveal",
+          "when": "view == texleaf.aiIssues && viewItem == texleafAiIssue",
+          "group": "navigation@1"
         }
       ]
     },

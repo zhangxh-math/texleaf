@@ -18,3 +18,16 @@ export function isTeXLeafSourceUri(scheme: string, path: string): boolean {
     lowerPath.endsWith(extension),
   );
 }
+
+/**
+ * AI writing accepts ordinary local and VS Code Remote TeX files only.
+ * Extension-provided virtual documents and bibliography files are excluded
+ * because workspace trust is a window-level signal, not per-URI consent.
+ */
+export function isAIWritingSourceUri(scheme: string, path: string): boolean {
+  const normalizedScheme = scheme.toLowerCase();
+  return (
+    (normalizedScheme === "file" || normalizedScheme === "vscode-remote") &&
+    path.toLowerCase().endsWith(".tex")
+  );
+}

@@ -30,7 +30,7 @@ pnpm run test:extension-host
 5. 输入 `dm`、`;a`、`//` 等默认触发，或运行 `TeXLeaf: 搜索并插入片段`。
 6. 修改源码并重新编译后，点击调试工具栏的“重新启动”验证变更。
 
-针对 0.7.2 的手工冒烟检查至少包括：
+针对 0.8.9 的手工冒烟检查至少包括：
 
 - 切换到 Windows 中文输入法，在已保存的 `.tex` 文件中分别按下全角左括号和顿号对应按键，确认每次只得到一个 `（` 和一个 `、`。
 - 用全新隔离 Profile 激活扩展，运行 `TeXLeaf: 管理 Snippet 与模板`，确认无需显示任何存储路径即可载入 212 条 Snippet 和四个模板。结构化编辑一个 trigger 后保存，运行时应立即使用新 trigger；另一个干净工作区应看到同一 Profile 内容。
@@ -51,7 +51,25 @@ pnpm run test:extension-host
 - 保持 `reference.bib` 有未保存修改后再导入，确认插件读取并编辑当前文档模型但不自动保存用户的其他修改；在干净 bibliography 上导入则应保存成功。撤销一次应同时撤销 TeX 与 Bib 文本编辑。
 - 分别验证 Zotero 未运行、错误端口、错误库名和超时：自动加载把原因写入 `TeXLeaf` 输出通道，手动刷新立即重试并显示错误，已有 bibliography 候选仍可选，两个文件都不发生部分写入；Better BibTeX 未安装/禁用时验证 Zotero Local API 回退。
 - 在未信任 workspace 中进入 `\cite{}`，确认不自动弹框、不访问端口、不创建 `reference.bib`；手动命令给出明确提示。多根 workspace 中确认 bibliography 不会跨根选错。
-- 在设置页搜索 `@ext:zhangxh-math.texleaf`，确认 Zotero 总开关、bibliography 路径与 BibTeX/BibLaTeX 格式位于“Zotero 与参考文献”分类；Math Preview 总开关、`auto`/`above`/`below` 位置和性能参数位于独立分类。
+- 在干净 Profile 中确认 `texleaf.aiWriting.enabled=false`，打开/编辑/保存 `.tex` 与 `.bib` 均不产生外部网络请求；把 Provider、模型或 Base URL 写入设置也不能绕过总开关。确认全部 14 个 `texleaf.aiWriting.*` 设置均为 application scope，只能在用户/Profile 层生效并可随普通 Settings Sync 同步；向工作区、工作区文件夹和 `.vscode/settings.json` 注入总开关、Provider、两个 Base URL、模型、防抖或长度上限时，运行时必须仍只采用全局值。分别选择 DeepSeek/OpenAI 官方地址和两个 Provider 各自的 mock 自定义地址，拒绝 consent 或只在设置页把总开关改为 `true` 时都不得请求。确认后用密码输入框保存专用测试 Key，检查普通设置、日志、Snippet Sync 数据与 Git 文件都没有 Key。
+- 分别把 `texleaf.aiWriting.language` 设为 `auto`、`english`、`chinese`，对 DeepSeek 和 OpenAI 逐一覆盖自动句子检查、手动段落/选区检查、整篇检查、改写与行内补全；抓取 mock 请求确认 `language` 只能是 `auto`、`English`、`Chinese`，不再出现 `language-too-long`，且 Review prompt 仍要求中文 `message`/`explanation`、原语言 replacement。直接向两个客户端注入 65 字符或含换行的语言标签时必须在本地失败，mock fetch 调用数为 0；64 字符边界值应能到达一次 mock fetch。
+- 验证 Secret/consent 按目标隔离：默认 `https://api.deepseek.com`、两个规范化自定义 DeepSeek Base URL、`https://api.openai.com/v1` 和两个规范化自定义 OpenAI Base URL 必须互不复用；同一地址的主机大小写、显式默认端口和尾随 `/` 规范化后应指向同一目标。默认 DeepSeek 地址必须继续读取此前 `v1` Key/consent，自定义 DeepSeek 地址必须使用摘要派生的新记录且绝不能复用官方 Key。切换到任何没有独立 Key/consent 的代理时必须保持静默。SecretStorage 与 consent 不随普通 Settings Sync 跨机同步；在新 Profile、Stable/Insiders 和 Remote extension host 中都应要求重新确认目标并设置 Key。
+- 在受信任、已有 `file:` 或 `vscode-remote:` 路径的 `.tex` 正文中分别制造拼写、主谓一致、标点、冗余和含混措辞，确认自动句子检查产生编辑器装饰线、TeXLeaf 专用 Hover、活动栏问题树和 Quick Fix；AI 问题不得发布为原生 Diagnostic，也不得进入 Problems 或形成重复 Hover。Hover 必须显示“应用这条建议”，且 Markdown 只允许白名单中的 TeXLeaf 内部应用命令；点击后仍须重新校验当前文档版本、问题身份、范围、exact `original` 和 editable prose。篡改命令参数、让问题过期或把模型文字伪装成链接时不得编辑正文。未按 `Ctrl+S` 的当前编辑内容也属于自动检查输入，consent 与文档必须明确说明这一点。应用建议、忽略一次、继续输入取消旧请求、清除问题都不改动数学、命令或引用。再用手动命令检查选区、当前段落和整篇，并确认单段、总字符与单次 32 个正文段上限停止额外发送。`.bib`、Untitled、Git/其他虚拟 URI 与未信任 workspace 始终不得联网。
+- 在 Windows 微软拼音中文模式下把光标放入同一条 AI 问题范围，确认 `Ctrl+.` 被输入法用于切换中英文标点时并不代表 Code Action Provider 返回空；切到英文输入模式后 `Ctrl+.` 能打开 Quick Fix，`F1` / Command Palette、右键菜单、灯泡和 Hover 的“应用这条建议”均可作为不依赖该冲突按键的入口。文档不得承诺新增专用快捷键。
+- 打开 TeXLeaf 活动栏的“AI 写作问题”，确认只展示当前活动 `.tex`：检查中/已调度/等待局部复检/关闭/无问题等状态正确，pending 数量和视图徽标与问题数一致；每项包含行号、类别、真实严重性、`原文 → 替换` 和解释。点击条目必须滚动到范围并只给选中问题叠加主题自适应背景与轮廓，其他问题继续保留下划线；不得移动主光标、夺走树焦点、发布 Diagnostic 或触发音效。随后在问题前方做无关编辑，确认高亮按稳定 issue lineage 跟随安全平移；应用、忽略、清除、使问题失效及关闭 AI 时高亮都自动消失。单项应用/忽略可用。装饰线不得带原生诊断消息，专用 Hover 只显示一份类别、解释与替换预览；检查完成和点击条目都不得由 TeXLeaf 播放音频或触发 Error/Warning accessibility signal。分别从状态栏、`texleaf.aiWriting.showIssues` 和视图入口打开列表；`texleaf.aiWriting.applyAll` 与视图工具栏必须先显示确认，再重新验证版本、原文、范围和重叠，任一过期条件下整批不编辑。
+- 用 mock 响应构造“42 条可审阅 + 20 条安全忽略”，确认 42 条是精确且无歧义映射后的列表项，20 条由重复、冲突重叠、找不到或无法唯一定位等 fail-closed 原因构成；拒绝摘要只显示数量和安全子码，不得误报为 API Key/余额错误，也不得修改原文。模型的 message、explanation、original 和 replacement 必须按不受信任文本渲染，不能生成可执行 Markdown 命令。
+- 验证 `reviewDelayMs` 默认 900、设置范围 500–10000：连续键入只重置防抖并取消旧请求，不得每键发送；有 dirty 句子时优先局部复检，没有 pending 时纯光标导航才选择附近句子。同一文档版本、同一句子与相同 Provider/模型/语言/风格去重；每批最多 8 个改动句子，每版本最多自动请求 64 个不同句子且不能通过 LRU 逐出后重复收费。用 `第一句。第二句！第三句？` 验证无空格中文分句，并覆盖句末中英文引号/括号。
+- 先完成整篇检查，再分别执行一句内两个独立问题间的局部替换、一个事务中的多处编辑、插入/删除句号、插入/删除空行和零宽边界编辑：old ∪ new 句子只作为 provider 完整上下文和 pending 调度，旧问题失效必须只看 precise dirty ranges。与编辑不相交的同句问题在 exact `original`、strict UTF-16 remap 与 editable prose 都成立时继续保留；自动回应只替换命中 dirty range 或与新问题相交的旧项，手动段落/全文仍刷新所检查的完整段。split/merge 两侧、累计 pending 不能漏检。保存、dirty-state 或编码转换产生的空 `contentChanges` 不得清结果或 pending。无法精确重建、文档超过 100 万 UTF-16 字符或事务超过 1024 个 change 时才允许 fail closed。
+- 构造 `one take` → `one takes` 一类在原问题右端点追加词尾的建议，分别从灯泡/列表应用单条和确认后“应用全部”：正文写入成功后，对应装饰线、专用 Hover、Quick Fix、树条目与持久记录必须立即消失，同句其他不相交建议继续保留；关闭并重启隔离扩展宿主后，被消费问题不得复活。再让在线结果或旧精确 source-hash 缓存报告 `original: "take"`、`replacement: "takes"`，但当前范围及其紧邻上下文已经是 `takes`，确认这种截短范围被逐条拒绝。
+- 保存一个真实问题树节点和灯泡 Quick Fix，随后在该问题之前插入或删除文字，使它只发生安全 UTF-16 平移：刷新前保存的旧节点仍须通过稳定 lineage ID 解析到当前问题并只应用一次，不能弹出“文档已变化”。再让目标问题真正失效，确认旧节点只刷新树、装饰线与状态并显示短状态栏提示，不出现信息通知。对“应用全部”还要在模态确认期间触发内容等价的 state 对象刷新，确认不会因对象引用不同而误失败；若正文版本已变、任一捕获问题已移除/失效/无法唯一解析，或者范围、exact `original` 或重叠校验失败，仍须整批停止。确认后新增、未被确认的问题不得被纳入本批修改。
+- 用 mock 让自动批次的前若干句成功、后一句返回 API 错误：每句成功后必须立即合并并移出 pending，后续失败不得回滚前句或让其重复计费，未完成句继续显示“等待局部复检”。对手动整篇的多正文段执行同类测试，确认已成功正文段保留且每次最多 32 段。测试和 UI 文案不得承诺无网络延迟的“实时”，应表述为受延迟、限额和费用影响的近实时。
+- 在包含 `$x+y$`、`\cite{secret}`、`\ref{secret}`、`\url{https://example.invalid}`、注释、`verbatim`、`minted` 与 `lstlisting` 的夹具上记录 mock 请求，确认非数学敏感 TeX 数据被等长空白遮罩；数学内容必须替换为受保护的等长 inline/display 语义占位符，公式源码不得出现在请求中，任何命中 marker/padding 的建议必须拒绝。用 `Take\n\\[C_{PRIVATE}=42\\]\nas the starting point.` 确认行间公式保持同一句语法上下文，prompt 明确把占位符视为名词短语/宾语，不能误报 `Take` 缺少宾语。还应断言 review prompt 要求 `message`/`explanation` 为简体中文，`replacement` 保持来源正文原语言。`section`、`caption`、`emph` 和 `textbf` 内的自然语言仍可检查。向 mock client 注入零/一基的 UTF-16、Unicode code point、UTF-8 byte、CRLF 换行计数等价 offset，确认只有能逐字、无歧义落到同一源码范围的建议被重定位。再覆盖非法/越界 offset、空 original、唯一 exact fallback、重复原文歧义、孤立 surrogate、Unicode/引号/空白归一化伪匹配、完全重复项、重叠连通组、跨行及含 `\`/`$`/`%`/花括号的 replacement：单条坏建议被丢弃，重复项保留一条，重叠组整组丢弃，独立有效项保留；顶层结构无效仍整批失败。插入锚点保留属于 prompt 合约，不要用“所有 replacement 必须包含 original”的错误本地断言测试普通替换。
+- 完成若干问题后关闭文档并重启隔离扩展宿主，确认活动栏问题树、装饰线、专用 Hover 与 Quick Fix 能从当前 Profile 的 `globalStorageUri/ai-writing-issues-v1` 恢复；工作区不得新增文件，Settings Sync/globalState 不得出现问题记录，缓存不得包含论文全文。只有完整源码 UTF-16 长度+SHA-256 完全相同时才按 exact offset 恢复，并逐条复核 `original` 与 editable prose；离线/外部修改源文、hash/长度不匹配或单条范围失效时必须整份/逐条 fail closed 丢弃并要求重检，禁止跨源 unique-original 搜索。篡改 JSON、UTF-8、字段、控制字符或 TeX replacement 应 fail closed。验证每文档 2048 条、单记录 2 MiB、每 Profile 256 个记录与 32 MiB 总量上限，以及清除问题/关闭功能/切换目标/清 Key 写入空记录后不会在重启时复活；停用扩展时应等待已排队快照完成 best-effort flush。
+- 在正文中停顿，分别确认 `deepseek-v4-flash` 非思考模式与 OpenAI 默认 `gpt-5.6-luna` 提供单行纯文本 Inline Suggest；原生 Suggest 已选中、数学/命令区域、`.bib`、Untitled、未信任 workspace、关闭子开关和关闭总开关时都不得请求或显示。继续键入、切换 Provider/Base URL、清除对应 Key 后，旧 completion 不得落回文档。
+- 对 DeepSeek mock 断言默认与自定义地址都只请求 `{规范化 Base URL}/chat/completions`，不跟随重定向且不回退 `/responses`。远程 HTTP、URL credentials/query/fragment、主机名尾随点和路径已以 `/chat/completions` 结尾的地址必须在联网前拒绝，HTTP 仅允许 `localhost`、`127.0.0.1` 与 `[::1]`。再验证空 content 或非法 JSON 只自动重试一次，第二次仍失败就停止；恰好一层完整 ```` ```json … ``` ```` 围栏可剥离，围栏外有文字或嵌套围栏时失败；字段/offset/original/重叠错误均不重试，也不做模糊内容提取。确认逐条拒绝只输出 `rejectedIssueCount` 与去重后的安全子码，绝不包含 original。再模拟 401、402、429、5xx、网络、超时、取消和超限响应，确认错误提示不包含 API Key、论文正文、原始响应或底层异常。
+- 对 OpenAI mock 断言只请求 `{规范化 Base URL}/responses`，请求使用 Structured Outputs JSON Schema、`store:false` 且不跟随重定向；官方默认模型为 `gpt-5.6-luna`。远程 HTTP、URL credentials/query/fragment、路径已以 `/responses` 结尾的地址必须在联网前拒绝，HTTP 仅允许 `localhost`、`127.0.0.1` 与 `[::1]`。分别覆盖 completed、incomplete、refusal、空 output、非法 JSON、响应体上限、401/403/402/429/5xx、超时和取消；自定义服务仅有 `/chat/completions` 或不支持 Structured Outputs 时应给出 Responses 不兼容提示，不能回退协议。
+- 所有会执行 AI 客户端请求的自动测试必须注入 mock fetch；Extension Host 测试不得使用真实 Key 或真实网络，只在专用测试账户和最小无敏感文本上做人工 API 冒烟。关闭功能、切换 Provider/Base URL、删除对应 Secret 或修改文档时应立即 abort，任何过时响应都不得产生问题标记或编辑。
+- 在设置页搜索 `@ext:zhangxh-math.texleaf`，确认总计 52 个设置：片段 22 项、文献 9 项、AI 写作 14 项、预览 7 项。“AI 写作”分类精确显示总开关、自动检查、行内补全、Provider、两个服务商各自的模型与 Base URL、语言、风格、两个防抖和两个长度上限，默认 Provider 为 DeepSeek、DeepSeek Base URL 为 `https://api.deepseek.com`、OpenAI 默认模型为 `gpt-5.6-luna`、自动检查防抖为 900 毫秒且范围 500–10000；全部 14 项 scope 都必须是 `application`。Math Preview 总开关、`auto`/`above`/`below` 位置和性能参数位于“预览”分类。
 - 在 `$x^2$`、`$$\sum_n a_n$$`、`\(\frac{1}{2}\)`、`align` 和嵌套 `cases` 中移动光标，确认只出现一个当前公式预览；注释、`\verb`、`verbatim`、`lstlisting`、`minted` 中不出现。分别验证 `cursor`、`hover`、`both` 与总开关。`cursor` 卡片的底色必须 100% 不透明，并显示在源文字上层。
 - 在上下都紧邻非空文字的长行内公式中连续输入，确认 `auto` 始终把浮动卡片放在活动源码行下方，不参与行宽或换行计算。光标位于起始行时，左边缘必须与 `$`/`\(` 对齐；把同一公式写成多行并把光标移到后续行时，左边缘必须改为对齐该行首个非空白字符，而不是光标横坐标或第 0 列。
 - 给 `$$…$$`、`\[…\]` 和 `\begin{align}…\end{align}` 加入不同非零缩进及 Tab：卡片应稳定保持 opening delimiter 列；超宽卡片允许右端被编辑器裁切，但不得因 Monaco 的短 token span 错跳到第 0 列。对行间公式验证 `placement=auto` 下方优先、下方不足转上方、上下都不足仍在上方并保住源码/预览末尾；显式 `above`/`below` 仍严格服从设置。
@@ -111,7 +129,7 @@ pnpm run package
 构建完成后，可从命令面板选择 `Extensions: Install from VSIX...`，或在终端执行：
 
 ```powershell
-code --install-extension .\texleaf-0.7.2.vsix --force
+code --install-extension .\texleaf-0.8.9.vsix --force
 ```
 
 安装后在普通 VS Code 窗口验证，而不是只在扩展开发宿主中验证。发布前至少执行：
@@ -120,9 +138,9 @@ code --install-extension .\texleaf-0.7.2.vsix --force
 pnpm run release:verify
 ```
 
-还应检查 VSIX 内容，确认 `dist/extension.js`、`dist/mathPreviewWorker.js`、README、CHANGELOG、LICENSE、`SUPPORT.md`、`THIRD_PARTY_NOTICES.md`、`media/icon.png` 与其他运行资源已包含，源码、测试、coverage 和本地配置未被打包。归档内的 README 图片与相对文档链接必须已由 `vsce --githubBranch main` 改写为公开 HTTPS 地址；安装后的扩展详情页应显示 PNG 图标，命令面板应能找到片段、Zotero 与 Math Preview 命令。手工 VSIX 不会因为 Settings Sync 而自动安装到另一台机器；跨机测试必须在两端安装兼容版本并保持扩展标识 `zhangxh-math.texleaf`。
+还应检查 VSIX 内容，确认 `dist/extension.js`、`dist/mathPreviewWorker.js`、README、CHANGELOG、LICENSE、`SUPPORT.md`、`THIRD_PARTY_NOTICES.md`、`media/icon.png` 与其他运行资源已包含，源码、测试、coverage 和本地配置未被打包。归档内的 README 图片与相对文档链接必须已由 `vsce --githubBranch main` 改写为公开 HTTPS 地址；安装后的扩展详情页应显示 PNG 图标，命令面板应能找到片段、AI 写作、Zotero 与 Math Preview 命令。手工 VSIX 不会因为 Settings Sync 而自动安装到另一台机器；跨机测试必须在两端安装兼容版本并保持扩展标识 `zhangxh-math.texleaf`。
 
-Visual Studio Marketplace 使用现有 Publisher `zhangxh-math`；Marketplace 项目标识为 `zhangxh-math.texleaf`。可以在 Publisher 管理页手工上传 `texleaf-0.7.2.vsix`；后续自动发布优先使用短期联合身份凭据，不要把 PAT 写入仓库。Publisher 变更会建立新的扩展身份：升级冒烟必须先在旧版保存修改并记录自定义模板，安装新版后禁用旧版但暂不卸载，再 Reload Window；只有新主文件不存在、旧 JSONC 严格校验通过且复制期间未变化时，新版才尽力逐字节复制旧片段库，并保留旧文件。验证 Snippet、按需重建自定义模板后再卸载旧版。模板 catalog、既有 `globalState` 与 Settings Sync 基线不会跨 ID 自动迁移。
+Visual Studio Marketplace 使用现有 Publisher `zhangxh-math`；Marketplace 项目标识为 `zhangxh-math.texleaf`。可以在 Publisher 管理页手工上传 `texleaf-0.8.9.vsix`；后续自动发布优先使用短期联合身份凭据，不要把 PAT、DeepSeek/OpenAI/自定义 Responses API Key 或其他 secrets 写入仓库。Publisher 变更会建立新的扩展身份：升级冒烟必须先在旧版保存修改并记录自定义模板，安装新版后禁用旧版但暂不卸载，再 Reload Window；只有新主文件不存在、旧 JSONC 严格校验通过且复制期间未变化时，新版才尽力逐字节复制旧片段库，并保留旧文件。验证 Snippet、按需重建自定义模板后再卸载旧版。模板 catalog、既有 `globalState` 与 Settings Sync 基线不会跨 ID 自动迁移。
 
 ## 安全约束
 

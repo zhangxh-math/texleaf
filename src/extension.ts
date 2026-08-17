@@ -1,4 +1,6 @@
 import * as vscode from "vscode";
+import { AIWritingController } from "./aiWritingController";
+import { registerAiIssuesTree } from "./aiIssuesTree";
 import { BracketDecorationController } from "./bracketDecorations";
 import { CitationController } from "./citationController";
 import { registerCompletionProvider } from "./completionProvider";
@@ -13,6 +15,7 @@ import { SnippetTreeProvider } from "./snippetTree";
 import { TemplateManager } from "./templateManager";
 
 const LEGACY_EXTENSION_ID = "local-lab.texleaf";
+let activeAiWriting: AIWritingController | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel("TeXLeaf", { log: true });
@@ -97,6 +100,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   mathPreview.register();
   context.subscriptions.push(mathPreview);
 
+  const aiWriting = new AIWritingController(context, output);
+  aiWriting.register();
+  activeAiWriting = aiWriting;
+  context.subscriptions.push(aiWriting);
+  registerAiIssuesTree(context, aiWriting);
+
   const treeProvider = new SnippetTreeProvider(repository);
   const tree = vscode.window.createTreeView("texleaf.snippets", {
     treeDataProvider: treeProvider,
@@ -141,6 +150,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   decorations.schedule(vscode.window.activeTextEditor);
 }
 
-export function deactivate(): void {
-  // VS Code disposes everything registered in ExtensionContext.subscriptions.
+export async function deactivate(): Promise<void> {
+  const aiWriting = activeAiWriting;
+  activeAiWriting = undefined;
+  // Unlike ordinary synchronous disposables, the debounced AI issue snapshot
+  // needs an awaited final atomic write before the extension host exits.
+  await aiWriting?.shutdown();
 }

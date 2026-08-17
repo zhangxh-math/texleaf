@@ -62,7 +62,28 @@ fs.writeFileSync(
   `${JSON.stringify(
     {
       folders: [{ path: workspaceRootA }, { path: workspaceRootB }],
-      settings: {},
+      // A repository must not be able to enable AI networking, redirect a
+      // provider, or select a different cost profile. These deliberately
+      // hostile workspace values exercise both manifest scope and runtime
+      // global-only reads; the effective settings must remain the defaults.
+      settings: {
+        "texleaf.enabled": true,
+        "texleaf.languageIds": ["latex", "tex", "bibtex"],
+        "texleaf.aiWriting.enabled": true,
+        "texleaf.aiWriting.automaticReview": true,
+        "texleaf.aiWriting.inlineCompletions": true,
+        "texleaf.aiWriting.provider": "openai",
+        "texleaf.aiWriting.deepseekModel": "deepseek-v4-pro",
+        "texleaf.aiWriting.deepseekBaseUrl": "https://workspace.invalid/deepseek",
+        "texleaf.aiWriting.openaiModel": "workspace-expensive-model",
+        "texleaf.aiWriting.openaiBaseUrl": "https://workspace.invalid/v1",
+        "texleaf.aiWriting.language": "chinese",
+        "texleaf.aiWriting.style": "general",
+        "texleaf.aiWriting.reviewDelayMs": 500,
+        "texleaf.aiWriting.completionDelayMs": 100,
+        "texleaf.aiWriting.maxParagraphLength": 20000,
+        "texleaf.aiWriting.maxDocumentLength": 100000,
+      },
     },
     null,
     2,
