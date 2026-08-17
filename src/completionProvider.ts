@@ -77,6 +77,15 @@ export class TeXLeafCompletionProvider
         snippet.triggerSource,
       );
       const isExactTrigger = snippet === exactLiteralSnippet;
+      // Do not offer the whole snippet catalogue as zero-width completions.
+      // An incomplete Suggest session asks the provider again after every
+      // character; once a formerly matching trigger no longer shares any
+      // typed prefix, keeping it here can leave an unrelated item selected so
+      // that Tab accepts it instead of performing the editor action the user
+      // intended (for example Tabout at a closing math delimiter).
+      if (prefixLength === 0) {
+        continue;
+      }
       const item = new vscode.CompletionItem(
         snippet.triggerSource,
         // `editor.snippetSuggestions = bottom` groups every item whose kind is

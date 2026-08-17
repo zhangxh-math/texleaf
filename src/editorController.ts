@@ -72,6 +72,12 @@ export class EditorController implements vscode.Disposable {
         ),
       ),
       vscode.commands.registerCommand("texleaf.handleTab", () => this.handleTab()),
+      vscode.commands.registerCommand("texleaf.handleSuggestTabout", () =>
+        this.handleSuggestTabout(),
+      ),
+      vscode.commands.registerCommand("texleaf.handleSuggestSnippetTab", () =>
+        this.handleSuggestSnippetTab(),
+      ),
       vscode.commands.registerCommand("texleaf.handleSpace", () => this.handleSpace()),
       vscode.commands.registerCommand("texleaf.matrixEnter", () => this.matrixEnter()),
       vscode.commands.registerCommand("texleaf.matrixExit", () => this.matrixExit()),
@@ -340,20 +346,75 @@ export class EditorController implements vscode.Disposable {
       return;
     }
 
-    if (config.tabout && editor.selection.isEmpty && context.mathMode !== "text") {
-      const offset = editor.document.offsetAt(editor.selection.active);
-      const plan = planTabout(editor.document.getText(), offset, {
-        arrayMode: isConfiguredMatrix(context, config),
-      });
-      if (plan !== undefined) {
-        const target = editor.document.positionAt(plan.to);
-        editor.selection = new vscode.Selection(target, target);
-        editor.revealRange(new vscode.Range(target, target));
-        return;
-      }
+    if (await this.tryTabout(editor, config, context)) {
+      return;
     }
 
     await vscode.commands.executeCommand("tab");
+  }
+
+  /**
+   * Resolve Tab while native Suggest is visible. The keybinding reaches this
+   * command only outside active snippet/inline-completion sessions. A real
+   * Tabout target wins; otherwise preserve VS Code's normal selected-suggestion
+   * acceptance instead of swallowing Tab or inserting indentation.
+   */
+  private async handleSuggestTabout(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (editor !== undefined) {
+      const config = readConfig(editor.document.uri);
+      if (isSupportedDocument(editor.document, config)) {
+        const context = this.runtime.contextAt(editor.document, editor.selection.active);
+        if (await this.tryTabout(editor, config, context)) {
+          return;
+        }
+      }
+    }
+    await vscode.commands.executeCommand("acceptSelectedSuggestion");
+  }
+
+  private async handleSuggestSnippetTab(): Promise<void> {
+    await vscode.commands.executeCommand("hideSuggestWidget");
+    await vscode.commands.executeCommand("jumpToNextSnippetPlaceholder");
+  }
+
+  private async tryTabout(
+    editor: vscode.TextEditor,
+    config: TeXLeafConfig,
+    context: LatexContext,
+  ): Promise<boolean> {
+    if (
+      !config.tabout ||
+      editor.selections.length !== 1 ||
+      !editor.selection.isEmpty ||
+      context.mathMode === "text"
+    ) {
+      return false;
+    }
+    const document = editor.document;
+    const version = document.version;
+    const from = editor.selection.active;
+    const offset = document.offsetAt(from);
+    const plan = planTabout(document.getText(), offset, {
+      arrayMode: isConfiguredMatrix(context, config),
+    });
+    if (plan === undefined) {
+      return false;
+    }
+
+    await vscode.commands.executeCommand("hideSuggestWidget");
+    if (
+      vscode.window.activeTextEditor !== editor ||
+      document.version !== version ||
+      !editor.selection.isEmpty ||
+      !editor.selection.active.isEqual(from)
+    ) {
+      return true;
+    }
+    const target = document.positionAt(plan.to);
+    editor.selection = new vscode.Selection(target, target);
+    editor.revealRange(new vscode.Range(target, target));
+    return true;
   }
 
   private async handleSpace(): Promise<void> {
@@ -1062,6 +1123,7 @@ export class EditorController implements vscode.Disposable {
   ): Promise<boolean> {
     let replacementRange = range;
     let replacementParts = parts;
+    let caretOffsetInReplacement: number | undefined;
     if (allowAutoEnlarge && config.autoEnlargeBrackets) {
       const enlarged = planInlineAutoEnlarge(
         editor.document,
@@ -1072,19 +1134,62 @@ export class EditorController implements vscode.Disposable {
       if (enlarged !== undefined) {
         replacementRange = enlarged.range;
         replacementParts = enlarged.parts;
+        caretOffsetInReplacement = enlarged.caretOffsetInReplacement;
       }
     }
     const snippet = replacementPartsToSnippetString(replacementParts);
-    return this.withMutation(editor.document.uri, () =>
-      editor.insertSnippet(snippet, replacementRange, {
+    const replacementStartOffset = editor.document.offsetAt(
+      replacementRange.start,
+    );
+    const expectedReplacementText =
+      caretOffsetInReplacement === undefined
+        ? undefined
+        : replacementPartsToText(replacementParts);
+    return this.withMutation(editor.document.uri, async () => {
+      const inserted = await editor.insertSnippet(snippet, replacementRange, {
         undoStopBefore: true,
         undoStopAfter: true,
         // Let VS Code re-indent every line of a multi-line snippet relative to
         // the insertion point.  Keeping the template whitespace verbatim makes
         // a display-math snippet typed after indentation put `\\]` in column 1.
         keepWhitespace: false,
-      }),
-    );
+      });
+      if (
+        !inserted ||
+        caretOffsetInReplacement === undefined ||
+        expectedReplacementText === undefined
+      ) {
+        return inserted;
+      }
+
+      // insertSnippet can resolve just before its selection update becomes
+      // observable. Wait one turn, then restore the original insertion
+      // boundary for a plain snippet whose auto-enlarge widened the replaced
+      // range to include both brackets. Do not synthesize a `$0` tabstop here:
+      // an inner final stop would merge into and disturb an existing outer
+      // Snippet Session. The exact-text check makes a concurrent edit fail
+      // closed instead of moving the caret into stale content.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (vscode.window.activeTextEditor !== editor) {
+        return true;
+      }
+      const currentText = editor.document.getText();
+      if (
+        currentText.slice(
+          replacementStartOffset,
+          replacementStartOffset + expectedReplacementText.length,
+        ) !== expectedReplacementText
+      ) {
+        return true;
+      }
+      const target = editor.document.positionAt(
+        replacementStartOffset + caretOffsetInReplacement,
+      );
+      if (!editor.selection.isEmpty || !editor.selection.active.isEqual(target)) {
+        editor.selection = new vscode.Selection(target, target);
+      }
+      return true;
+    });
   }
 
   private scheduleContextUpdate(): void {
@@ -1132,13 +1237,22 @@ export class EditorController implements vscode.Disposable {
       config.matrixShortcuts &&
       leftRightEnterPlan(editor.document, editor.selection.active) !== undefined;
     const canTabout =
-      editor.selection.isEmpty && config.tabout && context.mathMode !== "text";
+      editor.selections.length === 1 &&
+      editor.selection.isEmpty &&
+      config.tabout &&
+      context.mathMode !== "text";
+    const mathTabContext = config.tabout && context.mathMode !== "text";
     const emptyMath =
       config.autoDeleteMathDelimiters &&
       emptyMathDelimiterRange(editor.document, editor.selection) !== undefined;
 
     await Promise.all([
       vscode.commands.executeCommand("setContext", "texleaf.enabled", true),
+      vscode.commands.executeCommand(
+        "setContext",
+        "texleaf.mathTabContext",
+        mathTabContext,
+      ),
       vscode.commands.executeCommand(
         "setContext",
         "texleaf.tabActionAvailable",
@@ -1361,6 +1475,8 @@ function emptyMathDelimiterRange(
 interface EnlargedInsertion {
   readonly range: vscode.Range;
   readonly parts: readonly ReplacementPart[];
+  /** Relative final caret for a plain replacement; existing tabstops own it. */
+  readonly caretOffsetInReplacement?: number | undefined;
 }
 
 function planInlineAutoEnlarge(
@@ -1402,6 +1518,12 @@ function planInlineAutoEnlarge(
   ) {
     return undefined;
   }
+  const prefix = `${plan.insertLeftText}${plan.open}${text.slice(
+    plan.openOffset + plan.open.length,
+    start,
+  )}`;
+  const suffix = `${text.slice(end, originalCloseOffset)}${plan.insertRightText}${plan.close}`;
+  const hasExplicitTabstop = parts.some((part) => part.kind === "tabstop");
   return {
     range: new vscode.Range(
       document.positionAt(plan.openOffset),
@@ -1410,23 +1532,31 @@ function planInlineAutoEnlarge(
     parts: [
       {
         kind: "text",
-        value: `${plan.insertLeftText}${plan.open}${text.slice(
-          plan.openOffset + plan.open.length,
-          start,
-        )}`,
+        value: prefix,
       },
       ...parts,
       {
         kind: "text",
-        value: `${text.slice(end, originalCloseOffset)}${plan.insertRightText}${plan.close}`,
+        value: suffix,
       },
     ],
+    // A plain `sum -> \\sum` normally leaves the caret after the command. The
+    // widened range would otherwise move it after the generated right suffix.
+    // Existing tabstops already retain their own positions before that suffix.
+    ...(hasExplicitTabstop
+      ? {}
+      : { caretOffsetInReplacement: prefix.length + plain.length }),
   };
 }
 
 async function setAllContextKeys(enabled: boolean): Promise<void> {
   await Promise.all([
     vscode.commands.executeCommand("setContext", "texleaf.enabled", enabled),
+    vscode.commands.executeCommand(
+      "setContext",
+      "texleaf.mathTabContext",
+      false,
+    ),
     vscode.commands.executeCommand(
       "setContext",
       "texleaf.tabActionAvailable",

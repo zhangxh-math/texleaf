@@ -2,6 +2,30 @@
 
 TeXLeaf 的所有重要变更都会记录在此文件中。版本格式遵循语义化版本。
 
+## [0.8.11] - 2026-08-17
+
+### Fixed
+
+- 修复普通片段没有显式 tabstop、同时触发自动放大括号时，光标被整个替换范围带到 `\right` 之后的问题。例如在 `(sum)` 中展开后得到 `\left(\sum|\right)`，可以继续输入求和内容；输入 `+`、上下标或其他内容，使当前位置没有精确手动片段 trigger 后，按一次 `Tab` 可执行 Tabout。刚停在 `\sum` 后直接按 `Tab` 时，既有 `sum`-limits 手动片段仍优先展开；原本带 tabstop 的片段继续使用其既有占位符顺序。
+- Math Preview 的 `cursor` / `both` 模式改为 last-known-good（stale-while-revalidate）更新：连续输入期间保留上一张有效卡片，以单一稳定 decoration 原位换帧，并给临时无效 TeX 或中间渲染失败 750 ms 宽限；Hover SVG 只在真正请求 Hover 时按需写入扩展私有缓存。持续输入不再因每次文档变化先清空卡片而出现“每敲一个键消失再出现”。
+- 离开公式、禁用 Math Preview、运行“关闭当前 Math Preview”，或在无效状态停留超过宽限时仍会清理旧卡片；过时渲染结果不能覆盖新文档版本。VS Code 原生 Hover 在输入时仍可能由编辑器自行关闭，这一限制没有被 cursor decoration 的无闪烁更新夸大为已消除。
+
+### Documentation
+
+- README、配置/开发说明与 Wiki 已补充自动放大括号的光标恢复、Math Preview 连续输入策略、清理边界，以及 `typing-stability` CDP 冒烟场景；发布示例同步到 `0.8.11`，`0.8.10` 继续保留为历史记录。
+
+## [0.8.10] - 2026-08-17
+
+### Fixed
+
+- TeXLeaf 的原生 Suggest 提供器现在只返回与光标前输入具有非空 trigger 前缀匹配的片段；已经不再匹配的候选会在列表刷新时移除，避免公式末尾仍选中 `+-` 等无关片段并被 `Tab` 误接受。完整片段库仍可通过 `Ctrl+Alt+L`（macOS 为 `Cmd+Alt+L`）浏览和插入。
+- 原生 Suggest 可见时，如果当前位置确实存在可越过的右括号、`\rangle` 或数学结束分隔符，`Tab` 会先执行 Tabout；若实际规划不到跳出目标，则明确回到 VS Code 的 `acceptSelectedSuggestion`，不会吞掉按键或错误缩进。
+- 数学区域的活动 Snippet Session 在 Suggest 可见且仍有下一 tabstop 时会先关闭 Suggest、再前往该占位符；普通 Suggest-aware Tabout 路径则明确排除精确 TeXLeaf trigger、Matrix action、活动 Snippet Session、Inline Suggest 和 Rename 输入框，保留这些既有上下文各自的 Tab 优先级。
+
+### Documentation
+
+- README、配置说明、开发冒烟步骤和 Wiki 已补充补全前缀过滤、Suggest/Tabout 决策以及完整片段选择器的说明，并同步到 `0.8.10` 发布文件名。
+
 ## [0.8.9] - 2026-08-17
 
 ### Fixed

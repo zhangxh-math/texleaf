@@ -2,7 +2,7 @@
   "name": "texleaf",
   "displayName": "TeXLeaf — Fast LaTeX Snippets",
   "description": "安全、可定制的 LaTeX 自动片段、AI 写作检查、Math Preview 与 Zotero 引用管理。",
-  "version": "0.8.9",
+  "version": "0.8.11",
   "publisher": "zhangxh-math",
   "author": {
     "name": "zhangxh-math",
@@ -287,6 +287,16 @@
     ],
     "keybindings": [
       {
+        "command": "texleaf.handleSuggestSnippetTab",
+        "key": "tab",
+        "when": "texleaf.enabled && texleaf.mathTabContext && editorTextFocus && !editorReadonly && !editorTabMovesFocus && inSnippetMode && hasNextTabstop && suggestWidgetVisible && !inSnippetChoice && !texleaf.snippetTabActionAvailable && !renameInputVisible && !inlineSuggestionVisible"
+      },
+      {
+        "command": "texleaf.handleSuggestTabout",
+        "key": "tab",
+        "when": "texleaf.tabActionAvailable && !texleaf.snippetTabActionAvailable && !texleaf.matrixActionAvailable && editorTextFocus && !editorReadonly && !editorTabMovesFocus && !editorHasMultipleSelections && suggestWidgetVisible && suggestWidgetHasFocusedSuggestion && !renameInputVisible && !inlineSuggestionVisible && !inSnippetMode"
+      },
+      {
         "command": "texleaf.handleTab",
         "key": "tab",
         "when": "texleaf.snippetTabActionAvailable && editorTextFocus && !editorReadonly && !editorTabMovesFocus && !renameInputVisible"
@@ -422,7 +432,7 @@
           "scope": "resource",
           "type": "boolean",
           "default": true,
-          "description": "在补全列表中显示可用片段。"
+          "description": "在 VS Code 原生 Suggest 中显示与光标前输入具有非空 trigger 前缀匹配的片段；完整片段库可通过 TeXLeaf 的搜索并插入命令浏览。"
         },
         "texleaf.languageIds": {
           "scope": "resource",

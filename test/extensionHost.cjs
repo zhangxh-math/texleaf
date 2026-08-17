@@ -1068,6 +1068,60 @@ async function run() {
         `the generic Tab keybinding must retain its ${guardedContext} guard`,
       );
     }
+    const suggestTaboutKeybinding = extension.packageJSON.contributes.keybindings.find(
+      (keybinding) =>
+        keybinding.command === "texleaf.handleSuggestTabout" &&
+        keybinding.key === "tab",
+    );
+    assert.ok(
+      suggestTaboutKeybinding,
+      "Suggest-visible math editing needs a dedicated Tabout fallback binding",
+    );
+    for (const requiredContext of [
+      "texleaf.tabActionAvailable",
+      "!texleaf.snippetTabActionAvailable",
+      "!texleaf.matrixActionAvailable",
+      "suggestWidgetVisible",
+      "suggestWidgetHasFocusedSuggestion",
+      "!inlineSuggestionVisible",
+      "!inSnippetMode",
+      "!editorHasMultipleSelections",
+      "!renameInputVisible",
+    ]) {
+      assert.equal(
+        suggestTaboutKeybinding.when.includes(requiredContext),
+        true,
+        `the Suggest-aware Tabout fallback must include ${requiredContext}`,
+      );
+    }
+    const snippetPlaceholderTabKeybinding =
+      extension.packageJSON.contributes.keybindings.find(
+        (keybinding) =>
+          keybinding.command === "texleaf.handleSuggestSnippetTab" &&
+          keybinding.key === "tab" &&
+          keybinding.when.includes("suggestWidgetVisible"),
+      );
+    assert.ok(
+      snippetPlaceholderTabKeybinding,
+      "a live snippet placeholder needs a Suggest-visible Tab override",
+    );
+    for (const requiredContext of [
+      "texleaf.enabled",
+      "texleaf.mathTabContext",
+      "inSnippetMode",
+      "hasNextTabstop",
+      "suggestWidgetVisible",
+      "!texleaf.snippetTabActionAvailable",
+      "!inlineSuggestionVisible",
+      "!inSnippetChoice",
+      "!renameInputVisible",
+    ]) {
+      assert.equal(
+        snippetPlaceholderTabKeybinding.when.includes(requiredContext),
+        true,
+        `the snippet-placeholder Tab override must include ${requiredContext}`,
+      );
+    }
 
     const contributedCommands = new Map(
       extension.packageJSON.contributes.commands.map((command) => [
@@ -1616,6 +1670,191 @@ async function run() {
       true,
       "the final theorem tabstop must follow the complete environment",
     );
+
+    const autoEnlargeSumSource = "$()$";
+    const autoEnlargeSumCursor = autoEnlargeSumSource.indexOf(")");
+    await replaceDocument(
+      editor,
+      autoEnlargeSumSource,
+      autoEnlargeSumCursor,
+    );
+    await typeEach("sum", editor);
+    await waitFor(
+      () => document.getText() === "$\\left(\\sum\\right)$",
+      "sum automatic expansion with scalable parentheses",
+    );
+    const enlargedSumRightOffset = document.getText().indexOf("\\right)");
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      enlargedSumRightOffset,
+      "a plain snippet enlarged with \\left/\\right must keep the caret inside the pair",
+    );
+    await typeEach("+", editor);
+    assert.equal(
+      document.getText(),
+      "$\\left(\\sum+\\right)$",
+      "typing after auto-enlarge must continue before the generated right delimiter",
+    );
+    const enlargedSumText = document.getText();
+    await vscode.commands.executeCommand("texleaf.handleTab");
+    await waitFor(
+      () =>
+        document.offsetAt(editor.selection.active) ===
+        enlargedSumText.indexOf("\\right)") + "\\right)".length,
+      "one Tabout command to leave the generated right delimiter",
+    );
+    assert.equal(
+      document.getText(),
+      enlargedSumText,
+      "Tabout after a plain enlarged snippet must not alter the formula",
+    );
+
+    await replaceDocument(editor, "", 0);
+    await editor.insertSnippet(
+      new vscode.SnippetString("$(${1})$ ${2:after}"),
+    );
+    await typeEach("sum", editor);
+    await waitFor(
+      () => document.getText() === "$\\left(\\sum\\right)$ after",
+      "sum auto-enlarge inside an existing snippet placeholder",
+    );
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      document.getText().indexOf("\\right)"),
+      "nested auto-enlarge must keep the caret inside its generated pair",
+    );
+    await typeEach("+", editor);
+    assert.equal(
+      document.getText(),
+      "$\\left(\\sum+\\right)$ after",
+      "typing inside a nested enlarged pair must stay before its right delimiter",
+    );
+    const nestedEnlargedSumText = document.getText();
+    await vscode.commands.executeCommand("texleaf.handleTab");
+    await waitFor(
+      () =>
+        document.offsetAt(editor.selection.active) ===
+        nestedEnlargedSumText.indexOf("\\right)") + "\\right)".length,
+      "one Tabout command after nested sum auto-enlarge",
+    );
+    assert.equal(
+      document.getText(),
+      nestedEnlargedSumText,
+      "Tabout after nested auto-enlarge must preserve the outer snippet text",
+    );
+
+    const taboutSuggestSource = "$+)$";
+    const taboutSuggestCursor = taboutSuggestSource.indexOf(")");
+    await replaceDocument(
+      editor,
+      taboutSuggestSource,
+      taboutSuggestCursor,
+    );
+    const taboutSuggestItems = await provideCompletions(
+      document,
+      taboutSuggestCursor,
+    );
+    assert.ok(
+      findTeXLeafSnippetCompletion(taboutSuggestItems, "+-"),
+      "the Tabout regression needs a real snippet completion competing for Tab",
+    );
+    await vscode.commands.executeCommand("editor.action.triggerSuggest");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await vscode.commands.executeCommand("texleaf.handleSuggestTabout");
+    await waitFor(
+      () =>
+        editor.selection.active.isEqual(
+          document.positionAt(taboutSuggestSource.indexOf(")") + 1),
+        ),
+      "Tabout to jump past a closer while native Suggest is visible",
+    );
+    assert.equal(
+      document.getText(),
+      taboutSuggestSource,
+      "Tabout must not accept the selected snippet suggestion",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await vscode.commands.executeCommand("acceptSelectedSuggestion");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(
+      document.getText(),
+      taboutSuggestSource,
+      "Tabout must dismiss the stale Suggest session after moving past the closer",
+    );
+
+    const unrelatedSuggestSource = "$x)$";
+    const unrelatedSuggestCursor = unrelatedSuggestSource.indexOf(")");
+    await replaceDocument(
+      editor,
+      unrelatedSuggestSource,
+      unrelatedSuggestCursor,
+    );
+    const unrelatedSuggestItems = await provideCompletions(
+      document,
+      unrelatedSuggestCursor,
+    );
+    assert.equal(
+      findTeXLeafSnippetCompletion(unrelatedSuggestItems, "+-"),
+      undefined,
+      "a snippet with no matching typed prefix must not keep Suggest open",
+    );
+
+    const acceptSuggestSource = "$+x$";
+    const acceptSuggestCursor = acceptSuggestSource.indexOf("x");
+    await replaceDocument(editor, acceptSuggestSource, acceptSuggestCursor);
+    const acceptSuggestItems = await provideCompletions(
+      document,
+      acceptSuggestCursor,
+    );
+    assert.ok(
+      findTeXLeafSnippetCompletion(acceptSuggestItems, "+-"),
+      "the no-Tabout regression needs the selected +- suggestion",
+    );
+    await vscode.commands.executeCommand("editor.action.triggerSuggest");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await vscode.commands.executeCommand("texleaf.handleSuggestTabout");
+    await waitFor(
+      () => document.getText() === "$\\pmx$",
+      "the selected suggestion to be accepted when no Tabout target exists",
+    );
+
+    await replaceDocument(editor, "", 0);
+    await editor.insertSnippet(
+      new vscode.SnippetString("$(${1})$ ${2:next}"),
+    );
+    await typeEach("+", editor);
+    await waitFor(
+      () => document.getText() === "$(+)$ next",
+      "the live snippet placeholder used by the Suggest-visible Tab regression",
+    );
+    const placeholderSuggestItems = await provideCompletions(
+      document,
+      document.offsetAt(editor.selection.active),
+    );
+    assert.ok(
+      findTeXLeafSnippetCompletion(placeholderSuggestItems, "+-"),
+      "the live placeholder regression needs a competing +- suggestion",
+    );
+    await vscode.commands.executeCommand("editor.action.triggerSuggest");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await vscode.commands.executeCommand("texleaf.handleSuggestSnippetTab");
+    await waitFor(
+      () => document.getText(editor.selection) === "next",
+      "Tab to advance the live snippet placeholder while Suggest is visible",
+    );
+    assert.equal(
+      document.getText(),
+      "$(+)$ next",
+      "snippet-placeholder Tab must not accept the selected completion",
+    );
+    await vscode.commands.executeCommand("acceptSelectedSuggestion");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(
+      document.getText(),
+      "$(+)$ next",
+      "advancing a snippet placeholder must dismiss the stale Suggest session",
+    );
+    await vscode.commands.executeCommand("jumpToNextSnippetPlaceholder");
 
     const snippetBehaviorConfiguration = vscode.workspace.getConfiguration(
       "texleaf",

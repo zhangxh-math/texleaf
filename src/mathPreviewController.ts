@@ -41,6 +41,7 @@ const RENDER_CACHE_SIZE = 64;
 const ASSET_CACHE_SIZE = 64;
 const ERROR_RETRY_DELAY_MS = 5_000;
 const ERROR_RETRY_CACHE_SIZE = 128;
+const FAILED_RENDER_GRACE_MS = 750;
 const STALE_LEGACY_ASSET_SESSION_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_PREVIEW_WIDTH_EM = 40;
 const SAFETY_MAX_PREVIEW_HEIGHT_EM = 256;
@@ -54,7 +55,7 @@ interface DocumentSnapshot {
 }
 
 interface RenderedAsset {
-  readonly hoverUri: vscode.Uri;
+  readonly hoverUri: () => Promise<vscode.Uri>;
   readonly decorationUri: vscode.Uri;
   readonly widthEm: number;
   readonly heightEm: number;
@@ -86,8 +87,10 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
   private snapshots = new WeakMap<vscode.TextDocument, DocumentSnapshot>();
 
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private failedRenderClearTimer: ReturnType<typeof setTimeout> | undefined;
   private generation = 0;
-  private decoration: vscode.TextEditorDecorationType | undefined;
+  private readonly decoration: vscode.TextEditorDecorationType;
+  private decorationEditor: vscode.TextEditor | undefined;
   private previewVisible = false;
   private disposed = false;
 
@@ -99,6 +102,13 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
       context.asAbsolutePath("dist/mathPreviewWorker.js"),
     );
     this.assets = new MathPreviewAssetStore(context.globalStorageUri);
+    // Keep one stable Monaco decoration class for the controller lifetime.
+    // Per-frame SVG/layout data is supplied through DecorationOptions below,
+    // so refreshing a preview never has to tear down its pseudo-element first.
+    this.decoration = vscode.window.createTextEditorDecorationType({
+      rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+      textDecoration: "none",
+    });
   }
 
   public register(): void {
@@ -111,7 +121,10 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
       vscode.workspace.onDidChangeTextDocument((event) => {
         const editor = vscode.window.activeTextEditor;
         if (editor?.document === event.document) {
-          this.clearDecoration();
+          // Keep the last complete frame visible while the debounced scan and
+          // worker render prepare its successor. Clearing here made every
+          // keystroke produce a visible blank interval, even when the next
+          // formula was valid and rendered successfully a moment later.
           this.schedule(editor);
         }
       }),
@@ -205,11 +218,18 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
       if (token.isCancellationRequested) {
         return undefined;
       }
+      const hoverUri = await asset.hoverUri();
+      if (
+        token.isCancellationRequested ||
+        document.version !== snapshot.version
+      ) {
+        return undefined;
+      }
       const markdown = new vscode.MarkdownString();
       markdown.isTrusted = false;
       markdown.supportHtml = false;
       markdown.appendMarkdown(
-        `![TeXLeaf Math Preview](${asset.hoverUri.toString()})`,
+        `![TeXLeaf Math Preview](${hoverUri.toString()})`,
       );
       return new vscode.Hover(
         markdown,
@@ -229,7 +249,9 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
     }
     this.disposed = true;
     this.cancelScheduled();
+    this.generation += 1;
     this.clearDecoration();
+    this.decoration.dispose();
     for (const disposable of this.disposables.splice(0)) {
       disposable.dispose();
     }
@@ -247,6 +269,7 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
       return;
     }
     this.cancelScheduled();
+    this.cancelFailedRenderClear();
     const requestGeneration = ++this.generation;
     if (editor === undefined || editor !== vscode.window.activeTextEditor) {
       this.clearDecoration();
@@ -366,7 +389,15 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
       this.applyDecoration(editor, formula, cursorOffset, asset, config);
     } catch (error: unknown) {
       if (requestGeneration === this.generation) {
-        this.clearDecoration();
+        // A partially typed command can be temporarily invalid. Keep the last
+        // complete frame during a short editing grace period instead of
+        // flashing blank, but clear it if the user stops on that invalid state.
+        this.scheduleFailedRenderClear(
+          editor,
+          document,
+          snapshot.version,
+          requestGeneration,
+        );
       }
       this.output.debug(
         `Math Preview 渲染未完成：${error instanceof Error ? error.message : String(error)}`,
@@ -423,7 +454,10 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
           SAFETY_MAX_PREVIEW_HEIGHT_EM,
         );
         const asset = {
-          hoverUri: await this.assets.write(key, framed.svg),
+          // Cursor previews use an in-memory data URI. Persist the larger
+          // hover SVG only if a Hover is actually requested, rather than
+          // adding filesystem latency to every cursor refresh.
+          hoverUri: this.assets.deferredWrite(key, framed.svg),
           decorationUri: vscode.Uri.parse(
             createMathPreviewSvgDataUri(decoration.svg),
             true,
@@ -455,7 +489,6 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
     asset: RenderedAsset,
     config: TeXLeafConfig,
   ): void {
-    this.clearDecoration();
     const width = asset.widthEm;
     const height = asset.heightEm;
     const document = editor.document;
@@ -508,23 +541,32 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
           ),
         };
 
-    this.decoration = vscode.window.createTextEditorDecorationType({
-      rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
-      textDecoration: plan.hostTextDecoration,
-      before: {
-        contentIconPath: asset.decorationUri,
-        width: `${roundCss(width)}em`,
-        height: `${roundCss(height)}em`,
-        margin: "0",
-        textDecoration: createMathPreviewAttachmentTextDecoration(
-          plan.side,
-          horizontalStrategy,
-        ),
+    const previousEditor = this.decorationEditor;
+    editor.setDecorations(this.decoration, [{
+      range: new vscode.Range(anchor, anchor),
+      renderOptions: {
+        before: {
+          contentIconPath: asset.decorationUri,
+          width: `${roundCss(width)}em`,
+          height: `${roundCss(height)}em`,
+          margin: "0",
+          textDecoration: createMathPreviewAttachmentTextDecoration(
+            plan.side,
+            horizontalStrategy,
+          ),
+        },
       },
-    });
-    editor.setDecorations(this.decoration, [
-      new vscode.Range(anchor, anchor),
-    ]);
+    }]);
+    this.decorationEditor = editor;
+    if (previousEditor !== undefined && previousEditor !== editor) {
+      try {
+        previousEditor.setDecorations(this.decoration, []);
+      } catch {
+        // The previous editor can close between a successful frame install
+        // and this best-effort cleanup.
+      }
+    }
+    this.cancelFailedRenderClear();
     this.setPreviewVisible(true);
   }
 
@@ -636,9 +678,46 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
     }
   }
 
+  private cancelFailedRenderClear(): void {
+    if (this.failedRenderClearTimer !== undefined) {
+      clearTimeout(this.failedRenderClearTimer);
+      this.failedRenderClearTimer = undefined;
+    }
+  }
+
+  private scheduleFailedRenderClear(
+    editor: vscode.TextEditor,
+    document: vscode.TextDocument,
+    documentVersion: number,
+    requestGeneration: number,
+  ): void {
+    this.cancelFailedRenderClear();
+    this.failedRenderClearTimer = setTimeout(() => {
+      this.failedRenderClearTimer = undefined;
+      if (
+        this.disposed ||
+        requestGeneration !== this.generation ||
+        editor !== vscode.window.activeTextEditor ||
+        editor.document !== document ||
+        document.version !== documentVersion
+      ) {
+        return;
+      }
+      this.clearDecoration();
+    }, FAILED_RENDER_GRACE_MS);
+  }
+
   private clearDecoration(): void {
-    this.decoration?.dispose();
-    this.decoration = undefined;
+    this.cancelFailedRenderClear();
+    const editor = this.decorationEditor;
+    this.decorationEditor = undefined;
+    if (editor !== undefined) {
+      try {
+        editor.setDecorations(this.decoration, []);
+      } catch {
+        // The editor can disappear while the extension host is disposing.
+      }
+    }
     this.setPreviewVisible(false);
   }
 
@@ -819,7 +898,22 @@ class MathPreviewAssetStore implements vscode.Disposable {
     this.ready = this.initialize();
   }
 
-  public async write(key: string, svg: string): Promise<vscode.Uri> {
+  public deferredWrite(
+    key: string,
+    svg: string,
+  ): () => Promise<vscode.Uri> {
+    const generation = this.generation;
+    return () => this.write(key, svg, generation);
+  }
+
+  private async write(
+    key: string,
+    svg: string,
+    generation: number,
+  ): Promise<vscode.Uri> {
+    if (this.disposed || generation !== this.generation) {
+      throw new Error("Math Preview asset write was superseded.");
+    }
     const existing = this.fileByKey.get(key);
     if (existing !== undefined) {
       this.fileByKey.delete(key);
@@ -831,7 +925,6 @@ class MathPreviewAssetStore implements vscode.Disposable {
       return pending;
     }
 
-    const generation = this.generation;
     const write = this.writeNew(key, svg, generation);
     this.pendingByKey.set(key, write);
     try {

@@ -69,7 +69,12 @@ try {
         "texleaf.mathPreview.enabled": true,
         "texleaf.mathPreview.presentation": "cursor",
         "texleaf.mathPreview.placement": options.placement,
-        "texleaf.mathPreview.debounceMs": 50,
+        // Make the stale-while-revalidate interval deliberately visible to
+        // the CDP typing regression. The old eager-clear implementation left
+        // the editor blank for this entire interval after every keystroke.
+        "texleaf.mathPreview.debounceMs": options.scenario === "typing-stability"
+          ? 250
+          : 50,
         "texleaf.mathPreview.scale": 1.25,
       },
       null,
@@ -330,6 +335,22 @@ function cleanup() {
 }
 
 function createVisualFixture(scenario) {
+  if (scenario === "typing-stability") {
+    return {
+      caretAtom: "x",
+      texSource: String.raw`\documentclass{article}
+\newcommand{\badloop}{\badloop}
+\begin{document}
+The line above remains nonblank while the preview is replaced.
+  \[
+    x
+  \]
+Outside the formula, the preview must disappear.
+\end{document}
+`,
+    };
+  }
+
   if (scenario === "inline") {
     return {
       caretAtom: String.raw`\Phi_{1,2}`,
@@ -450,7 +471,7 @@ function parseArguments(argv) {
   const usage =
     "Usage: node test/run-math-preview-visual-host.cjs " +
     "[--vsix <path>] [--theme dark|light] " +
-    "[--scenario inline|multiline-inline|display|nested-display|tall-display] " +
+    "[--scenario inline|multiline-inline|display|nested-display|tall-display|typing-stability] " +
     "[--placement auto|above|below] [--debug-port <port>]";
   if (argv.includes("--help")) {
     process.stdout.write(
@@ -458,7 +479,7 @@ function parseArguments(argv) {
         "Options:\n" +
         "  --vsix <path>                 Test an installed VSIX instead of source.\n" +
         "  --theme dark|light            Editor theme (default: dark).\n" +
-        "  --scenario inline|multiline-inline|display|nested-display|tall-display\n" +
+        "  --scenario inline|multiline-inline|display|nested-display|tall-display|typing-stability\n" +
         "                                Fixture to open (default: display).\n" +
         "  --placement auto|above|below  Math Preview placement (default: auto).\n" +
         "  --debug-port <port>           Loopback CDP port for isolated renderer QA.\n",
@@ -503,7 +524,8 @@ function parseArguments(argv) {
         value !== "multiline-inline" &&
         value !== "display" &&
         value !== "nested-display" &&
-        value !== "tall-display"
+        value !== "tall-display" &&
+        value !== "typing-stability"
       ) {
         throw new Error(usage);
       }

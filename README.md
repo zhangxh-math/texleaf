@@ -4,7 +4,7 @@
 
 TeXLeaf 是一个面向 VS Code 桌面版的 LaTeX 写作扩展，把高频片段、可选的 AI 写作检查、Zotero 引用和活动公式预览整合到同一个插件中。它不接管 LaTeX 编译，也不会把 VSIX 二进制提交到源码仓库；功能构思与交互设计受到下文所列开源项目的启发。
 
-当前版本：`0.8.9`。支持 Windows、macOS 和 Linux 上的 VS Code `1.98+`；Zotero 联动需要 Zotero 桌面端允许本机通信，推荐安装 Better BibTeX。AI 写作功能需要用户为所选服务商自行准备 API Key，默认关闭。
+当前版本：`0.8.11`。支持 Windows、macOS 和 Linux 上的 VS Code `1.98+`；Zotero 联动需要 Zotero 桌面端允许本机通信，推荐安装 Better BibTeX。AI 写作功能需要用户为所选服务商自行准备 API Key，默认关闭。
 
 安装方式：优先从 [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=zhangxh-math.texleaf) 安装；也可以从 [GitHub Releases](https://github.com/zhangxh-math/texleaf/releases) 下载对应版本的 VSIX，在 VS Code 运行“Extensions: Install from VSIX...”。源码仓库只保存可审阅的源文件，VSIX 仅作为 Release 资产发布。
 
@@ -36,9 +36,13 @@ TeXLeaf 首次创建全局用户片段库时写入 212 条可编辑的 LaTeX 默
 
 片段设置集中在 VS Code Settings 的 `TeXLeaf · 片段`，包括总开关、自动片段、补全、项目片段文件、数学快捷键和高级匹配参数。详细格式、迁移与安全边界见 Wiki 的 [片段与模板](https://github.com/zhangxh-math/texleaf/wiki/Snippets-and-Templates) 和 [Snippet 格式](https://github.com/zhangxh-math/texleaf/wiki/Snippet-Format)。
 
+0.8.10 收紧了原生 Suggest：TeXLeaf 只返回与光标前输入具有**非空 trigger 前缀匹配**的片段；继续输入后已经不再匹配的候选会从列表移除，不会在公式末尾留下 `+-` 等无关片段。需要不依赖当前前缀浏览当前上下文可直接插入的普通片段时，使用 `Ctrl+Alt+L`（macOS 为 `Cmd+Alt+L`）。默认开启 Tabout 时，Suggest 已打开且当前位置确实有可越过的右括号、`\rangle` 或数学结束分隔符，`Tab` 优先执行 Tabout；若没有真实跳出目标，则仍接受 VS Code 当前选中的原生补全。数学区域的活动 Snippet Session 仍有下一 tabstop 时会先关闭 Suggest、再前往该占位符；Suggest/Tabout 路径不会抢占精确 TeXLeaf trigger、Inline Suggest、Rename 输入框或 Matrix action 的既有 Tab 优先级。
+
+0.8.11 修复了普通片段没有显式 tabstop、但展开时同时触发自动放大括号的光标位置。例如在 `(sum)` 中输入完成后会得到 `\left(\sum|\right)`，光标保留在生成的 `\right` 前，可以继续输入 `+`、上下限或被求和项；当当前位置没有精确手动片段 trigger 时，按一次 `Tab` 可跳到右定界符之后。刚停在 `\sum` 后直接按 `Tab` 时，既有 `sum`-limits 手动片段仍优先展开，这是有意的既有优先级。片段本身已经声明 tabstop 时仍按它原有的占位符顺序导航。
+
 ## AI 写作助手
 
-TeXLeaf 0.8.9 提供一套可选的 Grammarly 风格写作工作流，可选择 DeepSeek 官方/自定义的 Chat Completions API，或 OpenAI 官方/自定义的 Responses API：
+TeXLeaf 0.8.11 提供一套可选的 Grammarly 风格写作工作流，可选择 DeepSeek 官方/自定义的 Chat Completions API，或 OpenAI 官方/自定义的 Responses API：
 
 - 停止键入后局部检查本次改动的正文句子，不清空其他仍有效的问题；
 - 通过编辑器装饰线、TeXLeaf 专用 Hover、灯泡 Quick Fix 和活动栏问题树展示原因；Hover 中的“应用这条建议”、灯泡或问题树都可一键替换，也可在本次会话忽略；AI 问题不会重复发布到 Problems；
@@ -114,6 +118,8 @@ Math Preview 的产品方向受到 Ultra Math Preview 与 hscopes-booster 启发
 - 卡片使用不透明、圆角、主题自适应背景，预览内有独立高亮光标；
 - 深色主题使用高对比纯白矢量字形和高精度 SVG 渲染提示；
 - 支持 Cursor、Hover 或两者组合，并提供防抖、长度、缩放、缓存和受限宏配置。
+
+在 `cursor` 和 `both` 模式中，连续输入采用 last-known-good / stale-while-revalidate：防抖和后台渲染期间保留上一张有效预览，再用同一个稳定 decoration 原位换成新帧；临时无效 TeX 或中间渲染失败有 750 ms 宽限，Hover SVG 仅在实际请求 Hover 时写盘。因此持续输入不会再每键先把 cursor 卡片清空。离开公式、关闭总开关、运行“关闭当前 Math Preview”，或停在无效状态超过宽限后仍会清理旧卡片。`hover` 使用 VS Code 原生 Hover，编辑器在输入时仍可能主动关闭它；无闪烁保证针对 cursor decoration，不代表改变了原生 Hover 生命周期。
 
 VS Code 稳定扩展 API 不提供可安全替换编辑器源码行、又能点击在渲染结果与 TeX 之间切换的公开 view-zone/DOM 能力。TeXLeaf 因此专注于保持源码编辑器可预测的活动公式轻量预览，不提供整篇所见即所得替换或内置 PDF 面板。
 

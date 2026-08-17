@@ -30,7 +30,7 @@ pnpm run test:extension-host
 5. 输入 `dm`、`;a`、`//` 等默认触发，或运行 `TeXLeaf: 搜索并插入片段`。
 6. 修改源码并重新编译后，点击调试工具栏的“重新启动”验证变更。
 
-针对 0.8.9 的手工冒烟检查至少包括：
+针对 0.8.11 的手工冒烟检查至少包括：
 
 - 切换到 Windows 中文输入法，在已保存的 `.tex` 文件中分别按下全角左括号和顿号对应按键，确认每次只得到一个 `（` 和一个 `、`。
 - 用全新隔离 Profile 激活扩展，运行 `TeXLeaf: 管理 Snippet 与模板`，确认无需显示任何存储路径即可载入 212 条 Snippet 和四个模板。结构化编辑一个 trigger 后保存，运行时应立即使用新 trigger；另一个干净工作区应看到同一 Profile 内容。
@@ -38,6 +38,9 @@ pnpm run test:extension-host
 - 在真实 `.tex` 与 `.bib` 文件中验证片段可用；把语言模式设为 LaTeX 的 `.md` 和 Untitled 编辑器仍不得展开。
 - 在有缩进的行输入 `dm`，并从补全列表插入一次 `dm`，确认多行内容和 `\]` 继承当前缩进。
 - 分别输入 `\axm`、`\dfn`、`\lem`、`\prp`、`\thm`、`\cor`、`\clm`、`\asm`、`\exm`、`\exr`、`\cnj`、`\hyp`、`\rmk`，确认全部在文本模式自动展开为对应环境；在原生 Suggest 中确认精确 TeXLeaf trigger 优先显示并预选，非精确前缀仍保持 VS Code 原生排序。再模拟模板、定理片段或 `dm` 自动展开未触发但 Suggest 已出现的情形，按 `Tab` 应展开精确 TeXLeaf 片段，而不是接受普通单词。
+- 在数学区域先输入可形成部分候选的 `+`，再继续输入不匹配字符，例如把 `$x +` 改成 `$x +1`；刷新后的 Suggest 不得继续保留 TeXLeaf 的 `+-`。在默认开启 Tabout 的情况下，在 `\(...^{+}\)` 中把光标放在 `+` 与指数右花括号之间，确认 `+-` 已在 Suggest 中选中后按 `Tab`，应越过真实右括号而不接受候选；另在 `$+x$` 中把光标放在 `+` 与 `x` 之间，同一候选被选中时按 `Tab` 应接受原生补全，因为右侧普通公式内容使当前位置没有真实 Tabout 目标。`Ctrl+Alt+L`（macOS 为 `Cmd+Alt+L`）仍应显示当前上下文可直接插入的普通片段。
+- 在数学区域创建仍有下一 tabstop 的活动 Snippet Session，并让 Suggest 显示竞争候选；按 Tab 应关闭 Suggest 并前往下一占位符，不得接受候选或执行 Tabout。再分别在 Inline Suggest、Rename 输入框和配置的 Matrix/Align 上下文中重复按 Tab，确认 Suggest/Tabout 绑定不触发，既有行内建议、重命名和 Matrix/Suggest 优先级保持不变。
+- 在 `$()$` 的圆括号内输入 `sum`，确认自动放大结果为 `$\left(\sum|\right)$`：光标位于 `\right` 之前。再输入 `+`，确认字符留在括号内且当前位置不再有精确手动片段 trigger；此时按一次 `Tab` 应跳到 `\right)` 之后。另验刚停在 `\sum` 后直接按 `Tab` 时既有 `sum`-limits 手动片段优先展开，并用一个本身带多个 tabstop 的片段确认不会合成额外占位符或打乱原导航顺序。
 - 在数学区域依次输入 `1`、`/`、`2`：第一枚 `/` 后应保持 `1/`，输入 `2` 后才转换为 `\frac{1}{2}`；另行输入 `//`，确认显式分数片段仍能展开。
 - 在数学区域通过普通 `type` 路径与文档变更后备路径分别输入 `Qhat`，确认都得到 `\hat{Q}`；同时抽查 `Qbar`、`Qdot`、`Qddot`、`Qtilde`、`Qund`、`Qvec` 及 `\alpha hat`，确认同类优先级没有回归。
 - 展开 `align`、`matrix` 或 `pmat`，验证 `Tab` 先处理活动 tabstop、随后执行列操作，`Enter` 创建新行，`Shift+Enter` 退出环境。
@@ -74,9 +77,10 @@ pnpm run test:extension-host
 - 在上下都紧邻非空文字的长行内公式中连续输入，确认 `auto` 始终把浮动卡片放在活动源码行下方，不参与行宽或换行计算。光标位于起始行时，左边缘必须与 `$`/`\(` 对齐；把同一公式写成多行并把光标移到后续行时，左边缘必须改为对齐该行首个非空白字符，而不是光标横坐标或第 0 列。
 - 给 `$$…$$`、`\[…\]` 和 `\begin{align}…\end{align}` 加入不同非零缩进及 Tab：卡片应稳定保持 opening delimiter 列；超宽卡片允许右端被编辑器裁切，但不得因 Monaco 的短 token span 错跳到第 0 列。对行间公式验证 `placement=auto` 下方优先、下方不足转上方、上下都不足仍在上方并保住源码/预览末尾；显式 `above`/`below` 仍严格服从设置。
 - 在前言定义零参数、多参数、可选参数宏和 `DeclareMathOperator`，确认预览更新；递归宏、超长公式、非法 TeX 和快速连续编辑不能卡住扩展宿主，旧渲染结果不能覆盖新公式。切换深/浅主题、编辑器缩放和大文档时检查颜色、尺寸与防抖。
+- 在 `cursor` 与 `both` 模式下持续输入公式，确认防抖、Worker 渲染和换帧期间始终保留上一张有效卡片，成功结果通过同一个稳定 decoration 原位更新；短暂中间渲染失败在 750 ms 内不得清空卡片，新输入还应取消旧失败计时。停止在无效公式超过宽限、离开公式、禁用预览或运行 Dismiss 后则必须清理。单独验证 `hover` 时只要求按需生成 Hover SVG；VS Code 原生 Hover 在输入时自行关闭属于宿主生命周期，不列为 cursor 无闪烁回归。
 - 断网后重新启动只加载本项目的隔离扩展开发宿主并首次使用 Math Preview，确认不请求 CDN；检查输出 SVG 不包含脚本、事件属性、外部 URL 或 `foreignObject`。
 
-固定的 Math Preview 视觉夹具可以分别复现行内文字重叠、源码缩进、行间 opening 对齐，以及超高公式末尾的垂直定位。`inline` 场景用于确认起始行定界符对齐与下方浮动；`display` 场景同时包含带缩进的 `\[`、`$$` 与 `\begin{align}`，用于检查静态 opening 列与跨行缩进补偿；`nested-display` 复现缩进 `enumerate` 中 `\[` 卡片被错误放到编辑区第 0 列的问题；`tall-display` 会把光标直接放到 28 行 `align` 的末行附近，便于确认 `auto` 保住源码末尾和预览底部。脚本只接受枚举后的主题、场景与位置值，并在启动时用 JSON 输出实际选项和安全 TeX atom 后的光标坐标：
+固定的 Math Preview 视觉夹具可以分别复现行内文字重叠、源码缩进、行间 opening 对齐、超高公式末尾定位和连续输入换帧。`inline` 场景用于确认起始行定界符对齐与下方浮动；`display` 场景同时包含带缩进的 `\[`、`$$` 与 `\begin{align}`，用于检查静态 opening 列与跨行缩进补偿；`nested-display` 复现缩进 `enumerate` 中 `\[` 卡片被错误放到编辑区第 0 列的问题；`tall-display` 会把光标直接放到 28 行 `align` 的末行附近，便于确认 `auto` 保住源码末尾和预览底部；`typing-stability` 供 CDP 连续输入并采样 decoration 生命周期。脚本只接受枚举后的主题、场景与位置值，并在启动时用 JSON 输出实际选项和安全 TeX atom 后的光标坐标：
 
 ```powershell
 node .\test\run-math-preview-visual-host.cjs --scenario inline --placement auto --theme dark
@@ -94,9 +98,12 @@ node .\test\math-preview-cdp-check.cjs --port 9339 --scenario nested-display
 
 node .\test\run-math-preview-visual-host.cjs --scenario tall-display --placement auto --theme light --debug-port 9340
 node .\test\math-preview-cdp-check.cjs --port 9340 --scenario tall-display
+
+node .\test\run-math-preview-visual-host.cjs --scenario typing-stability --placement auto --theme dark --debug-port 9341
+node .\test\math-preview-cdp-check.cjs --port 9341 --scenario typing-stability
 ```
 
-检查器会读取 `before` 伪元素的实际边界：`nested-display` 场景要求卡片左边缘与 opening delimiter 的误差不超过 3 px，并确认 decoration 没有加入 `left`/`right`/`inset` 形式的伪视口拟合；超宽卡片允许右端被编辑器裁切。超高场景要求 SVG 根高度和 decoration 高度都大于 8em、二者一致且自动选择上方。CDP 只在这个隔离进程中显式开启，测试结束后关闭窗口或按 `Ctrl+C` 即会清理临时 Profile。
+检查器会读取 `before` 伪元素的实际边界：`nested-display` 场景要求卡片左边缘与 opening delimiter 的误差不超过 3 px，并确认 decoration 没有加入 `left`/`right`/`inset` 形式的伪视口拟合；超宽卡片允许右端被编辑器裁切。超高场景要求 SVG 根高度和 decoration 高度都大于 8em、二者一致且自动选择上方。`typing-stability` 要求快速输入、成功换帧与过时失败期间没有零 decoration 空帧，并验证离开公式、禁用/Dismiss 和停在无效状态超过 750 ms 后安全清理。CDP 只在这个隔离进程中显式开启，测试结束后关闭窗口或按 `Ctrl+C` 即会清理临时 Profile。
 
 关闭隔离窗口后脚本只清理本次创建且经过路径校验的临时目录。发版前还应针对 `above`、`below` 和两种主题补齐矩阵；若固定 Monaco CSS 兼容层在某个 VS Code 构建中失效，改用 `presentation=hover` 验证公开 API 回退路径。该测试环境只加载当前 TeXLeaf 开发扩展，以便把行为和性能回归限定在本项目候选包内。
 
@@ -129,7 +136,7 @@ pnpm run package
 构建完成后，可从命令面板选择 `Extensions: Install from VSIX...`，或在终端执行：
 
 ```powershell
-code --install-extension .\texleaf-0.8.9.vsix --force
+code --install-extension .\texleaf-0.8.11.vsix --force
 ```
 
 安装后在普通 VS Code 窗口验证，而不是只在扩展开发宿主中验证。发布前至少执行：
@@ -140,7 +147,7 @@ pnpm run release:verify
 
 还应检查 VSIX 内容，确认 `dist/extension.js`、`dist/mathPreviewWorker.js`、README、CHANGELOG、LICENSE、`SUPPORT.md`、`THIRD_PARTY_NOTICES.md`、`media/icon.png` 与其他运行资源已包含，源码、测试、coverage 和本地配置未被打包。归档内的 README 图片与相对文档链接必须已由 `vsce --githubBranch main` 改写为公开 HTTPS 地址；安装后的扩展详情页应显示 PNG 图标，命令面板应能找到片段、AI 写作、Zotero 与 Math Preview 命令。手工 VSIX 不会因为 Settings Sync 而自动安装到另一台机器；跨机测试必须在两端安装兼容版本并保持扩展标识 `zhangxh-math.texleaf`。
 
-Visual Studio Marketplace 使用现有 Publisher `zhangxh-math`；Marketplace 项目标识为 `zhangxh-math.texleaf`。可以在 Publisher 管理页手工上传 `texleaf-0.8.9.vsix`；后续自动发布优先使用短期联合身份凭据，不要把 PAT、DeepSeek/OpenAI/自定义 Responses API Key 或其他 secrets 写入仓库。Publisher 变更会建立新的扩展身份：升级冒烟必须先在旧版保存修改并记录自定义模板，安装新版后禁用旧版但暂不卸载，再 Reload Window；只有新主文件不存在、旧 JSONC 严格校验通过且复制期间未变化时，新版才尽力逐字节复制旧片段库，并保留旧文件。验证 Snippet、按需重建自定义模板后再卸载旧版。模板 catalog、既有 `globalState` 与 Settings Sync 基线不会跨 ID 自动迁移。
+Visual Studio Marketplace 使用现有 Publisher `zhangxh-math`；Marketplace 项目标识为 `zhangxh-math.texleaf`。可以在 Publisher 管理页手工上传 `texleaf-0.8.11.vsix`；后续自动发布优先使用短期联合身份凭据，不要把 PAT、DeepSeek/OpenAI/自定义 Responses API Key 或其他 secrets 写入仓库。Publisher 变更会建立新的扩展身份：升级冒烟必须先在旧版保存修改并记录自定义模板，安装新版后禁用旧版但暂不卸载，再 Reload Window；只有新主文件不存在、旧 JSONC 严格校验通过且复制期间未变化时，新版才尽力逐字节复制旧片段库，并保留旧文件。验证 Snippet、按需重建自定义模板后再卸载旧版。模板 catalog、既有 `globalState` 与 Settings Sync 基线不会跨 ID 自动迁移。
 
 ## 安全约束
 

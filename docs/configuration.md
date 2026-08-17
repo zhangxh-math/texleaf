@@ -1,6 +1,6 @@
 # TeXLeaf 配置参考
 
-在 VS Code 设置中搜索 `@ext:zhangxh-math.texleaf` 即可修改配置。0.8.9 的 52 个用户可见设置按 **TeXLeaf · 片段**（22 项）、**TeXLeaf · 文献**（9 项）、**TeXLeaf · AI 写作**（14 项）、**TeXLeaf · 预览**（7 项）分成四个原生分类。全部 AI 写作设置都是 application 级，只能由用户/Profile 设置控制；真正联网前仍要求受信任工作区、针对实际接收地址的明确同意，以及 SecretStorage 中该目标专用的 API Key。
+在 VS Code 设置中搜索 `@ext:zhangxh-math.texleaf` 即可修改配置。0.8.11 的 52 个用户可见设置按 **TeXLeaf · 片段**（22 项）、**TeXLeaf · 文献**（9 项）、**TeXLeaf · AI 写作**（14 项）、**TeXLeaf · 预览**（7 项）分成四个原生分类。全部 AI 写作设置都是 application 级，只能由用户/Profile 设置控制；真正联网前仍要求受信任工作区、针对实际接收地址的明确同意，以及 SecretStorage 中该目标专用的 API Key。
 
 ## 设置项
 
@@ -20,7 +20,7 @@
 | `texleaf.autoDeleteMathDelimiters` | 在空数学分隔符中按退格时删除整对分隔符。 |
 | `texleaf.colorizeBrackets` | 按嵌套深度为数学区域中的配对括号着色。 |
 | `texleaf.highlightActiveBracketPair` | 突出显示光标附近或包围光标的括号对。 |
-| `texleaf.enableCompletions` | 是否把可用片段提供给 VS Code 补全列表。 |
+| `texleaf.enableCompletions` | 是否把与光标前输入具有非空 trigger 前缀匹配的可用片段提供给 VS Code Suggest；当前上下文可直接插入的普通片段可用 `Ctrl+Alt+L` 浏览。 |
 | `texleaf.zoteroCitations` | 是否启用项目 bibliography 与 Zotero 联动的原生引用补全；未信任工作区中始终停用。 |
 | `texleaf.autoShowCitationPicker` | 光标进入配置的 citation 命令大括号时是否自动打开 VS Code 原生 Suggest；关闭后可使用手动命令。 |
 | `texleaf.bibliographyFile` | 可自定义的 bibliography 工作区相对 `.bib` 路径，默认 `reference.bib`；拒绝绝对路径、URI 和 `..`。 |
@@ -211,6 +211,8 @@ Math Preview 只对已保存的 `.tex` 文件和 `latex`/`tex` language ID 生�
 
 `texleaf.mathPreview.placement` 可固定为 `above`/`below`。默认 `auto` 对行内公式稳定使用下方，避免移动光标时上下跳动；对行间公式先尝试下方，下方可见空间不足才切换到上方。如果超高行间公式在上下两侧都没有足够空间，`auto` 仍选择上方，并用公式末尾附近作为垂直参照，使预览公式的底部与公式代码的最后几行尽量同时留在视口内。此时预览顶部被裁掉属于预期行为。正常高公式不会压缩到旧的 8em 上限；仅当宽度超过 40em 时等比缩放，并保留 256em 的异常几何安全上限。
 
+0.8.11 的 `cursor` / `both` 使用 last-known-good（stale-while-revalidate）：防抖和后台渲染期间保留上一张有效卡片，通过单一稳定 decoration 原位换帧；临时不完整 TeX 或渲染失败有 750 ms 宽限，Hover SVG 只在实际请求 Hover 时写入扩展私有缓存。离开公式、禁用预览、运行“关闭当前 Math Preview”，或停在无效状态超过宽限仍会清理旧卡片。纯 `hover` 继续由 VS Code 控制生命周期，输入时可能自行关闭；连续输入不闪烁的保证针对 cursor decoration。
+
 VS Code 稳定扩展 API 没有可供此功能使用的公开 view-zone 或任意浮层定位接口。为实现上述布局，`cursor` 模式使用一小段固定、内部生成且不接受用户内容的 Monaco decoration CSS 兼容层；它只负责定位，卡片内容和底色仍由经过清理的 SVG 提供。兼容层不能为预览保留真正的编辑器行高，因此公式上下均无空白行时，卡片可能暂时遮住相邻行；超高预览也可能从顶部超出视口，`auto` 会有意保留其底部。若未来 VS Code、主题或平台不接受该定位方式，可把 `texleaf.mathPreview.presentation` 设为 `hover`，改用完全基于公开 HoverProvider 的预览；`both` 同时启用两者。如果 LaTeX Workshop 也生成数学 Hover，建议保留默认 `cursor`，避免同一位置显示两份内容。按 `Esc` 只关闭当前预览，不改变持久设置。
 
 TeXLeaf 使用离线打包的 MathJax SVG 渲染器和 New Computer Modern 字体。MathJax 在首次需要公式时才在独立 Node Worker 中载入，主扩展线程不执行排版。扫描结果按 `TextDocument.version` 缓存，重复公式复用有上限的 SVG 缓存，异步结果带代次校验，过时渲染不会覆盖新内容。渲染有 5 秒超时、长度上限、宏数量/展开上限和短暂错误冷却；SVG 会拒绝脚本、事件属性、外部链接、`foreignObject` 等活动内容。
@@ -307,6 +309,8 @@ Snippet 配置命令和侧栏仍然可以在任意编辑器上下文中打开，
 
 当插入内容使当前括号需要适应较高的数学结构时，TeXLeaf 可以使用 `\left` 与 `\right`。此功能是文本层面的保守改写，不调用 TeX 引擎；复杂宏或不平衡括号可能不会处理。
 
+普通片段没有显式 tabstop 时，0.8.11 会在扩大整个括号范围后把光标恢复到生成的 `\right` 之前；例如 `(sum)` 会成为 `\left(\sum|\right)`。可以继续输入 `+`、上下标或其他内容；当当前位置没有精确手动片段 trigger 时，按一次 `Tab` 执行 Tabout。刚停在 `\sum` 后直接按 `Tab` 时，既有 `sum`-limits 手动片段优先展开；片段已经声明 tabstop 时也不合成额外占位符，继续遵循原导航顺序。
+
 ### Matrix 快捷键
 
 矩阵快捷键只在 `texleaf.matrixEnvironments` 列出的 matrix、align 等环境中工作：`Tab` 在活动 snippet tabstop 处理完成后插入下一列的 ` & `；`Enter` 在块级环境插入 `\\`、换行并保留当前缩进，在行内矩阵中插入带空格的 `\\`；`Shift+Enter` 跳到当前数学环境之后。若某个自定义环境行为异常，将其移出列表即可。
@@ -315,7 +319,9 @@ Snippet 配置命令和侧栏仍然可以在任意编辑器上下文中打开，
 
 ### Tabout
 
-Tabout 优先遵守活动 snippet 的 tabstop；没有可前往的 tabstop 时，再尝试越过临近的右括号或数学分隔符。原生 Suggest 会把与当前输入精确相同的 TeXLeaf trigger 优先显示并预选，例如 `\thm`、`\lem`、`\dfn`、`\cor`；普通非精确候选仍遵循 VS Code 的原生排序。模板、定理环境或 `dm` 的自动展开偶发未触发时，直接按 `Tab` 会精确展开 TeXLeaf 片段，不会接受一个相近的普通单词；这个 exact 路径在 Suggest 已打开时仍优先。若 `Tab` 已被其他扩展接管，可通过键盘快捷方式页面检查 `texleaf` 命令的 when 条件与冲突来源。
+Tabout 优先遵守活动 snippet 的 tabstop；没有可前往的 tabstop 时，再尝试越过临近的右括号、`\rangle` 或数学结束分隔符。原生 Suggest 会把与当前输入精确相同的 TeXLeaf trigger 优先显示并预选，例如 `\thm`、`\lem`、`\dfn`、`\cor`；普通非精确候选仍遵循 VS Code 的原生排序。模板、定理环境或 `dm` 的自动展开偶发未触发时，直接按 `Tab` 会精确展开 TeXLeaf 片段，不会接受一个相近的普通单词；这个 exact 路径在 Suggest 已打开时仍优先。
+
+0.8.10 起，TeXLeaf 的普通片段候选必须与光标前输入具有非空 trigger 前缀匹配；不再匹配的条目会在 Suggest 刷新时移除。默认开启 Tabout 时，Suggest 可见且没有精确 TeXLeaf trigger，扩展会重新规划当前位置：有真实 Tabout 目标才跳出，否则调用 VS Code 原生的“接受所选建议”。数学区域的活动 Snippet Session 若仍有下一 tabstop，会由专用路由先关闭 Suggest、再前往该占位符；普通 Suggest-aware Tabout 路径明确排除活动 Snippet Session、Inline Suggest、Rename 输入框和 Matrix action，不改变它们原有的 Tab 优先级。无需先输入 trigger 即可用 `Ctrl+Alt+L`（macOS 为 `Cmd+Alt+L`）浏览当前上下文可直接插入的普通片段。若 `Tab` 已被其他扩展接管，可通过键盘快捷方式页面检查 `texleaf` 命令的 when 条件与冲突来源。
 
 ### 数学上下文
 

@@ -1,20 +1,21 @@
 "use strict";
 
 /**
- * Read-only renderer check for an already-running isolated visual host.
+ * Renderer check for an already-running isolated visual host.
  *
- * The visual launcher opts into a loopback CDP port. This script never opens
- * a user profile or edits a document; it inspects Monaco's actual ::before
- * decoration box so static-position regressions cannot hide behind pure CSS
- * string tests.
+ * The visual launcher opts into a loopback CDP port. Geometry scenarios are
+ * read-only. The dedicated typing-stability fixture edits only the launcher's
+ * disposable temporary document so it can observe every real Monaco
+ * ::before frame across debounce, worker rendering, and decoration swaps.
  */
 
 const assert = require("node:assert/strict");
 
 const { port, scenario } = parseArguments(process.argv.slice(2));
-const openingNeedle = scenario === "nested-display"
-  ? String.raw`\[`
-  : String.raw`\begin{align}`;
+const openingNeedle =
+  scenario === "nested-display" || scenario === "typing-stability"
+    ? String.raw`\[`
+    : String.raw`\begin{align}`;
 
 main().catch((error) => {
   console.error(error);
@@ -27,6 +28,10 @@ async function main() {
   try {
     await client.request("Runtime.enable");
     await client.request("DOM.enable");
+    if (scenario === "typing-stability") {
+      await runTypingStabilityCheck(client);
+      return;
+    }
     const runtimeMetrics = await waitForPreview(client, openingNeedle);
     const document = await client.request("DOM.getDocument", {
       depth: -1,
@@ -118,6 +123,302 @@ async function main() {
   }
 }
 
+async function runTypingStabilityCheck(client) {
+  const initial = await waitForPaintedPreview(client, openingNeedle);
+  assert.equal(initial.previewCount, 1);
+  assert.ok(initial.contentHash, "the initial preview must expose a content hash");
+  await focusActiveMonacoInput(client, "x");
+
+  // Type two characters faster than the deliberately enlarged debounce. The
+  // last committed SVG must remain continuously visible until the final text
+  // has rendered; the old eager-clear implementation reported zero here for
+  // roughly the full 250 ms debounce on each edit.
+  await client.request("Input.insertText", { text: "+" });
+  await waitForVisibleEditorText(client, "x+", "the first typed character");
+  const samples = [];
+  for (let index = 0; index < 6; index += 1) {
+    const sample = await evaluatePreview(client, openingNeedle);
+    samples.push(sample);
+    assertContinuousPreview(sample, `rapid typing sample ${index + 1}`);
+    assert.equal(
+      sample.contentHash,
+      initial.contentHash,
+      "the committed frame must remain in place while the replacement is debounced",
+    );
+    await delay(15);
+  }
+  await client.request("Input.insertText", { text: "y" });
+  await waitForVisibleEditorText(client, "x+y", "the second typed character");
+  const updated = await waitForAtomicPreviewChange(
+    client,
+    initial.contentHash,
+    "the x+y replacement preview",
+  );
+  samples.push(...updated.samples);
+
+  // Exercise the failed-render grace and its generation guard. A recursive
+  // document macro fails in the real worker. Recover before the grace expires;
+  // its stale failure timer must never clear the successful successor.
+  await replaceCurrentLineBody(client, String.raw`\badloop`);
+  const invalidStartedAt = Date.now();
+  while (Date.now() - invalidStartedAt < 600) {
+    const sample = await evaluatePreview(client, openingNeedle);
+    samples.push(sample);
+    assertContinuousPreview(sample, "temporary invalid-formula grace");
+    await delay(20);
+  }
+  await replaceCurrentLineBody(client, "z");
+  const recovered = await waitForAtomicPreviewChange(
+    client,
+    updated.metrics.contentHash,
+    "the valid preview following a failed render",
+  );
+  samples.push(...recovered.samples);
+  await assertPreviewRemainsVisible(
+    client,
+    1_000,
+    "a stale failed-render timer must not clear its newer successful preview",
+  );
+
+  // Stopping on the same invalid recursive macro must eventually clear the
+  // retained frame (the retry cache makes this second failure deterministic),
+  // rather than leaving stale mathematics visible forever.
+  await replaceCurrentLineBody(client, String.raw`\badloop`);
+  await waitForPreviewCount(
+    client,
+    0,
+    8_000,
+    "a stopped invalid formula to clear after the editing grace",
+  );
+
+  // A blank body is a deterministic non-renderable state and must also clear.
+  await replaceCurrentLineBody(client, "q");
+  await waitForPaintedPreview(client, openingNeedle);
+  await selectCurrentLineBody(client);
+  await pressKey(client, "Backspace", "Backspace", 8);
+  await waitForPreviewCount(client, 0, 3_000, "a blank formula to clear");
+
+  // Restoring a formula proves the controller can recover after an explicit
+  // clear; moving outside and Escape must remain true terminal clear paths.
+  await client.request("Input.insertText", { text: "r" });
+  await waitForPaintedPreview(client, openingNeedle);
+  await clickAfterEditorText(
+    client,
+    "Outside the formula, the preview must disappear.",
+  );
+  await waitForPreviewCount(client, 0, 3_000, "leaving the formula to clear");
+  await clickAfterEditorText(client, "r");
+  await waitForPaintedPreview(client, openingNeedle);
+  await pressKey(client, "Escape", "Escape", 27);
+  await waitForPreviewCount(client, 0, 3_000, "Escape to dismiss the preview");
+
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        scenario,
+        rapidTypingSamples: samples.length,
+        initialContentHash: initial.contentHash,
+        updatedContentHash: updated.metrics.contentHash,
+        recoveredContentHash: recovered.metrics.contentHash,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  process.stdout.write(
+    "Math Preview CDP typing-stability check passed: no blank frame appeared, successful updates swapped atomically, stale failures could not clear newer output, and terminal states cleared safely.\n",
+  );
+}
+
+async function focusActiveMonacoInput(client, caretNeedle) {
+  // Focus the first editor group through VS Code's own keybinding, then click
+  // immediately after the fixture atom. Recent Monaco versions keep a
+  // read-only `ime-text-area` in the DOM even when it is not the editor's real
+  // input surface, so directly focusing the first textarea silently drops
+  // Input.insertText.
+  await pressKey(client, "1", "Digit1", 49, 2);
+  await clickAfterEditorText(client, caretNeedle);
+}
+
+async function clickAfterEditorText(client, needle) {
+  const response = await client.request("Runtime.evaluate", {
+    expression: `(${findEditorClickPoint.toString()})(${JSON.stringify(needle)})`,
+    returnByValue: true,
+  });
+  if (response.exceptionDetails !== undefined) {
+    throw new Error(
+      response.exceptionDetails.exception?.description ??
+        response.exceptionDetails.text ??
+        "Unable to locate Monaco's fixture caret",
+    );
+  }
+  const point = response.result.value;
+  assert.equal(
+    point?.found,
+    true,
+    "the isolated fixture must expose the formula line used for real input",
+  );
+  await client.request("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: point.x,
+    y: point.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  await client.request("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: point.x,
+    y: point.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+  await delay(25);
+}
+
+function findEditorClickPoint(needle) {
+  const normalizedNeedle = needle.replace(/\s/gu, " ");
+  const lines = [...document.querySelectorAll(".monaco-editor .view-line")]
+    .map((line) => ({
+      line,
+      lineText: line.textContent ?? "",
+      normalized: (line.textContent ?? "").replace(/\s/gu, " "),
+    }));
+  const candidate =
+    lines.find(({ normalized }) => normalized.trim() === normalizedNeedle) ??
+    lines.find(({ normalized }) => normalized.includes(normalizedNeedle));
+  if (candidate !== undefined) {
+    const { line, lineText, normalized: normalizedLineText } = candidate;
+    const targetOffset =
+      normalizedLineText.indexOf(normalizedNeedle) + normalizedNeedle.length;
+    let remaining = targetOffset;
+    const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      const length = node.nodeValue?.length ?? 0;
+      if (remaining <= length) {
+        const range = document.createRange();
+        range.setStart(node, Math.min(remaining, length));
+        range.collapse(true);
+        const caretRect = range.getBoundingClientRect();
+        const lineRect = line.getBoundingClientRect();
+        return {
+          found: true,
+          x: caretRect.left + 1,
+          y: lineRect.top + lineRect.height / 2,
+        };
+      }
+      remaining -= length;
+    }
+  }
+  return { found: false };
+}
+
+async function replaceCurrentLineBody(client, text) {
+  await selectCurrentLineBody(client);
+  await client.request("Input.insertText", { text });
+}
+
+async function selectCurrentLineBody(client) {
+  await pressKey(client, "Home", "Home", 36, 8);
+}
+
+async function pressKey(client, key, code, windowsVirtualKeyCode, modifiers = 0) {
+  const event = { key, code, windowsVirtualKeyCode, modifiers };
+  await client.request("Input.dispatchKeyEvent", {
+    type: "rawKeyDown",
+    ...event,
+  });
+  await client.request("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    ...event,
+  });
+}
+
+async function waitForAtomicPreviewChange(client, previousHash, label) {
+  const deadline = Date.now() + 8_000;
+  const samples = [];
+  let stableChangedFrames = 0;
+  let last;
+  while (Date.now() < deadline) {
+    last = await evaluatePreview(client, openingNeedle);
+    samples.push(last);
+    assertContinuousPreview(last, label);
+    if (last.contentHash !== undefined && last.contentHash !== previousHash) {
+      stableChangedFrames += 1;
+      if (stableChangedFrames >= 3) {
+        return { metrics: last, samples };
+      }
+    } else {
+      stableChangedFrames = 0;
+    }
+    await delay(10);
+  }
+  throw new Error(
+    `Timed out waiting for ${label}: ${JSON.stringify(last)}`,
+  );
+}
+
+function assertContinuousPreview(metrics, label) {
+  assert.equal(
+    metrics.previewCount,
+    1,
+    `${label} produced a blank or duplicate preview frame: ${JSON.stringify(metrics)}`,
+  );
+  assert.ok(metrics.contentHash, `${label} lost its SVG content`);
+}
+
+async function assertPreviewRemainsVisible(client, durationMs, message) {
+  const deadline = Date.now() + durationMs;
+  while (Date.now() < deadline) {
+    assertContinuousPreview(await evaluatePreview(client, openingNeedle), message);
+    await delay(20);
+  }
+}
+
+async function waitForPreviewCount(client, expected, timeoutMs, label) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  while (Date.now() < deadline) {
+    last = await evaluatePreview(client, openingNeedle);
+    if (last?.previewCount === expected) {
+      return last;
+    }
+    await delay(20);
+  }
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify(last)}`);
+}
+
+async function waitForVisibleEditorText(client, expectedText, label) {
+  const deadline = Date.now() + 2_000;
+  let last;
+  while (Date.now() < deadline) {
+    last = await evaluatePreview(client, openingNeedle);
+    if (last?.visibleText?.includes(expectedText)) {
+      return last;
+    }
+    await delay(10);
+  }
+  throw new Error(
+    `Timed out waiting for ${label} to update the Monaco model: ${JSON.stringify(last)}`,
+  );
+}
+
+async function waitForPaintedPreview(client, needle) {
+  const deadline = Date.now() + 30_000;
+  let last;
+  while (Date.now() < deadline) {
+    last = await evaluatePreview(client, needle);
+    if (last?.previewCount === 1 && last.contentHash !== undefined) {
+      return last;
+    }
+    await delay(20);
+  }
+  throw new Error(
+    `Timed out waiting for one painted Math Preview decoration: ${JSON.stringify(last)}`,
+  );
+}
+
 async function waitForWorkbenchTarget(debugPort) {
   const endpoint = `http://127.0.0.1:${debugPort}/json/list`;
   const deadline = Date.now() + 30_000;
@@ -192,14 +493,25 @@ function collectPreviewMetrics(needle) {
   }
   const preview = previews[0];
   if (preview === undefined) {
-    return { previewCount: previews.length, ruleCss: "" };
+    return {
+      previewCount: previews.length,
+      ruleCss: "",
+      contentHash: undefined,
+    };
   }
   preview.setAttribute("data-texleaf-cdp-preview", "active");
-  const decorationClass = [...preview.classList].find((name) =>
-    name.startsWith("ced-"),
-  );
   const pseudo = getComputedStyle(preview, "::before");
-  const ruleCss = findDecorationRuleCss(decorationClass);
+  const decorationRules = [...preview.classList]
+    .filter((name) => name.startsWith("ced-"))
+    .map((name) => ({
+      decorationClass: name,
+      ruleCss: findDecorationRuleCss(name),
+    }));
+  const dynamicRule = decorationRules.find(({ ruleCss }) =>
+    /(?:^|;\s*)position\s*:\s*absolute/iu.test(ruleCss),
+  ) ?? decorationRules.find(({ ruleCss }) => ruleCss !== "");
+  const decorationClass = dynamicRule?.decorationClass;
+  const ruleCss = dynamicRule?.ruleCss ?? "";
   const content = pseudo.content ?? "";
   const base64 = /base64,([^"')]+)/u.exec(content)?.[1];
   let rootHeightEm = Number.NaN;
@@ -221,6 +533,7 @@ function collectPreviewMetrics(needle) {
   const parentRect = preview.parentElement?.getBoundingClientRect();
   return {
     previewCount: previews.length,
+    contentHash: hashText(content),
     decorationClass,
     ruleCss,
     side: /(?:^|;\s*)bottom\s*:/iu.test(ruleCss) ? "above" : "below",
@@ -242,6 +555,7 @@ function collectPreviewMetrics(needle) {
     computedLeft: pseudo.left,
     computedRight: pseudo.right,
     baseLeft: preview.getBoundingClientRect().left,
+    visibleText: document.querySelector(".monaco-editor .view-lines")?.textContent,
   };
 
   function findDecorationRuleCss(className) {
@@ -262,6 +576,15 @@ function collectPreviewMetrics(needle) {
       }
     }
     return "";
+  }
+
+  function hashText(text) {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16).padStart(8, "0");
   }
 
   function findRule(rules, selectorNeedle) {
@@ -377,7 +700,7 @@ function delay(milliseconds) {
 function parseArguments(argv) {
   if (argv.length !== 4 || argv[0] !== "--port" || argv[2] !== "--scenario") {
     throw new Error(
-      "Usage: node test/math-preview-cdp-check.cjs --port <port> --scenario nested-display|tall-display",
+      "Usage: node test/math-preview-cdp-check.cjs --port <port> --scenario nested-display|tall-display|typing-stability",
     );
   }
   const parsedPort = Number(argv[1]);
@@ -386,7 +709,9 @@ function parseArguments(argv) {
     !Number.isSafeInteger(parsedPort) ||
     parsedPort < 1_024 ||
     parsedPort > 65_535 ||
-    (parsedScenario !== "nested-display" && parsedScenario !== "tall-display")
+    parsedScenario !== "nested-display" &&
+    parsedScenario !== "tall-display" &&
+    parsedScenario !== "typing-stability"
   ) {
     throw new Error("Invalid renderer-check arguments");
   }
