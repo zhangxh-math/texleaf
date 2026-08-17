@@ -10,6 +10,7 @@ import {
   type TemplateDefinition,
 } from "./defaultTemplates";
 import {
+  ARTICLE_TEMPLATE_TRIGGER_MIGRATION_STATE_KEY,
   createManagedTemplateCatalog,
   decodeManagedTemplateCatalog,
   MAX_TEMPLATE_CONTENT_BYTES,
@@ -19,6 +20,7 @@ import {
   type ManagedTemplateCatalog,
   type ManagedTemplateInput,
 } from "./templateLibrary";
+import { migrateLegacyFactoryTemplateTriggers } from "./templateTriggerMigration";
 
 export type {
   ManagedTemplate,
@@ -324,7 +326,7 @@ export class TemplateManager implements vscode.Disposable {
       this.factoryIds,
     );
     if (decoded.kind === "valid") {
-      return decoded.catalog;
+      return this.migrateLegacyFactoryTriggers(decoded.catalog);
     }
     if (decoded.kind === "invalid") {
       throw new Error(
@@ -341,7 +343,7 @@ export class TemplateManager implements vscode.Disposable {
       this.factoryIds,
     );
     if (beforeCreate.kind === "valid") {
-      return beforeCreate.catalog;
+      return this.migrateLegacyFactoryTriggers(beforeCreate.catalog);
     }
     if (beforeCreate.kind === "invalid") {
       throw new Error(
@@ -360,6 +362,44 @@ export class TemplateManager implements vscode.Disposable {
       throw new Error("模板目录写入扩展内部存储后未通过复核。");
     }
     return observed.catalog;
+  }
+
+  /**
+   * Consider the legacy article trigger rename once per synced Profile. Only
+   * factory entries whose trigger still equals an old default are candidates;
+   * any other user-selected trigger remains authoritative. The acknowledgement
+   * is written before the best-effort catalog commit, so a temporary failure or
+   * a later deliberate choice of a legacy name cannot cause repeated rewrites.
+   */
+  private async migrateLegacyFactoryTriggers(
+    catalog: ManagedTemplateCatalog,
+  ): Promise<ManagedTemplateCatalog> {
+    return migrateLegacyFactoryTemplateTriggers(catalog, DEFAULT_TEMPLATES, {
+      isAcknowledged: () =>
+        this.context.globalState.get<boolean>(
+          ARTICLE_TEMPLATE_TRIGGER_MIGRATION_STATE_KEY,
+        ) === true,
+      acknowledge: () =>
+        this.context.globalState.update(
+          ARTICLE_TEMPLATE_TRIGGER_MIGRATION_STATE_KEY,
+          true,
+        ),
+      createCatalog: (templates) =>
+        createManagedTemplateCatalog(
+          templates,
+          randomUUID(),
+          this.factoryIds,
+        ),
+      commitCatalog: (next, previous) => this.commitCatalog(next, previous),
+      readLatestCatalog: () => {
+        const latest = decodeManagedTemplateCatalog(
+          this.context.globalState.get<unknown>(TEMPLATE_LIBRARY_STATE_KEY),
+          this.factoryIds,
+        );
+        return latest.kind === "valid" ? latest.catalog : undefined;
+      },
+      logger: this.logger,
+    });
   }
 
   private async readStoredCatalog(): Promise<ManagedTemplateCatalog> {
@@ -548,7 +588,8 @@ export class TemplateManager implements vscode.Disposable {
         this.factoryIds,
       );
       if (decoded.kind === "valid") {
-        this.applyCatalogIfChanged(decoded.catalog);
+        const catalog = await this.migrateLegacyFactoryTriggers(decoded.catalog);
+        this.applyCatalogIfChanged(catalog);
       } else if (decoded.kind === "invalid") {
         this.logger.warn(
           `忽略无效的已同步模板目录并继续使用上一次有效内容：${decoded.reason}`,

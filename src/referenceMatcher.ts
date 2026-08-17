@@ -8,7 +8,8 @@ export interface BibIdentityIndex {
   readonly entries: readonly BibTeXEntry[];
   readonly byKey: ReadonlyMap<string, BibTeXEntry>;
   readonly byDoi: ReadonlyMap<string, BibTeXEntry>;
-  readonly byIsbn: ReadonlyMap<string, BibTeXEntry>;
+  /** ISBNs identify a containing book, so retain every chapter/title bucket. */
+  readonly byIsbn: ReadonlyMap<string, readonly BibTeXEntry[]>;
   readonly byTitleYear: ReadonlyMap<string, readonly BibTeXEntry[]>;
 }
 
@@ -52,7 +53,11 @@ export function findEquivalentBibEntry(
   const isbns = normalizedIsbns(reference.isbn);
   if (isbns.size > 0) {
     for (const isbn of isbns) {
-      const match = index.byIsbn.get(isbn);
+      const match = (index.byIsbn.get(isbn) ?? []).find((entry) =>
+        entry !== exactKey &&
+        !referenceMetadataClearlyConflicts(entry, reference) &&
+        isbnMetadataMatches(entry, reference)
+      );
       if (match !== undefined) {
         return match;
       }
@@ -66,9 +71,31 @@ export function findEquivalentBibEntry(
     return undefined;
   }
   return (index.byTitleYear.get(titleYearKey(title, year)) ?? []).find((entry) => {
-    const bibAuthorTokens = normalizedAuthorTokens(firstBibAuthor(entry.authors));
-    return [...bibAuthorTokens].some((token) => authorTokens.has(token));
+    return entry !== exactKey &&
+      !referenceMetadataClearlyConflicts(entry, reference) &&
+      authorNamesHaveEvidenceOfMatch(
+      firstBibAuthor(entry.authors),
+      reference.authors[0] ?? "",
+    );
   });
+}
+
+/**
+ * Resolve a weak snapshot match only when the entry actually exported for this
+ * import also agrees. Zotero can change after a cached completion was built;
+ * the fresh export is therefore the final authority before an existing key is
+ * reused instead of appending the exported entry.
+ */
+export function findImportCompatibleBibEntry(
+  reference: ZoteroReference,
+  exported: BibTeXEntry,
+  entriesOrIndex: readonly BibTeXEntry[] | BibIdentityIndex,
+): BibTeXEntry | undefined {
+  const equivalent = findEquivalentBibEntry(reference, entriesOrIndex);
+  return equivalent !== undefined &&
+      !referencesClearlyConflict(equivalent, exported)
+    ? equivalent
+    : undefined;
 }
 
 /** Build once when matching a Zotero library against many bibliography items. */
@@ -78,7 +105,7 @@ export function createBibIdentityIndex(
   const usableEntries = entries.filter((entry) => isSafeCitationKey(entry.key));
   const byKey = new Map<string, BibTeXEntry>();
   const byDoi = new Map<string, BibTeXEntry>();
-  const byIsbn = new Map<string, BibTeXEntry>();
+  const byIsbn = new Map<string, BibTeXEntry[]>();
   const byTitleYear = new Map<string, BibTeXEntry[]>();
   for (const entry of usableEntries) {
     if (!byKey.has(entry.key)) {
@@ -89,8 +116,11 @@ export function createBibIdentityIndex(
       byDoi.set(doi, entry);
     }
     for (const isbn of normalizedIsbns(entry.fields.isbn ?? "")) {
-      if (!byIsbn.has(isbn)) {
-        byIsbn.set(isbn, entry);
+      const bucket = byIsbn.get(isbn);
+      if (bucket === undefined) {
+        byIsbn.set(isbn, [entry]);
+      } else {
+        bucket.push(entry);
       }
     }
     const title = normalizeReferenceSearchText(entry.title);
@@ -115,18 +145,9 @@ export function referencesClearlyConflict(
 ): boolean {
   const existingDoi = normalizeDoi(existing.fields.doi ?? "");
   const exportedDoi = normalizeDoi(exported.fields.doi ?? "");
-  if (existingDoi.length > 0 && existingDoi === exportedDoi) {
-    return false;
+  if (existingDoi.length > 0 && exportedDoi.length > 0) {
+    return existingDoi !== exportedDoi;
   }
-  const existingIsbns = normalizedIsbns(existing.fields.isbn ?? "");
-  if (
-    [...normalizedIsbns(exported.fields.isbn ?? "")].some((isbn) =>
-      existingIsbns.has(isbn),
-    )
-  ) {
-    return false;
-  }
-
   const existingTitle = normalizeReferenceSearchText(existing.title);
   const exportedTitle = normalizeReferenceSearchText(exported.title);
   if (
@@ -138,20 +159,29 @@ export function referencesClearlyConflict(
   }
   const existingYear = normalizeReferenceSearchText(existing.year);
   const exportedYear = normalizeReferenceSearchText(exported.year);
-  return (
+  if (
     existingYear.length > 0 &&
     exportedYear.length > 0 &&
     existingYear !== exportedYear
+  ) {
+    return true;
+  }
+  return authorNamesClearlyConflict(
+    firstBibAuthor(existing.authors),
+    firstBibAuthor(exported.authors),
   );
 }
 
 export function normalizeDoi(value: string): string {
-  return value
+  const normalized = value
     .trim()
     .toLocaleLowerCase("en-US")
     .replace(/^https?:\/\/(?:dx\.)?doi\.org\//u, "")
     .replace(/^doi\s*:\s*/u, "")
     .replace(/[\s.,;]+$/u, "");
+  return /^10\.\d{4,9}\/[^\s\p{C}]+$/u.test(normalized) && normalized.length <= 512
+    ? normalized
+    : "";
 }
 
 export function normalizedIsbns(value: string): ReadonlySet<string> {
@@ -191,6 +221,11 @@ function referenceMetadataClearlyConflicts(
   entry: BibTeXEntry,
   reference: ZoteroReference,
 ): boolean {
+  const entryDoi = normalizeDoi(entry.fields.doi ?? "");
+  const referenceDoi = normalizeDoi(reference.doi);
+  if (entryDoi.length > 0 && referenceDoi.length > 0) {
+    return entryDoi !== referenceDoi;
+  }
   const entryTitle = normalizeReferenceSearchText(entry.title);
   const referenceTitle = normalizeReferenceSearchText(reference.title);
   if (
@@ -202,9 +237,111 @@ function referenceMetadataClearlyConflicts(
   }
   const entryYear = normalizeReferenceSearchText(entry.year);
   const referenceYear = normalizeReferenceSearchText(reference.year);
-  return (
+  if (
     entryYear.length > 0 &&
     referenceYear.length > 0 &&
     entryYear !== referenceYear
+  ) {
+    return true;
+  }
+  return authorNamesClearlyConflict(
+    firstBibAuthor(entry.authors),
+    reference.authors[0] ?? "",
+  );
+}
+
+/**
+ * An ISBN alone is not a work identity: book chapters commonly share the
+ * containing volume's ISBN. Require the normalized title to agree, and reject
+ * contradictory year/first-author metadata when both sides provide it.
+ */
+function isbnMetadataMatches(
+  entry: BibTeXEntry,
+  reference: ZoteroReference,
+): boolean {
+  const entryTitle = normalizeReferenceSearchText(entry.title);
+  const referenceTitle = normalizeReferenceSearchText(reference.title);
+  if (
+    entryTitle.length === 0 ||
+    referenceTitle.length === 0 ||
+    entryTitle !== referenceTitle
+  ) {
+    return false;
+  }
+  const entryYear = normalizeReferenceSearchText(entry.year);
+  const referenceYear = normalizeReferenceSearchText(reference.year);
+  if (
+    entryYear.length > 0 &&
+    referenceYear.length > 0 &&
+    entryYear !== referenceYear
+  ) {
+    return false;
+  }
+  const entryAuthors = normalizedAuthorTokens(firstBibAuthor(entry.authors));
+  const referenceAuthors = normalizedAuthorTokens(reference.authors[0] ?? "");
+  const entryFamily = normalizedAuthorFamilyToken(firstBibAuthor(entry.authors));
+  const referenceFamily = normalizedAuthorFamilyToken(reference.authors[0] ?? "");
+  if (entryFamily !== undefined && referenceFamily !== undefined) {
+    return entryFamily === referenceFamily;
+  }
+  return (
+    entryAuthors.size === 0 ||
+    referenceAuthors.size === 0 ||
+    [...entryAuthors].some((token) => referenceAuthors.has(token))
+  );
+}
+
+/**
+ * BibTeX's comma form puts the family name first; ordinary Zotero/CSL display
+ * names put it last. Comparing the last normalized token of the applicable
+ * family-name segment avoids treating a shared given name as ISBN identity.
+ * A one-character non-Latin family name remains useful, while a Latin initial
+ * is too ambiguous to become an automatic identity signal.
+ */
+function normalizedAuthorFamilyToken(value: string): string | undefined {
+  const familySegment = value.includes(",")
+    ? value.slice(0, value.indexOf(","))
+    : value;
+  const tokens = normalizeReferenceSearchText(familySegment)
+    .split(" ")
+    .filter((token) => token.length > 0);
+  const family = tokens[tokens.length - 1];
+  if (family === undefined || /^[a-z0-9]$/u.test(family)) {
+    return undefined;
+  }
+  return family;
+}
+
+function authorNamesClearlyConflict(left: string, right: string): boolean {
+  const leftFamily = normalizedAuthorFamilyToken(left);
+  const rightFamily = normalizedAuthorFamilyToken(right);
+  if (leftFamily !== undefined && rightFamily !== undefined) {
+    return leftFamily !== rightFamily;
+  }
+  return authorTokensClearlyConflict(
+    normalizedAuthorTokens(left),
+    normalizedAuthorTokens(right),
+  );
+}
+
+function authorNamesHaveEvidenceOfMatch(left: string, right: string): boolean {
+  const leftFamily = normalizedAuthorFamilyToken(left);
+  const rightFamily = normalizedAuthorFamilyToken(right);
+  if (leftFamily !== undefined && rightFamily !== undefined) {
+    return leftFamily === rightFamily;
+  }
+  const leftTokens = normalizedAuthorTokens(left);
+  const rightTokens = normalizedAuthorTokens(right);
+  return [...leftTokens].some((token) => rightTokens.has(token));
+}
+
+function authorTokensClearlyConflict(
+  left: ReadonlySet<string>,
+  right: ReadonlySet<string>,
+): boolean {
+  return (
+    left.size > 0 &&
+    right.size > 0 &&
+    ![...left].some((token) => right.has(token))
   );
 }

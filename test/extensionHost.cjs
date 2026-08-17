@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { createHash } = require("node:crypto");
+const { createServer } = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const vscode = require("vscode");
@@ -467,6 +468,102 @@ function completionDocumentationText(item) {
     : item.documentation?.value ?? "";
 }
 
+function findZoteroCitationCompletion(items, citationKey) {
+  return items.find(
+    (item) =>
+      typeof item.label === "object" &&
+      item.label.description === "Zotero" &&
+      item.kind === vscode.CompletionItemKind.Reference &&
+      completionDocumentationText(item).includes(
+        `**Citation key：** \`${citationKey}\``,
+      ),
+  );
+}
+
+async function startZoteroRpcFixture() {
+  let exportCalls = 0;
+  const reference = {
+    title: "Snapshot Identity Regression",
+    author: [{ given: "Stable", family: "Author" }],
+    "container-title": "Fixture Journal",
+    issued: { "date-parts": [[2026]] },
+    DOI: "10.5555/snapshot.2026",
+    citekey: "Snapshot2026",
+  };
+  const duplicateReferences = [
+    {
+      title: "First Duplicate Key Record",
+      author: [{ given: "First", family: "Author" }],
+      issued: { "date-parts": [[2025]] },
+      citekey: "Duplicate2025",
+    },
+    {
+      title: "Second Duplicate Key Record",
+      author: [{ given: "Second", family: "Author" }],
+      issued: { "date-parts": [[2024]] },
+      citekey: "Duplicate2025",
+    },
+  ];
+  const server = createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        let result;
+        switch (body.method) {
+          case "api.ready":
+            result = { zotero: "8.0-test", betterbibtex: "9.0-test" };
+            break;
+          case "user.groups":
+            result = [{ id: 1, name: "My Library" }];
+            break;
+          case "item.search":
+            result = [reference, ...duplicateReferences];
+            break;
+          case "item.export":
+            exportCalls += 1;
+            result = [
+              "@article{Snapshot2026,",
+              "  title = {Snapshot Identity Regression},",
+              "  author = {Stable Author},",
+              "  year = {2026}",
+              "}",
+              "",
+            ].join("\n");
+            break;
+          default:
+            throw new Error(`unexpected Better BibTeX method ${body.method}`);
+        }
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result,
+        }));
+      } catch (error) {
+        response.writeHead(500, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: String(error) }));
+      }
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return {
+    port: address.port,
+    get exportCalls() {
+      return exportCalls;
+    },
+    close: () => new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    }),
+  };
+}
+
 function findTeXLeafSnippetCompletion(items, trigger) {
   return items.find(
     (item) =>
@@ -497,7 +594,7 @@ async function assertTemplateExpansion(editor, trigger, expectedClass) {
   const expanded = editor.document.getText();
   assert.match(expanded, /\\begin\{document\}/u, trigger);
   assert.match(expanded, /\\end\{document\}/u, trigger);
-  if (trigger.startsWith("tmpa-")) {
+  if (trigger === "article-cn" || trigger === "article-en") {
     assert.match(expanded, /\\bibliographystyle\{alpha\}/u, trigger);
     assert.doesNotMatch(expanded, /\\bibliographystyle\{plain\}/u, trigger);
   }
@@ -1048,6 +1145,11 @@ async function run() {
         `the exact snippet Tab keybinding must work while ${competingContext} is active`,
       );
     }
+    assert.equal(
+      exactSnippetTabKeybinding.when.includes("!editorHasMultipleSelections"),
+      true,
+      "an exact snippet Tab binding must not rewrite only one of multiple cursors",
+    );
     const genericTabKeybinding = tabKeybindings.find(
       (keybinding) =>
         keybinding.when.includes("texleaf.tabActionAvailable") &&
@@ -1061,6 +1163,7 @@ async function run() {
       "!suggestWidgetVisible",
       "!inlineSuggestionVisible",
       "!inSnippetMode",
+      "!editorHasMultipleSelections",
     ]) {
       assert.equal(
         genericTabKeybinding.when.includes(guardedContext),
@@ -1080,7 +1183,6 @@ async function run() {
     for (const requiredContext of [
       "texleaf.tabActionAvailable",
       "!texleaf.snippetTabActionAvailable",
-      "!texleaf.matrixActionAvailable",
       "suggestWidgetVisible",
       "suggestWidgetHasFocusedSuggestion",
       "!inlineSuggestionVisible",
@@ -1094,6 +1196,11 @@ async function run() {
         `the Suggest-aware Tabout fallback must include ${requiredContext}`,
       );
     }
+    assert.equal(
+      suggestTaboutKeybinding.when.includes("!texleaf.matrixActionAvailable"),
+      false,
+      "Suggest-visible matrix cells must still route Tab through local Tabout before column insertion",
+    );
     const snippetPlaceholderTabKeybinding =
       extension.packageJSON.contributes.keybindings.find(
         (keybinding) =>
@@ -1481,11 +1588,11 @@ async function run() {
     );
     assert.equal(
       configurationProperties["texleaf.mathPreview.placement"].default,
-      "auto",
+      "autoBelow",
     );
     assert.deepEqual(
       configurationProperties["texleaf.mathPreview.placement"].enum,
-      ["auto", "above", "below"],
+      ["autoBelow", "autoAbove", "above", "below"],
     );
     assert.equal(
       configurationProperties["texleaf.mathPreview.debounceMs"].default,
@@ -1520,12 +1627,12 @@ async function run() {
 
     await assertTemplateExpansion(
       editor,
-      "tmpa-cn",
+      "article-cn",
       "\\documentclass[UTF8,11pt,reqno]{ctexart}",
     );
     await assertTemplateExpansion(
       editor,
-      "tmpa-en",
+      "article-en",
       "\\documentclass[11pt,reqno]{article}",
     );
     await assertTemplateExpansion(
@@ -1548,9 +1655,9 @@ async function run() {
       "template automatic expansion from the document-change fallback",
     );
 
-    const whitespaceTemplateSource = "\n  tmpa-en \n";
+    const whitespaceTemplateSource = "\n  article-en \n";
     const whitespaceTemplateCursor =
-      whitespaceTemplateSource.indexOf("tmpa-en") + "tmpa-en".length;
+      whitespaceTemplateSource.indexOf("article-en") + "article-en".length;
     await replaceDocument(
       editor,
       whitespaceTemplateSource,
@@ -1568,9 +1675,9 @@ async function run() {
       "template expansion must not leave leading blank lines from the empty document",
     );
 
-    await replaceDocument(editor, "tmpa-en", "tmpa-en".length);
+    await replaceDocument(editor, "article-en", "article-en".length);
     editor.selections = [
-      new vscode.Selection(0, "tmpa-en".length, 0, "tmpa-en".length),
+      new vscode.Selection(0, "article-en".length, 0, "article-en".length),
       new vscode.Selection(0, 0, 0, 0),
     ];
     await vscode.commands.executeCommand("texleaf.handleTab");
@@ -1580,9 +1687,9 @@ async function run() {
       "a whole-document template must not expand with multiple cursors",
     );
 
-    await replaceDocument(editor, "tmpa-e", "tmpa-e".length);
+    await replaceDocument(editor, "article-e", "article-e".length);
     editor.selections = [
-      new vscode.Selection(0, "tmpa-e".length, 0, "tmpa-e".length),
+      new vscode.Selection(0, "article-e".length, 0, "article-e".length),
       new vscode.Selection(0, 0, 0, 0),
     ];
     await vscode.commands.executeCommand("type", { text: "n" });
@@ -1594,14 +1701,14 @@ async function run() {
     );
 
     await replaceDocument(editor, "已有正文 ", "已有正文 ".length);
-    await typeEach("tmpa-en");
+    await typeEach("article-en");
     await new Promise((resolve) => setTimeout(resolve, 150));
     assert.equal(
       document.getText(),
-      "已有正文 tmpa-en",
+      "已有正文 article-en",
       "an automatic document template must not expand into a non-blank TeX file",
     );
-    await replaceDocument(editor, "已有正文 tmpa-en", "已有正文 tmpa-en".length);
+    await replaceDocument(editor, "已有正文 article-en", "已有正文 article-en".length);
     await vscode.commands.executeCommand("texleaf.handleTab");
     assert.doesNotMatch(
       document.getText(),
@@ -1617,7 +1724,7 @@ async function run() {
     );
 
     await replaceDocument(editor, "", 0);
-    await typeEach("tmpa-en");
+    await typeEach("article-en");
     await waitFor(
       () =>
         document
@@ -1741,6 +1848,113 @@ async function run() {
       document.getText(),
       nestedEnlargedSumText,
       "Tabout after nested auto-enlarge must preserve the outer snippet text",
+    );
+
+    const autoEnlargeNewline =
+      document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n";
+    const alignCrossRowSource = [
+      String.raw`\begin{align*}`,
+      String.raw`  & (\Phi_{1,1}(z_1) \\ `,
+      String.raw`  & -2z(\Phi_{1,2}(z_2)-1))`,
+      String.raw`\end{align*}`,
+    ].join(autoEnlargeNewline);
+    const alignCrossRowCursor = alignCrossRowSource.indexOf(
+      autoEnlargeNewline,
+      alignCrossRowSource.indexOf(autoEnlargeNewline) + autoEnlargeNewline.length,
+    );
+    await replaceDocument(editor, alignCrossRowSource, alignCrossRowCursor);
+    await typeEach("sum", editor);
+    const alignCrossRowExpected =
+      `${alignCrossRowSource.slice(0, alignCrossRowCursor)}\\sum` +
+      alignCrossRowSource.slice(alignCrossRowCursor);
+    await waitFor(
+      () => document.getText() === alignCrossRowExpected,
+      "sum expansion after an align row boundary without cross-row bracket enlargement",
+    );
+    assert.equal(
+      document.getText().includes(String.raw`\left(`),
+      false,
+      "sum must not turn a delimiter spanning two align rows into \\left/\\right",
+    );
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      alignCrossRowCursor + String.raw`\sum`.length,
+      "sum after an align row boundary must leave the caret immediately after \\sum",
+    );
+    await typeEach("+", editor);
+    assert.equal(
+      document.getText(),
+      `${alignCrossRowSource.slice(0, alignCrossRowCursor)}\\sum+` +
+        alignCrossRowSource.slice(alignCrossRowCursor),
+      "typing after the guarded align-row sum must continue at its original cell boundary",
+    );
+
+    const alignSameCellSource = [
+      String.raw`\begin{align*}`,
+      String.raw`  & () \\`,
+      String.raw`  & y`,
+      String.raw`\end{align*}`,
+    ].join(autoEnlargeNewline);
+    const alignSameCellCursor = alignSameCellSource.indexOf(")");
+    await replaceDocument(editor, alignSameCellSource, alignSameCellCursor);
+    await typeEach("sum", editor);
+    const alignSameCellExpected = alignSameCellSource.replace(
+      "()",
+      String.raw`\left(\sum\right)`,
+    );
+    await waitFor(
+      () => document.getText() === alignSameCellExpected,
+      "same-cell sum automatic bracket enlargement inside align",
+    );
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      document.getText().indexOf(String.raw`\right)`),
+      "same-cell align enlargement must retain the caret before its generated right delimiter",
+    );
+
+    const alignPhysicalNewlineSource = [
+      String.raw`\begin{align*}`,
+      String.raw`  & (`,
+      "      a + ",
+      String.raw`        )`,
+      String.raw`\end{align*}`,
+    ].join(autoEnlargeNewline);
+    const alignPhysicalNewlineOpenLineEnd = alignPhysicalNewlineSource.indexOf(
+      autoEnlargeNewline,
+      alignPhysicalNewlineSource.indexOf(autoEnlargeNewline) +
+        autoEnlargeNewline.length,
+    );
+    const alignPhysicalNewlineCursor = alignPhysicalNewlineSource.indexOf(
+      autoEnlargeNewline,
+      alignPhysicalNewlineOpenLineEnd + autoEnlargeNewline.length,
+    );
+    await replaceDocument(
+      editor,
+      alignPhysicalNewlineSource,
+      alignPhysicalNewlineCursor,
+    );
+    await typeEach("sum", editor);
+    const alignPhysicalNewlineExpected = alignPhysicalNewlineSource
+      .replace("  & (", String.raw`  & \left(`)
+      .replace("      a + ", String.raw`      a + \sum`)
+      .replace("        )", String.raw`        \right)`);
+    await waitFor(
+      () => document.getText() === alignPhysicalNewlineExpected,
+      "same-cell multi-line bracket enlargement with verbatim indentation",
+    );
+    const alignPhysicalNewlineSumEnd =
+      alignPhysicalNewlineExpected.indexOf(String.raw`\sum`) +
+      String.raw`\sum`.length;
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      alignPhysicalNewlineSumEnd,
+      "same-cell multi-line enlargement must restore the caret immediately after \\sum",
+    );
+    assert.equal(
+      alignPhysicalNewlineSumEnd <
+        alignPhysicalNewlineExpected.indexOf(String.raw`\right)`),
+      true,
+      "same-cell multi-line enlargement must keep the caret before the generated right delimiter",
     );
 
     const taboutSuggestSource = "$+)$";
@@ -1877,8 +2091,8 @@ async function run() {
         "autoSnippets=false configuration",
       );
       for (const trigger of [
-        "tmpa-cn",
-        "tmpa-en",
+        "article-cn",
+        "article-en",
         "beamer-cn",
         "beamer-en",
       ]) {
@@ -1893,7 +2107,7 @@ async function run() {
       }
 
       await replaceDocument(editor, "", 0);
-      await typeEach("tmpa-en");
+      await typeEach("article-en");
       await vscode.commands.executeCommand("editor.action.triggerSuggest");
       await new Promise((resolve) => setTimeout(resolve, 100));
       await vscode.commands.executeCommand("texleaf.handleTab");
@@ -1922,7 +2136,7 @@ async function run() {
       );
 
       await replaceDocument(editor, "", 0);
-      await typeEach("tmpa-en");
+      await typeEach("article-en");
       await vscode.commands.executeCommand("texleaf.handleTab");
       await waitFor(
         () =>
@@ -2072,6 +2286,188 @@ async function run() {
         "a partial trigger must retain TeXLeaf priority/order without the exact-match bucket",
       );
 
+      const exactSuffixFixtureBefore = await vscode.workspace.fs.readFile(
+        expectedNewPublisherSnippetUri,
+      );
+      const exactSuffixLibrary = parseJsonc(
+        new TextDecoder().decode(exactSuffixFixtureBefore),
+      );
+      exactSuffixLibrary.snippets.push(
+        {
+          id: "extension-host-exact-suffix-ab",
+          trigger: "ab",
+          replacement: "\\operatorname{ExactAB}",
+          options: "m",
+          priority: 10,
+          description: "Exact suffix completion regression",
+        },
+        {
+          id: "extension-host-longer-prefix-xabx",
+          trigger: "xabx",
+          replacement: "\\operatorname{PartialXABX}",
+          options: "m",
+          description: "Longer partial completion regression",
+        },
+      );
+      await vscode.workspace.fs.writeFile(
+        expectedNewPublisherSnippetUri,
+        new TextEncoder().encode(`${JSON.stringify(exactSuffixLibrary, null, 2)}\n`),
+      );
+      try {
+        await replaceDocument(editor, "$xab$", 4);
+        let exactSuffixList;
+        await waitFor(async () => {
+          const current = await provideCompletionList(document, 4);
+          if (
+            findTeXLeafSnippetCompletion(current.items, "ab") !== undefined &&
+            findTeXLeafSnippetCompletion(current.items, "xabx") !== undefined
+          ) {
+            exactSuffixList = current;
+            return true;
+          }
+          return false;
+        }, "completion reload with exact-suffix regression fixtures");
+        assert.ok(exactSuffixList);
+        const exactSuffixItem = findTeXLeafSnippetCompletion(
+          exactSuffixList.items,
+          "ab",
+        );
+        const longerPartialItem = findTeXLeafSnippetCompletion(
+          exactSuffixList.items,
+          "xabx",
+        );
+        assert.ok(
+          exactSuffixItem,
+          "a shorter exact suffix must survive the global longest-prefix filter",
+        );
+        assert.ok(
+          longerPartialItem,
+          "the globally longest partial candidate must remain beside the shorter exact suffix",
+        );
+        assert.equal(
+          exactSuffixItem.kind,
+          vscode.CompletionItemKind.Keyword,
+          "the preserved shorter exact suffix must retain Keyword ranking",
+        );
+        assert.equal(
+          exactSuffixItem.preselect,
+          true,
+          "the preserved shorter exact suffix must remain preselected",
+        );
+        assert.match(
+          exactSuffixItem.sortText ?? "",
+          /^0000000:/u,
+          "the preserved shorter exact suffix must retain the exact-only sort key",
+        );
+        assert.equal(
+          longerPartialItem.kind,
+          vscode.CompletionItemKind.Snippet,
+          "the longer partial candidate must retain ordinary Snippet ranking",
+        );
+
+        exactSuffixLibrary.snippets.push({
+          id: "extension-host-regex-shadow-ab",
+          trigger: "ab",
+          replacement: "\\operatorname{RegexShadowAB}",
+          options: "rm",
+          priority: 100,
+          description: "Higher-priority regex exact-match shadow",
+        });
+        await vscode.workspace.fs.writeFile(
+          expectedNewPublisherSnippetUri,
+          new TextEncoder().encode(
+            `${JSON.stringify(exactSuffixLibrary, null, 2)}\n`,
+          ),
+        );
+        let regexShadowList;
+        await waitFor(async () => {
+          const current = await provideCompletionList(document, 4);
+          const shadowedLiteral = findTeXLeafSnippetCompletion(
+            current.items,
+            "ab",
+          );
+          if (
+            shadowedLiteral?.kind === vscode.CompletionItemKind.Snippet &&
+            shadowedLiteral.preselect !== true &&
+            findTeXLeafSnippetCompletion(current.items, "xabx") !== undefined
+          ) {
+            regexShadowList = current;
+            return true;
+          }
+          return false;
+        }, "completion reload with higher-priority regex shadow fixture");
+        assert.ok(regexShadowList);
+        const regexShadowedLiteral = findTeXLeafSnippetCompletion(
+          regexShadowList.items,
+          "ab",
+        );
+        const regexShadowLongerPartial = findTeXLeafSnippetCompletion(
+          regexShadowList.items,
+          "xabx",
+        );
+        assert.ok(
+          regexShadowedLiteral,
+          "a complete literal must survive longest-prefix filtering when a regex wins matchAt",
+        );
+        assert.ok(
+          regexShadowLongerPartial,
+          "the globally longest partial must remain when a regex shadows the complete literal",
+        );
+        assert.equal(
+          regexShadowedLiteral.kind,
+          vscode.CompletionItemKind.Snippet,
+          "a regex-shadowed complete literal may remain an ordinary Snippet candidate",
+        );
+        assert.notEqual(
+          regexShadowedLiteral.preselect,
+          true,
+          "a regex-shadowed literal must not claim exact-trigger preselection",
+        );
+        assert.equal(
+          typeof regexShadowedLiteral.sortText === "string" &&
+            !regexShadowedLiteral.sortText.startsWith("0000000:"),
+          true,
+          "a regex-shadowed literal must not claim the exact-only sort bucket",
+        );
+      } finally {
+        await vscode.workspace.fs.writeFile(
+          expectedNewPublisherSnippetUri,
+          exactSuffixFixtureBefore,
+        );
+        await waitFor(async () => {
+          const current = await provideCompletionList(document, 4);
+          return (
+            findTeXLeafSnippetCompletion(current.items, "ab") === undefined &&
+            findTeXLeafSnippetCompletion(current.items, "xabx") === undefined
+          );
+        }, "restored global completion fixture after exact-suffix regression");
+      }
+
+      await replaceDocument(editor, "$xx$", 3);
+      const longestPrefixList = await provideCompletionList(document, 3);
+      const longestPrefixTeXLeafItems = longestPrefixList.items.filter((item) =>
+        completionDocumentationText(item).includes("触发器：`")
+      );
+      assert.ok(
+        findTeXLeafSnippetCompletion(longestPrefixTeXLeafItems, "xx"),
+        "the globally longest two-character prefix must retain its candidate",
+      );
+      assert.equal(
+        findTeXLeafSnippetCompletion(longestPrefixTeXLeafItems, "xnn"),
+        undefined,
+        "a one-character suffix match must not mix into a two-character prefix group",
+      );
+      assert.equal(
+        findTeXLeafSnippetCompletion(longestPrefixTeXLeafItems, "xp1"),
+        undefined,
+        "all shorter nonzero prefix groups must be removed together",
+      );
+      assert.deepEqual(
+        longestPrefixTeXLeafItems.map((item) => item.label),
+        ["xx"],
+        "TeXLeaf Suggest must expose only the globally longest applicable prefix group",
+      );
+
       const suggestCompetition = "theorem document\n\\thm";
       await replaceDocument(
         editor,
@@ -2121,8 +2517,8 @@ async function run() {
     );
     assert.equal(
       citationConfiguration.get("mathPreview.placement"),
-      "auto",
-      "the effective Math Preview placement must default to auto",
+      "autoBelow",
+      "the effective Math Preview placement must default to autoBelow",
     );
     const citationSettingNames = [
       "autoShowCitationPicker",
@@ -2165,6 +2561,41 @@ async function run() {
       "  year = {1936}",
       "}",
       "",
+      "@book{Chatelet1740Energy,",
+      "  title = {Foundations of Energy},",
+      "  author = {Émilie du Châtelet},",
+      "  publisher = {Académie Press},",
+      "  year = {1740},",
+      "  doi = {10.1234/Energy.1740},",
+      "  isbn = {978-0-12-345678-9}",
+      "}",
+      "",
+      "@article{Rank:2024,",
+      "  title = {Unrelated Exact Key Candidate},",
+      "  author = {Exact Author},",
+      "  year = {2024}",
+      "}",
+      "",
+      "@article{Rank-2024,",
+      "  title = {Earlier Compact Key Candidate},",
+      "  author = {Compact Author},",
+      "  year = {2024}",
+      "}",
+      "",
+      "@article{Rank:2024Supplement,",
+      "  title = {Earlier Prefix Key Candidate},",
+      "  author = {Prefix Author},",
+      "  year = {2024}",
+      "}",
+      "",
+      ...Array.from({ length: 105 }, (_, index) => [
+        `@article{BulkTail${String(index).padStart(3, "0")},`,
+        `  title = {Synthetic Reference ${String(index).padStart(3, "0")}},`,
+        "  author = {Capacity Fixture},",
+        "  year = {2026}",
+        "}",
+        "",
+      ].join("\n")),
     ].join("\n");
     const customBibliography = [
       "@book{Custom2026,",
@@ -2394,6 +2825,17 @@ async function run() {
         "citation completions must be recomputed while the user continues typing a title or author query",
       );
       const emptyCitationItems = emptyCitationCompletionList.items;
+      const emptyReferenceBibItems = emptyCitationItems.filter(
+        (item) =>
+          typeof item.label === "object" &&
+          item.label.description === "reference.bib" &&
+          item.kind === vscode.CompletionItemKind.Reference,
+      );
+      assert.equal(
+        emptyReferenceBibItems.length,
+        100,
+        "TeXLeaf must cap its ranked citation completion list at 100 items",
+      );
       const lovelaceCompletion = findCitationCompletion(
         emptyCitationItems,
         "reference.bib",
@@ -2526,6 +2968,107 @@ async function run() {
         "citation keys must remain searchable without appearing in the left label",
       );
 
+      const multiFieldQuerySource = "\\cite{emilie 1740 foundations}";
+      const multiFieldQueryCursor = multiFieldQuerySource.indexOf("}");
+      await replaceDocument(editor, multiFieldQuerySource, multiFieldQueryCursor);
+      const multiFieldQueryItems = await provideCompletions(
+        document,
+        multiFieldQueryCursor,
+      );
+      assert.ok(
+        findCitationCompletion(
+          multiFieldQueryItems,
+          "reference.bib",
+          "Chatelet1740Energy",
+        ),
+        "citation search terms must combine author, year, and title fields with AND semantics",
+      );
+
+      const doiQuerySource = "\\cite{10.1234/energy.1740}";
+      const doiQueryCursor = doiQuerySource.indexOf("}");
+      await replaceDocument(editor, doiQuerySource, doiQueryCursor);
+      const doiQueryItems = await provideCompletions(
+        document,
+        doiQueryCursor,
+      );
+      const doiCompletion = findCitationCompletion(
+        doiQueryItems,
+        "reference.bib",
+        "Chatelet1740Energy",
+      );
+      assert.ok(doiCompletion, "an exact DOI must find its bibliography entry");
+      assert.equal(
+        doiCompletion.preselect,
+        true,
+        "a unique exact DOI match must be preselected",
+      );
+
+      const isbnQuerySource = "\\cite{9780123456789}";
+      const isbnQueryCursor = isbnQuerySource.indexOf("}");
+      await replaceDocument(editor, isbnQuerySource, isbnQueryCursor);
+      const isbnQueryItems = await provideCompletions(
+        document,
+        isbnQueryCursor,
+      );
+      const isbnCompletion = findCitationCompletion(
+        isbnQueryItems,
+        "reference.bib",
+        "Chatelet1740Energy",
+      );
+      assert.ok(isbnCompletion, "a compact exact ISBN must find its bibliography entry");
+      assert.equal(
+        isbnCompletion.preselect,
+        true,
+        "a unique exact ISBN match must be preselected",
+      );
+
+      const rankedKeyQuerySource = "\\cite{Rank:2024}";
+      const rankedKeyQueryCursor = rankedKeyQuerySource.indexOf("}");
+      await replaceDocument(editor, rankedKeyQuerySource, rankedKeyQueryCursor);
+      const rankedKeyQueryItems = await provideCompletions(
+        document,
+        rankedKeyQueryCursor,
+      );
+      const exactRankedKey = findCitationCompletion(
+        rankedKeyQueryItems,
+        "reference.bib",
+        "Rank:2024",
+      );
+      const compactRankedKey = findCitationCompletion(
+        rankedKeyQueryItems,
+        "reference.bib",
+        "Rank-2024",
+      );
+      const prefixRankedKey = findCitationCompletion(
+        rankedKeyQueryItems,
+        "reference.bib",
+        "Rank:2024Supplement",
+      );
+      assert.ok(exactRankedKey && compactRankedKey && prefixRankedKey);
+      assert.equal(exactRankedKey.preselect, true);
+      assert.equal(
+        exactRankedKey.sortText < compactRankedKey.sortText &&
+          exactRankedKey.sortText < prefixRankedKey.sortText,
+        true,
+        "an exact punctuation-preserving citation key must outrank compact and prefix matches",
+      );
+
+      const beyondEmptyCapSource = "\\cite{BulkTail104}";
+      const beyondEmptyCapCursor = beyondEmptyCapSource.indexOf("}");
+      await replaceDocument(editor, beyondEmptyCapSource, beyondEmptyCapCursor);
+      const beyondEmptyCapItems = await provideCompletions(
+        document,
+        beyondEmptyCapCursor,
+      );
+      assert.ok(
+        findCitationCompletion(
+          beyondEmptyCapItems,
+          "reference.bib",
+          "BulkTail104",
+        ),
+        "ranking must happen before the UI cap so an exact key outside the empty-query top 100 can surface",
+      );
+
       await citationConfiguration.update(
         "autoShowCitationPicker",
         true,
@@ -2631,6 +3174,110 @@ async function run() {
         undefined,
         "a key already used by a sibling segment must not be suggested again",
       );
+
+      const zoteroRpcFixture = await startZoteroRpcFixture();
+      try {
+        await citationConfiguration.update(
+          "zoteroPort",
+          zoteroRpcFixture.port,
+          vscode.ConfigurationTarget.WorkspaceFolder,
+        );
+        const snapshotCitationSource = "\\cite{Snapshot}";
+        const snapshotCitationCursor = snapshotCitationSource.indexOf("}");
+        await replaceDocument(
+          editor,
+          snapshotCitationSource,
+          snapshotCitationCursor,
+        );
+        let staleCompletion;
+        await waitFor(async () => {
+          const items = await provideCompletions(
+            document,
+            snapshotCitationCursor,
+          );
+          staleCompletion = findZoteroCitationCompletion(items, "Snapshot2026");
+          return staleCompletion !== undefined;
+        }, "the mock Zotero snapshot to populate native citation completion", 8_000);
+        assert.ok(staleCompletion?.command);
+        const staleArgument = staleCompletion.command.arguments?.[0];
+        assert.equal(typeof staleArgument?.snapshotId, "string");
+        assert.notEqual(staleArgument.snapshotId.length, 0);
+        assert.equal(
+          staleArgument.bibliographyUri,
+          referenceBibUri.toString(),
+          "a Zotero completion must bind the exact bibliography target resolved when it was created",
+        );
+
+        const duplicateCitationSource = "\\cite{Duplicate}";
+        const duplicateCitationCursor = duplicateCitationSource.indexOf("}");
+        await replaceDocument(
+          editor,
+          duplicateCitationSource,
+          duplicateCitationCursor,
+        );
+        const duplicateCitationItems = await provideCompletions(
+          document,
+          duplicateCitationCursor,
+        );
+        assert.equal(
+          findZoteroCitationCompletion(duplicateCitationItems, "Duplicate2025"),
+          undefined,
+          "every Zotero record in a duplicate citekey group must be excluded",
+        );
+
+        await replaceDocument(
+          editor,
+          snapshotCitationSource,
+          snapshotCitationCursor,
+        );
+        await vscode.commands.executeCommand("texleaf.refreshZotero");
+        const refreshedItems = await provideCompletions(
+          document,
+          snapshotCitationCursor,
+        );
+        const refreshedCompletion = findZoteroCitationCompletion(
+          refreshedItems,
+          "Snapshot2026",
+        );
+        assert.ok(refreshedCompletion?.command);
+        const refreshedArgument = refreshedCompletion.command.arguments?.[0];
+        assert.equal(typeof refreshedArgument?.snapshotId, "string");
+        assert.equal(
+          refreshedArgument?.bibliographyUri,
+          referenceBibUri.toString(),
+        );
+        assert.notEqual(
+          refreshedArgument.snapshotId,
+          staleArgument.snapshotId,
+          "a forced Zotero refresh must mint a new snapshot identity",
+        );
+
+        const citationBeforeStaleCommit = document.getText();
+        const bibliographyBeforeStaleCommit = await vscode.workspace.fs.readFile(
+          referenceBibUri,
+        );
+        await vscode.commands.executeCommand(
+          staleCompletion.command.command,
+          ...(staleCompletion.command.arguments ?? []),
+        );
+        assert.equal(
+          document.getText(),
+          citationBeforeStaleCommit,
+          "an accepted completion from a stale Zotero snapshot must not edit the citation",
+        );
+        assert.deepEqual(
+          await vscode.workspace.fs.readFile(referenceBibUri),
+          bibliographyBeforeStaleCommit,
+          "an accepted completion from a stale Zotero snapshot must not edit bibliography",
+        );
+        assert.equal(
+          zoteroRpcFixture.exportCalls,
+          0,
+          "stale Zotero completion rejection must happen before item.export",
+        );
+      } finally {
+        await zoteroRpcFixture.close();
+      }
 
       await citationConfiguration.update(
         "bibliographyFile",
@@ -3345,6 +3992,116 @@ async function run() {
   );
   assert.equal(document.offsetAt(editor.selection.active), 12);
 
+  await setDocumentEndOfLine(editor, vscode.EndOfLine.LF);
+  const squareInDenominatorSource = [
+    String.raw`\begin{align*}`,
+    String.raw`  & \frac{1}{}`,
+    String.raw`\end{align*}`,
+  ].join("\n");
+  const squareInDenominatorCursor =
+    squareInDenominatorSource.indexOf("{}") + 1;
+  await replaceDocument(
+    editor,
+    squareInDenominatorSource,
+    squareInDenominatorCursor,
+  );
+  await typeEach("nsr", editor);
+  const squareInDenominatorExpected = squareInDenominatorSource.replace(
+    "{}",
+    "{n^{2}}",
+  );
+  await waitFor(
+    () => document.getText() === squareInDenominatorExpected,
+    "physical nsr square expansion inside an align denominator",
+  );
+  const squareInDenominatorInnerCaret =
+    squareInDenominatorExpected.indexOf("n^{2}") + "n^{2}".length;
+  assert.equal(
+    document.offsetAt(editor.selection.active),
+    squareInDenominatorInnerCaret,
+    "nsr must finish after its exponent brace and before the enclosing denominator brace",
+  );
+  await vscode.commands.executeCommand("texleaf.handleSuggestTabout");
+  assert.equal(
+    document.getText(),
+    squareInDenominatorExpected,
+    "the first matrix Tab after nsr must not insert an alignment cell",
+  );
+  assert.equal(
+    document.offsetAt(editor.selection.active),
+    squareInDenominatorInnerCaret + 1,
+    "the first matrix Tab after nsr must leave the enclosing denominator brace",
+  );
+  await vscode.commands.executeCommand("texleaf.handleTab");
+  await waitFor(
+    () =>
+      document.getText() ===
+      `${squareInDenominatorExpected.slice(0, squareInDenominatorInnerCaret + 1)} & ` +
+        squareInDenominatorExpected.slice(squareInDenominatorInnerCaret + 1),
+    "matrix column insertion after all local closers are exhausted",
+  );
+
+  const handwrittenCloserSource = [
+    String.raw`\begin{align*}`,
+    String.raw`  & \frac{1}{n^{2}}`,
+    String.raw`\end{align*}`,
+  ].join("\n");
+  const handwrittenCloserCursor =
+    handwrittenCloserSource.indexOf("n^{2}") + "n^{2}".length;
+  await replaceDocument(editor, handwrittenCloserSource, handwrittenCloserCursor);
+  await vscode.commands.executeCommand("texleaf.handleTab");
+  assert.equal(
+    document.getText(),
+    handwrittenCloserSource,
+    "handwritten braces must receive the same Tabout-before-matrix behavior",
+  );
+  assert.equal(
+    document.offsetAt(editor.selection.active),
+    handwrittenCloserCursor + 1,
+    "Tabout must cross the handwritten denominator closer",
+  );
+
+  const blankCellSource = [
+    String.raw`\begin{align*}`,
+    "  & ",
+    String.raw`\end{align*}`,
+  ].join("\n");
+  const blankCellCursor = blankCellSource.indexOf("\n", blankCellSource.indexOf("\n") + 1);
+  await replaceDocument(editor, blankCellSource, blankCellCursor);
+  await vscode.commands.executeCommand("texleaf.handleTab");
+  await waitFor(
+    () => document.lineAt(1).text === "  &  & ",
+    "matrix column insertion from an existing blank cell",
+  );
+
+  const multiCursorMatrixSource = [
+    String.raw`\begin{align*}`,
+    "  x",
+    "  y",
+    String.raw`\end{align*}`,
+  ].join("\n");
+  await replaceDocument(
+    editor,
+    multiCursorMatrixSource,
+    multiCursorMatrixSource.indexOf("x") + 1,
+  );
+  const firstMatrixCursor = document.positionAt(
+    multiCursorMatrixSource.indexOf("x") + 1,
+  );
+  const secondMatrixCursor = document.positionAt(
+    multiCursorMatrixSource.indexOf("y") + 1,
+  );
+  editor.selections = [
+    new vscode.Selection(firstMatrixCursor, firstMatrixCursor),
+    new vscode.Selection(secondMatrixCursor, secondMatrixCursor),
+  ];
+  await vscode.commands.executeCommand("texleaf.handleTab");
+  assert.equal(
+    document.getText().includes("x & ") || document.getText().includes("y & "),
+    false,
+    "multiple cursors must fall back to native Tab instead of inserting one TeXLeaf matrix cell",
+  );
+
   await assertMatrixShortcuts(editor, "align", vscode.EndOfLine.LF);
   await assertMatrixShortcuts(
     editor,
@@ -3528,11 +4285,11 @@ async function run() {
       ".bib files must support TeXLeaf snippets case-insensitively",
     );
     await replaceDocument(bib.editor, "", 0);
-    await typeEach("tmpa-en");
+    await typeEach("article-en");
     await new Promise((resolve) => setTimeout(resolve, 150));
     assert.equal(
       bib.document.getText(),
-      "tmpa-en",
+      "article-en",
       "automatic document templates must not expand in a .bib file",
     );
     await vscode.commands.executeCommand("texleaf.handleTab");
@@ -3595,11 +4352,11 @@ async function run() {
       "an untitled LaTeX editor must not run TeXLeaf snippets",
     );
     await replaceDocument(untitledEditor, "", 0);
-    await typeEach("tmpa-en");
+    await typeEach("article-en");
     await new Promise((resolve) => setTimeout(resolve, 150));
     assert.equal(
       untitledDocument.getText(),
-      "tmpa-en",
+      "article-en",
       "an untitled LaTeX editor must not run document templates",
     );
     assertNoAiDiagnostics(
@@ -4356,7 +5113,7 @@ async function run() {
     );
 
     console.log(
-      "Extension-host smoke test passed: grouped native settings, default-off and persisted AI writing gates/clear/reopen, collapsed-cursor Quick Fix and safe Hover apply, worker-backed Math Preview/toggle/safe SVG, native citation completion/filtering/ranges/configuration, complete global factory seeding, one-time migration/backup, no hidden built-ins, watcher reload/LKG, dirty import/export/restore guards, Qhat/IME, per-root extras, .tex/.bib scope, fractions, LF/CRLF align shortcuts, and safe left/right Enter splitting work.",
+      "Extension-host smoke test passed: grouped native settings, default-off and persisted AI writing gates/clear/reopen, collapsed-cursor Quick Fix and safe Hover apply, worker-backed Math Preview/toggle/safe SVG, ranked/capped native citation completion with stale-snapshot and duplicate-key guards, complete global factory seeding, one-time migration/backup, no hidden built-ins, watcher reload/LKG, dirty import/export/restore guards, Qhat/IME, per-root extras, .tex/.bib scope, fractions, LF/CRLF align shortcuts, and safe left/right Enter splitting work.",
     );
   } finally {
     if (rootAConfiguration !== undefined) {

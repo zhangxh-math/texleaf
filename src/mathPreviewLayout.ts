@@ -1,5 +1,9 @@
-export type MathPreviewPlacement = "auto" | "above" | "below";
-export type MathPreviewSide = Exclude<MathPreviewPlacement, "auto">;
+export type MathPreviewPlacement =
+  | "autoBelow"
+  | "autoAbove"
+  | "above"
+  | "below";
+export type MathPreviewSide = "above" | "below";
 
 export interface MathPreviewLayoutPoint {
   readonly line: number;
@@ -31,6 +35,19 @@ export interface MathPreviewLayoutPlan {
   readonly requiredVisibleLines: number;
   readonly hostTextDecoration: string;
   readonly attachmentTextDecoration: string;
+}
+
+/** Normalize the public setting while preserving the pre-0.8.12 `auto`
+ * spelling as the below-first behavior. */
+export function normalizeMathPreviewPlacement(
+  value: string,
+): MathPreviewPlacement {
+  return value === "autoBelow" ||
+      value === "autoAbove" ||
+      value === "above" ||
+      value === "below"
+    ? value
+    : "autoBelow";
 }
 
 const PREVIEW_GAP_EM = 0.35;
@@ -74,10 +91,12 @@ export function planMathPreviewLayout(
   const visible = selectVisibleRange(request.visibleRanges, cursorLine);
   const requiredVisibleLines = estimateRequiredVisibleLines(request);
   if (request.mode === "inline") {
-    // Inline editing deliberately stays below the active source line. This is
-    // spatially stable while typing and matches the user's source-to-preview
-    // reading direction. Explicit above/below settings still win.
-    const side = request.placement === "auto" ? "below" : request.placement;
+    const side = chooseSide(
+      request.placement,
+      requiredVisibleLines,
+      Math.max(0, cursorLine - visible.startLine),
+      Math.max(0, visible.endLine - cursorLine),
+    );
     return {
       side,
       anchor: {
@@ -113,7 +132,7 @@ export function planMathPreviewLayout(
     visibleLinesBelow,
   );
   const bothSidesOverflow =
-    request.placement === "auto" &&
+    isAutomaticPlacement(request.placement) &&
     visibleLinesBelow < requiredVisibleLines &&
     visibleLinesAbove < requiredVisibleLines;
   const shouldPreserveFormulaTail =
@@ -212,13 +231,28 @@ function chooseSide(
   visibleLinesAbove: number,
   visibleLinesBelow: number,
 ): MathPreviewSide {
-  if (placement !== "auto") {
+  if (placement === "above" || placement === "below") {
     return placement;
+  }
+  if (placement === "autoAbove") {
+    if (visibleLinesAbove >= requiredLines) {
+      return "above";
+    }
+    if (visibleLinesBelow >= requiredLines) {
+      return "below";
+    }
+    return "above";
   }
   if (visibleLinesBelow >= requiredLines) {
     return "below";
   }
   return "above";
+}
+
+function isAutomaticPlacement(
+  placement: MathPreviewPlacement,
+): placement is "autoBelow" | "autoAbove" {
+  return placement === "autoBelow" || placement === "autoAbove";
 }
 
 function estimateRequiredVisibleLines(

@@ -1,4 +1,12 @@
 export const TEMPLATE_LIBRARY_STATE_KEY = "texleaf.templateLibrary.v1";
+/**
+ * One-time, synchronisable acknowledgement for the 1.0 article trigger rename.
+ * Keeping this outside the catalog preserves schema-v1 compatibility with old
+ * TeXLeaf versions while ensuring a user who later chooses a legacy trigger is
+ * not repeatedly migrated on every activation.
+ */
+export const ARTICLE_TEMPLATE_TRIGGER_MIGRATION_STATE_KEY =
+  "texleaf.templateTriggerMigration.articleNames.v1";
 
 export const TEMPLATE_LIBRARY_SCHEMA_VERSION = 1;
 export const MAX_MANAGED_TEMPLATES = 128;

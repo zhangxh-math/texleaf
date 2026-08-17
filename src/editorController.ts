@@ -325,6 +325,7 @@ export class EditorController implements vscode.Disposable {
 
     if (
       config.manualTrigger === "tab" &&
+      editor.selections.length === 1 &&
       editor.selection.isEmpty &&
       (await this.expandManualSnippet(editor, config, true))
     ) {
@@ -332,8 +333,13 @@ export class EditorController implements vscode.Disposable {
     }
 
     const context = this.runtime.contextAt(editor.document, editor.selection.active);
+    if (await this.tryTabout(editor, config, context)) {
+      return;
+    }
+
     if (
       config.matrixShortcuts &&
+      editor.selections.length === 1 &&
       editor.selection.isEmpty &&
       isConfiguredMatrix(context, config)
     ) {
@@ -343,10 +349,6 @@ export class EditorController implements vscode.Disposable {
           { undoStopBefore: true, undoStopAfter: true },
         ),
       );
-      return;
-    }
-
-    if (await this.tryTabout(editor, config, context)) {
       return;
     }
 
@@ -1124,6 +1126,7 @@ export class EditorController implements vscode.Disposable {
     let replacementRange = range;
     let replacementParts = parts;
     let caretOffsetInReplacement: number | undefined;
+    let preserveReplacementWhitespace = false;
     if (allowAutoEnlarge && config.autoEnlargeBrackets) {
       const enlarged = planInlineAutoEnlarge(
         editor.document,
@@ -1135,6 +1138,7 @@ export class EditorController implements vscode.Disposable {
         replacementRange = enlarged.range;
         replacementParts = enlarged.parts;
         caretOffsetInReplacement = enlarged.caretOffsetInReplacement;
+        preserveReplacementWhitespace = true;
       }
     }
     const snippet = replacementPartsToSnippetString(replacementParts);
@@ -1149,10 +1153,11 @@ export class EditorController implements vscode.Disposable {
       const inserted = await editor.insertSnippet(snippet, replacementRange, {
         undoStopBefore: true,
         undoStopAfter: true,
-        // Let VS Code re-indent every line of a multi-line snippet relative to
-        // the insertion point.  Keeping the template whitespace verbatim makes
-        // a display-math snippet typed after indentation put `\\]` in column 1.
-        keepWhitespace: false,
+        // Ordinary multi-line snippets follow the insertion indentation.
+        // Auto-enlarge instead replaces existing source around the trigger, so
+        // preserve every original newline and indent. Re-indenting that widened
+        // range would also invalidate the exact caret restoration below.
+        keepWhitespace: preserveReplacementWhitespace,
       });
       if (
         !inserted ||
@@ -1217,7 +1222,7 @@ export class EditorController implements vscode.Disposable {
     }
 
     const context = this.runtime.contextAt(editor.document, editor.selection.active);
-    const manual = editor.selection.isEmpty
+    const manual = editor.selections.length === 1 && editor.selection.isEmpty
       ? this.runtime.matchAt(
           editor.document,
           editor.selection.active,
@@ -1229,6 +1234,7 @@ export class EditorController implements vscode.Disposable {
       ? this.templates.match(editor.document, editor.selection.active)
       : undefined;
     const matrix =
+      editor.selections.length === 1 &&
       editor.selection.isEmpty &&
       config.matrixShortcuts &&
       isConfiguredMatrix(context, config);

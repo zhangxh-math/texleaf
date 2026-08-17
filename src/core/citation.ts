@@ -1051,6 +1051,13 @@ export function appendBibTeXEntry(existingText: string, rawEntry: string): strin
 
 /** Normalize search text with case, punctuation, and Unicode accents folded. */
 export function normalizeReferenceSearchText(value: string): string {
+  return foldReferenceSearchUnicode(value)
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .replace(/\s+/gu, ' ');
+}
+
+function foldReferenceSearchUnicode(value: string): string {
   return value
     .replace(/[Ææ]/gu, 'ae')
     .replace(/[Œœ]/gu, 'oe')
@@ -1058,27 +1065,166 @@ export function normalizeReferenceSearchText(value: string): string {
     .replace(/[Łł]/gu, 'l')
     .replace(/[ÐðĐđ]/gu, 'd')
     .replace(/[Þþ]/gu, 'th')
-    .replace(/ß/gu, 'ss')
+    .replace(/[ßẞ]/gu, 'ss')
     .normalize('NFKD')
     .replace(/\p{M}+/gu, '')
-    .toLocaleLowerCase('en-US')
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .trim()
-    .replace(/\s+/gu, ' ');
+    .toLocaleLowerCase('en-US');
 }
 
-export function referenceMatchesQuery(reference: CitationReference, query: string): boolean {
-  const normalizedQuery = normalizeReferenceSearchText(query);
-  if (normalizedQuery.length === 0) {
-    return true;
+export const MAX_CITATION_SEARCH_QUERY_LENGTH = 512;
+export const MAX_CITATION_SEARCH_TERMS = 32;
+
+export interface CitationSearchIdentifiers {
+  readonly doi?: string;
+  readonly isbn?: string;
+}
+
+export interface PreparedCitationSearchReference<
+  T extends CitationReference = CitationReference,
+> {
+  readonly reference: T;
+  readonly canonicalKey: string;
+  readonly compactKey: string;
+  readonly fields: readonly CitationSearchField[];
+  readonly canonicalDoi: string;
+  readonly canonicalIsbns: readonly string[];
+  readonly tieBreak: string;
+}
+
+interface CitationSearchField {
+  readonly value: string;
+  readonly words: readonly string[];
+  readonly priority: number;
+}
+
+export type CitationSearchMatchKind =
+  | 'key-exact'
+  | 'key-compact-exact'
+  | 'key-prefix'
+  | 'doi-exact'
+  | 'doi-prefix'
+  | 'isbn-exact'
+  | 'isbn-prefix'
+  | 'all-words'
+  | 'word-prefix'
+  | 'substring'
+  | 'empty';
+
+export interface CitationSearchMatch {
+  readonly kind: CitationSearchMatchKind;
+  /** Lower values are more relevant. */
+  readonly rank: number;
+  /** Lower values break ties inside the same rank. */
+  readonly quality: number;
+}
+
+export interface RankedCitationSearchReference<
+  T extends CitationReference = CitationReference,
+> {
+  readonly prepared: PreparedCitationSearchReference<T>;
+  readonly match: CitationSearchMatch;
+}
+
+interface PreparedCitationSearchQuery {
+  readonly canonicalKey: string;
+  readonly compactKey: string;
+  readonly canonicalDoi: string;
+  readonly canonicalIsbn: string;
+  readonly terms: readonly string[];
+}
+
+/** Normalize once when a bibliography or Zotero snapshot is built. */
+export function prepareCitationSearchReference<T extends CitationReference>(
+  reference: T,
+  identifiers: CitationSearchIdentifiers = {},
+): PreparedCitationSearchReference<T> {
+  const normalizedTitle = boundedSearchField(reference.title, 2_048);
+  const normalizedAuthors = boundedSearchField(reference.authors, 2_048);
+  const normalizedYear = boundedSearchField(reference.year, 64);
+  const normalizedKey = boundedSearchField(reference.key, 512);
+  const canonicalKey = normalizeCitationKeyForSearch(reference.key).slice(0, 512);
+  const canonicalDoi = normalizeCitationDoi(identifiers.doi ?? '');
+  const canonicalIsbns = normalizeCitationIsbns(identifiers.isbn ?? '');
+  const identifierFields = [canonicalDoi, ...canonicalIsbns]
+    .map((value) => boundedSearchField(value, 512))
+    .filter((value) => value.length > 0);
+  const titleTie = normalizedTitle.length > 0
+    ? `0:${normalizedTitle}`
+    : '1:';
+  return {
+    reference,
+    canonicalKey,
+    compactKey: compactReferenceSearchText(canonicalKey).slice(0, 512),
+    fields: [
+      citationSearchField(normalizedKey, 0),
+      ...identifierFields.map((value) => citationSearchField(value, 1)),
+      citationSearchField(normalizedYear, 2),
+      citationSearchField(normalizedTitle, 3),
+      citationSearchField(normalizedAuthors, 4),
+    ],
+    canonicalDoi,
+    canonicalIsbns,
+    tieBreak: [
+      titleTie,
+      normalizedYear,
+      normalizedAuthors,
+      canonicalKey,
+      reference.key,
+    ].join('\u0000'),
+  };
+}
+
+/** Match a query without renormalizing reference metadata on every keystroke. */
+export function matchPreparedCitationReference(
+  prepared: PreparedCitationSearchReference,
+  query: string,
+): CitationSearchMatch | undefined {
+  const preparedQuery = prepareCitationSearchQuery(query);
+  if (preparedQuery === undefined) {
+    return undefined;
   }
-  const haystack = normalizeReferenceSearchText([
-    reference.key,
-    reference.title,
-    reference.authors,
-    reference.year,
-  ].join(' '));
-  return normalizedQuery.split(' ').every((term) => haystack.includes(term));
+  return matchPreparedCitationSearchQuery(prepared, preparedQuery);
+}
+
+/** Rank a complete source before callers impose any UI-only result limit. */
+export function rankCitationReferences<T extends CitationReference>(
+  preparedReferences: readonly PreparedCitationSearchReference<T>[],
+  query: string,
+): readonly RankedCitationSearchReference<T>[] {
+  const preparedQuery = prepareCitationSearchQuery(query);
+  if (preparedQuery === undefined) {
+    return [];
+  }
+  const ranked: RankedCitationSearchReference<T>[] = [];
+  for (const prepared of preparedReferences) {
+    const match = matchPreparedCitationSearchQuery(prepared, preparedQuery);
+    if (match !== undefined) {
+      ranked.push({ prepared, match });
+    }
+  }
+  ranked.sort(compareRankedCitationSearchReferences);
+  return ranked;
+}
+
+export function compareCitationSearchMatches(
+  left: CitationSearchMatch,
+  right: CitationSearchMatch,
+): number {
+  return left.rank - right.rank || left.quality - right.quality;
+}
+
+export function citationSearchMatchSortText(match: CitationSearchMatch): string {
+  return `${String(match.rank).padStart(2, '0')}:${String(match.quality).padStart(6, '0')}`;
+}
+
+export function referenceMatchesQuery(
+  reference: CitationReference,
+  query: string,
+): boolean {
+  return matchPreparedCitationReference(
+    prepareCitationSearchReference(reference),
+    query,
+  ) !== undefined;
 }
 
 /** Preserve source order while filtering by key, title, author, and year. */
@@ -1095,4 +1241,222 @@ export function filterCitationReferences<T extends CitationReference>(
   query: string,
 ): readonly T[] {
   return filterReferences(references, query);
+}
+
+function prepareCitationSearchQuery(
+  query: string,
+): PreparedCitationSearchQuery | undefined {
+  if (query.length > MAX_CITATION_SEARCH_QUERY_LENGTH) {
+    return undefined;
+  }
+  const normalized = normalizeReferenceSearchText(query);
+  const terms = [...new Set(normalized.split(' ').filter((term) => term.length > 0))]
+    .sort(compareSearchStrings);
+  if (terms.length > MAX_CITATION_SEARCH_TERMS) {
+    return undefined;
+  }
+  const raw = query.trim();
+  return {
+    canonicalKey: normalizeCitationKeyForSearch(raw),
+    compactKey: compactReferenceSearchText(raw),
+    canonicalDoi: normalizeCitationDoi(raw),
+    canonicalIsbn: normalizeCitationIsbnQuery(raw),
+    terms,
+  };
+}
+
+function matchPreparedCitationSearchQuery(
+  prepared: PreparedCitationSearchReference,
+  query: PreparedCitationSearchQuery,
+): CitationSearchMatch | undefined {
+  if (query.terms.length === 0) {
+    return { kind: 'empty', rank: 99, quality: 0 };
+  }
+  if (
+    query.canonicalKey.length > 0 &&
+    query.canonicalKey === prepared.canonicalKey
+  ) {
+    return { kind: 'key-exact', rank: 0, quality: 0 };
+  }
+  if (
+    query.compactKey.length >= 2 &&
+    query.compactKey === prepared.compactKey
+  ) {
+    return { kind: 'key-compact-exact', rank: 1, quality: 0 };
+  }
+  if (
+    query.canonicalKey.length >= 2 &&
+    (prepared.canonicalKey.startsWith(query.canonicalKey) ||
+      (query.compactKey.length >= 2 && prepared.compactKey.startsWith(query.compactKey)))
+  ) {
+    const keyLength = Math.min(prepared.compactKey.length, 999);
+    return {
+      kind: 'key-prefix',
+      rank: 2,
+      quality: Math.max(0, keyLength - Math.min(query.compactKey.length, keyLength)),
+    };
+  }
+  if (
+    query.canonicalDoi.length > 0 &&
+    query.canonicalDoi === prepared.canonicalDoi
+  ) {
+    return { kind: 'doi-exact', rank: 3, quality: 0 };
+  }
+  if (
+    query.canonicalDoi.length >= 8 &&
+    prepared.canonicalDoi.startsWith(query.canonicalDoi)
+  ) {
+    return {
+      kind: 'doi-prefix',
+      rank: 4,
+      quality: Math.min(999, prepared.canonicalDoi.length - query.canonicalDoi.length),
+    };
+  }
+  if (
+    query.canonicalIsbn.length > 0 &&
+    prepared.canonicalIsbns.includes(query.canonicalIsbn)
+  ) {
+    return { kind: 'isbn-exact', rank: 5, quality: 0 };
+  }
+  if (
+    query.canonicalIsbn.length >= 6 &&
+    prepared.canonicalIsbns.some((isbn) => isbn.startsWith(query.canonicalIsbn))
+  ) {
+    return { kind: 'isbn-prefix', rank: 6, quality: 0 };
+  }
+
+  let worstClass = 0;
+  let quality = 0;
+  for (const term of query.terms) {
+    let best: { readonly matchClass: number; readonly field: number } | undefined;
+    for (const field of prepared.fields) {
+      const matchClass = citationTermMatchClass(field, term);
+      if (
+        matchClass !== undefined &&
+        (best === undefined ||
+          matchClass < best.matchClass ||
+          (matchClass === best.matchClass && field.priority < best.field))
+      ) {
+        best = { matchClass, field: field.priority };
+      }
+    }
+    if (best === undefined) {
+      return undefined;
+    }
+    worstClass = Math.max(worstClass, best.matchClass);
+    quality += best.matchClass * 10 + best.field;
+  }
+  return {
+    kind: worstClass === 0
+      ? 'all-words'
+      : worstClass === 1
+        ? 'word-prefix'
+        : 'substring',
+    rank: 7 + worstClass,
+    quality: Math.min(999_999, quality),
+  };
+}
+
+function citationTermMatchClass(
+  field: CitationSearchField,
+  term: string,
+): number | undefined {
+  if (field.value.length === 0) {
+    return undefined;
+  }
+  if (field.value === term || field.words.some((word) => word === term)) {
+    return 0;
+  }
+  if (field.words.some((word) => word.startsWith(term))) {
+    return 1;
+  }
+  if (isSingleLatinSearchTerm(term)) {
+    return undefined;
+  }
+  return field.value.includes(term) ? 2 : undefined;
+}
+
+function isSingleLatinSearchTerm(term: string): boolean {
+  return /^[a-z0-9]$/u.test(term);
+}
+
+function compareRankedCitationSearchReferences<T extends CitationReference>(
+  left: RankedCitationSearchReference<T>,
+  right: RankedCitationSearchReference<T>,
+): number {
+  return (
+    compareCitationSearchMatches(left.match, right.match) ||
+    compareSearchStrings(left.prepared.tieBreak, right.prepared.tieBreak)
+  );
+}
+
+function compareSearchStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function boundedSearchField(value: string, maximum: number): string {
+  return normalizeReferenceSearchText(value).slice(0, maximum);
+}
+
+function citationSearchField(value: string, priority: number): CitationSearchField {
+  return {
+    value,
+    words: value.length > 0 ? value.split(' ') : [],
+    priority,
+  };
+}
+
+function normalizeCitationKeyForSearch(value: string): string {
+  return foldReferenceSearchUnicode(value).trim().replace(/\s+/gu, ' ');
+}
+
+function compactReferenceSearchText(value: string): string {
+  return foldReferenceSearchUnicode(value).replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+function normalizeCitationDoi(value: string): string {
+  const normalized = foldReferenceSearchUnicode(value)
+    .trim()
+    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//u, '')
+    .replace(/^doi\s*:\s*/u, '')
+    .replace(/\s+/gu, '')
+    .replace(/[.,;]+$/u, '');
+  return /^10\.\d{4,9}\/.+/u.test(normalized)
+    ? normalized.slice(0, 512)
+    : '';
+}
+
+function normalizeCitationIsbnQuery(value: string): string {
+  const trimmed = value.trim();
+  const marked = /^isbn(?:-1[03])?\s*:/iu.test(trimmed);
+  const body = marked
+    ? trimmed.replace(/^isbn(?:-1[03])?\s*:\s*/iu, '')
+    : trimmed;
+  // Do not reinterpret an ordinary multi-field query such as
+  // "Smith 2017 2020" as one ISBN and bypass the AND-term matcher. An
+  // unlabelled ISBN prefix may use digits/X and hyphens; whitespace is only
+  // accepted after an explicit ISBN label.
+  if (
+    body.length === 0 ||
+    !(marked ? /^[0-9X\s-]+$/iu : /^[0-9X-]+$/iu).test(body)
+  ) {
+    return '';
+  }
+  const canonical = foldReferenceSearchUnicode(body)
+    .toLocaleUpperCase('en-US')
+    .replace(/[^0-9X]/gu, '');
+  return canonical.length >= 6 && canonical.length <= 13 ? canonical : '';
+}
+
+function normalizeCitationIsbns(value: string): readonly string[] {
+  const result = new Set<string>();
+  for (const part of value.split(/[,;]+/u)) {
+    const canonical = part
+      .toLocaleUpperCase('en-US')
+      .replace(/[^0-9X]/gu, '');
+    if (canonical.length === 10 || canonical.length === 13) {
+      result.add(canonical);
+    }
+  }
+  return [...result].sort(compareSearchStrings);
 }

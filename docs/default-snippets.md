@@ -17,12 +17,12 @@
 
 | Trigger | 模板 |
 | --- | --- |
-| `tmpa-cn` | 中文 `ctexart` 论文 |
-| `tmpa-en` | 英文 `article` 论文 |
+| `article-cn` | 中文 `ctexart` 论文 |
+| `article-en` | 英文 `article` 论文 |
 | `beamer-cn` | 中文 `ctexbeamer` 演示文稿 |
 | `beamer-en` | 英文 `beamer` 演示文稿 |
 
-它们只在已保存、除空白与完整 trigger 外没有其他内容的 `.tex` 文档中自动展开，并替换整份文档。`texleaf.autoSnippets` 关闭时不会自动展开；此时可在完整 trigger 后按 `Tab`。自动路径偶发未命中、原生 Suggest 已经打开时，精确 `Tab` 兜底仍优先选择 TeXLeaf 模板。按 `Ctrl+Shift+P` 运行 `TeXLeaf: 管理 TeX 模板` 可修改 trigger 和正文，或添加、复制、删除和恢复模板；保存后后续展开立即使用新内容。
+它们只在已保存、除空白与完整 trigger 外没有其他内容的 `.tex` 文档中自动展开，并替换整份文档。`texleaf.autoSnippets` 关闭时不会自动展开；此时可在完整 trigger 后按 `Tab`。自动路径偶发未命中、原生 Suggest 已经打开时，精确 `Tab` 兜底仍优先选择 TeXLeaf 模板。1.0.0 只考虑一次 article factory trigger 迁移：当前值仍是旧出厂值 `tmpa-cn` / `tmpa-en` 时分别尝试改为 `article-cn` / `article-en`，当前已经是其他值时不改。迁移 marker 会先写入；新 trigger 被占用、存在前缀冲突或提交失败时保留旧值并在 **Output → TeXLeaf** 记录原因，后续激活不再重试，用户日后主动改回旧 trigger 也不会再次迁移。按 `Ctrl+Shift+P` 运行 `TeXLeaf: 管理 TeX 模板` 可修改 trigger 和正文，或添加、复制、删除和恢复模板；保存后后续展开立即使用新内容。
 
 ## 高频数学结构
 
@@ -99,11 +99,11 @@ Visual 片段使用 `@{VISUAL}` 引用选择内容，并仍可加入 `@0` 等 ta
 
 写入全局文件的默认库覆盖常见的 matrix、pmatrix、bmatrix、cases、align 等结构。进入 `texleaf.matrixEnvironments` 列出的环境后：
 
-- `Tab` 在活动 tabstop 处理完成后插入下一列的 ` & `；
+- `Tab` 在活动 tabstop 处理完成后，先越过当前单元格内的右侧闭合符；没有局部 Tabout 目标时才插入下一列的 ` & `；
 - `Enter` 在块级 matrix/align 中插入 `\\` 和换行，并保持当前缩进；行内矩阵使用不换行的 ` \\ `；
 - `Shift+Enter` 跳出当前环境。
 
-`Enter` 与 `Shift+Enter` 可以在刚由片段创建、仍处于 snippet 模式的 align/matrix 环境中工作；`Tab` 会先遵守活动 tabstop，结束 snippet 导航后再执行矩阵列操作。当前版本还会接住 LaTeX Workshop 转发的普通 Enter，使其在 Align 中仍按 TeXLeaf 行操作处理。
+`Enter` 与 `Shift+Enter` 可以在刚由片段创建、仍处于 snippet 模式的 align/matrix 环境中工作；`Tab` 会先遵守活动 tabstop，结束 snippet 导航后先尝试局部 Tabout，再执行矩阵列操作。Tabout 与自动放大括号都不会跨过未转义的 `&`、`\\`、`\cr`、`\crcr` 或 `\tabularnewline`；当前版本还会接住 LaTeX Workshop 转发的普通 Enter，使其在 Align 中仍按 TeXLeaf 行操作处理。
 
 从用户提供的 HSnips 文件中只加入了定理类环境这一组。为避免与正文单词和原生单词补全竞争，13 个 trigger 都显式带一个反斜杠；它们是文本模式、词边界、自动展开（`tAw`），完整输入后立即创建环境：
 

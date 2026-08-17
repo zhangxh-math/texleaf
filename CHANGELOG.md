@@ -2,6 +2,23 @@
 
 TeXLeaf 的所有重要变更都会记录在此文件中。版本格式遵循语义化版本。
 
+## [1.0.0] - 2026-08-17
+
+### Changed
+
+- 原生 Suggest 进一步按**全局最长非零前缀组**收紧：TeXLeaf 会先收集当前上下文中全部适用片段，保留与光标前输入匹配长度最长的一组，并额外保留所有已经完整输入的 literal trigger，避免 regex shadow 或重复 ID 使完整字面量候选消失。只有 runtime 唯一选中的 exact literal 会获得 Keyword 类型、preselect 与 exact sort 优先级；其他被保留的完整 literal 仍按普通 Snippet 候选排序。比如输入 `ss` 时，不再把仅凭最后一个 `s` 匹配到的 `sum`、`sim`、`sub`、`sup` 等候选混在 `SS2`、`SSE`、`SSP`、`SSS` 旁边；单字符输入和完整 trigger 仍保持原有行为。
+- Math Preview 的两个自动位置采用对称命名：默认 `placement=autoBelow`（设置页显示为“自动（优先下方）”）先尝试下方，新增 `placement=autoAbove`（“自动（优先上方）”）先尝试上方；`above` / `below` 继续固定方向。旧设置值 `auto` 仅作为 `autoBelow` 的运行时兼容别名保留，不再出现在设置选项中。
+- Zotero/citation 搜索改为先对 bibliography 与 Zotero 全库候选做本地匹配和相关度排序，再统一截取最多 100 条给原生 Suggest。可搜索 citation key、标题、作者、年份、DOI 和 ISBN；多词查询去重后按 AND 组合且可跨字段命中。排序优先考虑精确原始 key（保留标点）、紧凑 key/前缀、精确 DOI/ISBN、全词/词首和普通子串，相关度相同时才偏好已收录的 bibliography 条目。继续输入会重算全库结果，因此先前未进入前 100 条的文献仍能被找到；每键过滤不会重新请求 Zotero。
+- 中文、英文 article 模板的出厂 trigger 分别改为 `article-cn` 和 `article-en`；`beamer-cn` / `beamer-en` 不变。1.0.0 只考虑一次 factory trigger 迁移：当前值仍等于旧出厂值 `tmpa-cn` / `tmpa-en` 时分别尝试改为新值，当前已经是其他值时不改。迁移 marker 会先写入；新 trigger 被占用、存在前缀冲突或提交失败时保留旧值并在 TeXLeaf 输出通道记录原因，之后激活不会重试，用户日后主动改回旧 trigger 也不会再次迁移。
+
+### Reliability and limits
+
+- 两种自动位置在首选侧不足时只会切到能够完整容纳预览的另一侧；上下都不足时都强制选择上方，并共用超高、多行公式的末尾保留策略。固定 `above` / `below` 不会被可见空间自动改写。
+- 位置选择只依赖用户设置、公式边界和可见空间，不根据原生 Suggest 的候选数猜测小组件方向；VS Code 稳定扩展 API 不公开 Suggest 的真实几何，必要时可显式选择 `above` 或 `below`。
+- Citation 查询仍使用 Zotero 内存快照；只有首次加载、缓存过期、设置变化或手动刷新才会触发本机 Zotero 请求。搜索不扩展到期刊/出版物、摘要、标签或笔记，也不做拼写纠错；原始 citation key 的标点精确命中与去标点后的紧凑 key 匹配保持不同等级。
+- 文献身份与冲突判断改为 fail closed：双方有效 DOI 相同才是可跨 key 复用的强身份，双方有效 DOI 不同则明确冲突；ISBN 不再单独判同，只有规范化标题一致且双方提供的第一作者 family name 与年份不矛盾时才作为辅助身份。Zotero 当前库中重复 citation key 的每个成员都会从补全中隐藏，接受阶段也会拒绝旧候选，避免任意导入错误文献。
+- 自动放大括号与 Tabout 现在尊重 `align` / matrix 的数学列表边界：未转义的 `&`、`\\`、`\cr`、`\crcr`、`\tabularnewline` 不再把不同单元格或不同行的普通括号误配成一组 `\left...\right`。同一单元格内仅跨物理换行的合法括号仍可放大，并逐字保留原换行与缩进。在当前单元格确有右侧闭合符时，`Tab` 先执行局部 Tabout；只有当前位置没有可跳目标时，Matrix 快捷键才插入下一列的 ` & `。例如在分母中用 `nsr` 得到 `n^{2}|}` 后，第一次 `Tab` 跳出分母，下一次没有局部闭合符时才插列；Tabout 本身也不会跨到下一单元格或下一行寻找括号。
+
 ## [0.8.11] - 2026-08-17
 
 ### Fixed

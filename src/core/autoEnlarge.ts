@@ -5,6 +5,7 @@ import {
   EnlargeOpenBracket,
   OffsetRange,
 } from './types';
+import { alignmentBoundaryLengthAt } from './alignmentBoundary';
 
 const DEFAULT_TRIGGERS = ['\\frac', '\\sum', '\\prod', '\\int', '\\lim'] as const;
 
@@ -77,6 +78,15 @@ function scanBracketPairs(text: string, bounds: OffsetRange): readonly BracketPa
   let index = bounds.start;
   const currentScope = (): number => scopeStack[scopeStack.length - 1] ?? 0;
 
+  const discardOpenFramesInCurrentScope = (): void => {
+    const scopeId = currentScope();
+    for (let frameIndex = openFrames.length - 1; frameIndex >= 0; frameIndex -= 1) {
+      if (openFrames[frameIndex]?.scopeId === scopeId) {
+        openFrames.splice(frameIndex, 1);
+      }
+    }
+  };
+
   const closeFrame = (spec: BracketSpec, closeOffset: number, closeEnd: number): void => {
     const scopeId = currentScope();
     for (let frameIndex = openFrames.length - 1; frameIndex >= 0; frameIndex -= 1) {
@@ -102,6 +112,16 @@ function scanBracketPairs(text: string, bounds: OffsetRange): readonly BracketPa
     if (char === '%' && !isEscaped(text, index)) {
       inComment = true;
       index += 1;
+      continue;
+    }
+
+    const boundaryLength = alignmentBoundaryLengthAt(text, index);
+    if (boundaryLength > 0) {
+      // TeX alignment cells and rows are separate math lists. Preserve pairs
+      // that already closed on either side, but never match an opening
+      // delimiter in this scope with a closer across `&` or a row command.
+      discardOpenFramesInCurrentScope();
+      index += boundaryLength;
       continue;
     }
 

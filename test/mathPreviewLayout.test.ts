@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   calculateMathPreviewHorizontalOffsetColumns,
   createMathPreviewAttachmentTextDecoration,
+  normalizeMathPreviewPlacement,
   planMathPreviewLayout,
   type MathPreviewLayoutRequest,
 } from "../src/mathPreviewLayout";
@@ -18,7 +19,7 @@ const baseRequest: MathPreviewLayoutRequest = {
   previewHeightEm: 2.5,
   fontSizePx: 14,
   lineHeightPx: 21,
-  placement: "auto",
+  placement: "autoBelow",
 };
 
 function plan(
@@ -26,6 +27,19 @@ function plan(
 ): ReturnType<typeof planMathPreviewLayout> {
   return planMathPreviewLayout({ ...baseRequest, ...changes });
 }
+
+test("Math Preview placement normalization preserves formal values and migrates legacy auto", () => {
+  for (const placement of [
+    "autoBelow",
+    "autoAbove",
+    "above",
+    "below",
+  ] as const) {
+    assert.equal(normalizeMathPreviewPlacement(placement), placement);
+  }
+  assert.equal(normalizeMathPreviewPlacement("auto"), "autoBelow");
+  assert.equal(normalizeMathPreviewPlacement("unknown"), "autoBelow");
+});
 
 test("inline preview stays below and aligns with its opening delimiter on the start line", () => {
   const result = plan();
@@ -42,7 +56,7 @@ test("inline preview stays below and aligns with its opening delimiter on the st
   assert.doesNotMatch(result.attachmentTextDecoration, /\bbottom\s*:/iu);
 });
 
-test("inline preview remains below near the viewport edge for stable editing", () => {
+test("autoBelow moves an inline preview above when its preferred lower side is too small", () => {
   const result = plan({
     formulaStart: { line: 29, character: 6 },
     formulaEnd: { line: 29, character: 17 },
@@ -52,16 +66,74 @@ test("inline preview remains below near the viewport edge for stable editing", (
   });
 
   assert.equal(result.requiredVisibleLines, 2);
-  assert.equal(result.side, "below");
+  assert.equal(result.side, "above");
   assert.deepEqual(result.anchor, { line: 29, character: 6 });
   assert.match(
     result.attachmentTextDecoration,
-    /top:\s*calc\(100% \+ 0\.35em\)/iu,
+    /bottom:\s*calc\(100% \+ 0\.35em\)/iu,
   );
-  assert.doesNotMatch(result.attachmentTextDecoration, /\bbottom\s*:/iu);
+  assert.doesNotMatch(result.attachmentTextDecoration, /\btop\s*:/iu);
 });
 
-test("oversized inline preview still keeps the stable below placement", () => {
+test("autoAbove prefers above while autoBelow prefers below", () => {
+  assert.equal(plan({ placement: "autoBelow" }).side, "below");
+  assert.equal(plan({ placement: "autoAbove" }).side, "above");
+});
+
+test("autoAbove falls below when only the lower side can fit", () => {
+  const result = plan({
+    formulaStart: { line: 1, character: 6 },
+    formulaEnd: { line: 1, character: 17 },
+    cursorLine: 1,
+    visibleRanges: [{ startLine: 0, endLine: 30 }],
+    placement: "autoAbove",
+  });
+
+  assert.equal(result.requiredVisibleLines, 2);
+  assert.equal(result.side, "below");
+  assert.deepEqual(result.anchor, { line: 1, character: 6 });
+});
+
+test("automatic placement treats exactly the required visible lines as sufficient", () => {
+  const aboveExact = plan({
+    formulaStart: { line: 2, character: 6 },
+    formulaEnd: { line: 2, character: 17 },
+    cursorLine: 2,
+    visibleRanges: [{ startLine: 0, endLine: 10 }],
+    placement: "autoAbove",
+  });
+  const belowExact = plan({
+    formulaStart: { line: 8, character: 6 },
+    formulaEnd: { line: 8, character: 17 },
+    cursorLine: 8,
+    visibleRanges: [{ startLine: 0, endLine: 10 }],
+    placement: "autoBelow",
+  });
+
+  assert.equal(aboveExact.requiredVisibleLines, 2);
+  assert.equal(aboveExact.side, "above");
+  assert.equal(belowExact.requiredVisibleLines, 2);
+  assert.equal(belowExact.side, "below");
+});
+
+test("both automatic placements force above when neither side can fit", () => {
+  const common = {
+    formulaStart: { line: 1, character: 6 },
+    formulaEnd: { line: 1, character: 17 },
+    cursorLine: 1,
+    visibleRanges: [{ startLine: 0, endLine: 2 }],
+    previewHeightEm: 4,
+  } as const;
+
+  const belowFirst = plan({ ...common, placement: "autoBelow" });
+  const aboveFirst = plan({ ...common, placement: "autoAbove" });
+  assert.ok(belowFirst.requiredVisibleLines > 1);
+  assert.equal(belowFirst.side, "above");
+  assert.equal(aboveFirst.side, "above");
+  assert.deepEqual(aboveFirst.anchor, belowFirst.anchor);
+});
+
+test("an oversized inline preview uses the common automatic overflow side", () => {
   const result = plan({
     formulaStart: { line: 15, character: 6 },
     formulaEnd: { line: 15, character: 17 },
@@ -71,8 +143,19 @@ test("oversized inline preview still keeps the stable below placement", () => {
   });
 
   assert.ok(result.requiredVisibleLines > 10);
-  assert.equal(result.side, "below");
+  assert.equal(result.side, "above");
   assert.deepEqual(result.anchor, { line: 15, character: 6 });
+  assert.deepEqual(
+    plan({
+      formulaStart: { line: 15, character: 6 },
+      formulaEnd: { line: 15, character: 17 },
+      cursorLine: 15,
+      visibleRanges: [{ startLine: 10, endLine: 20 }],
+      previewHeightEm: 30,
+      placement: "autoAbove",
+    }),
+    result,
+  );
 });
 
 test("explicit above and below placements override automatic space selection", () => {
@@ -89,8 +172,14 @@ test("explicit above and below placements override automatic space selection", (
     visibleRanges: [{ startLine: 10, endLine: 30 }],
   } as const;
 
-  assert.equal(plan({ ...nearTop, placement: "above" }).side, "above");
-  assert.equal(plan({ ...nearBottom, placement: "below" }).side, "below");
+  assert.equal(
+    plan({ ...nearTop, placement: "above" }).side,
+    "above",
+  );
+  assert.equal(
+    plan({ ...nearBottom, placement: "below" }).side,
+    "below",
+  );
 });
 
 test("multiline block previews align both sides with the opening delimiter column", () => {
@@ -131,7 +220,7 @@ test("multiline block previews keep opening-delimiter alignment when a vertical 
   });
 });
 
-test("auto placement keeps its below preference when both sides have enough visible space", () => {
+test("autoBelow keeps its below preference when both sides have enough visible space", () => {
   const result = plan({
     formulaStart: { line: 15, character: 8 },
     formulaEnd: { line: 15, character: 24 },
@@ -141,6 +230,37 @@ test("auto placement keeps its below preference when both sides have enough visi
 
   assert.equal(result.requiredVisibleLines, 2);
   assert.equal(result.side, "below");
+});
+
+test("autoAbove prefers above for a block preview when both sides fit", () => {
+  const common = {
+    mode: "block",
+    formulaStart: { line: 12, character: 8 },
+    formulaEnd: { line: 14, character: 24 },
+    cursorLine: 13,
+    visibleRanges: [{ startLine: 0, endLine: 30 }],
+  } as const;
+  const belowFirst = plan({ ...common, placement: "autoBelow" });
+  const aboveFirst = plan({ ...common, placement: "autoAbove" });
+
+  assert.equal(belowFirst.side, "below");
+  assert.deepEqual(belowFirst.anchor, { line: 14, character: 8 });
+  assert.equal(aboveFirst.side, "above");
+  assert.deepEqual(aboveFirst.anchor, { line: 12, character: 8 });
+});
+
+test("autoAbove falls below for a block preview when its upper formula boundary lacks room", () => {
+  const result = plan({
+    mode: "block",
+    formulaStart: { line: 1, character: 8 },
+    formulaEnd: { line: 3, character: 24 },
+    cursorLine: 2,
+    visibleRanges: [{ startLine: 0, endLine: 30 }],
+    placement: "autoAbove",
+  });
+
+  assert.equal(result.side, "below");
+  assert.deepEqual(result.anchor, { line: 3, character: 8 });
 });
 
 test("an oversized multiline preview preserves its bottom and the last three source lines", () => {
@@ -160,6 +280,21 @@ test("an oversized multiline preview preserves its bottom and the last three sou
     result.attachmentTextDecoration,
     /bottom:\s*calc\(100% \+ 0\.35em\)/iu,
   );
+
+  const aboveFirst = plan({
+    mode: "block",
+    formulaStart: { line: 2, character: 4 },
+    formulaEnd: { line: 40, character: 28 },
+    cursorLine: 40,
+    visibleRanges: [{ startLine: 30, endLine: 42 }],
+    previewHeightEm: 30,
+    placement: "autoAbove",
+  });
+  assert.deepEqual(
+    aboveFirst,
+    result,
+    "both automatic preferences must share the complete block overflow-tail plan",
+  );
 });
 
 test("a multiline inline-delimited formula follows the cursor line indentation", () => {
@@ -173,7 +308,7 @@ test("a multiline inline-delimited formula follows the cursor line indentation",
     previewHeightEm: 30,
   });
 
-  assert.equal(result.side, "below");
+  assert.equal(result.side, "above");
   assert.deepEqual(result.anchor, { line: 40, character: 7 });
 });
 
@@ -191,7 +326,7 @@ test("an oversized formula tail at the top edge stays in view without creating a
   assert.deepEqual(result.anchor, { line: 30, character: 4 });
 });
 
-test("auto stays above when the formula ending boundary is below the viewport", () => {
+test("autoBelow stays above when the formula ending boundary is below the viewport", () => {
   const result = plan({
     mode: "block",
     formulaStart: { line: 4, character: 6 },

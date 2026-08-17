@@ -4,6 +4,7 @@ export * from './latexScanner';
 export * from './replacement';
 export * from './matcher';
 export * from './fraction';
+export * from './alignmentBoundary';
 export * from './tabout';
 export * from './autoEnlarge';
 export * from './leftRightEnter';

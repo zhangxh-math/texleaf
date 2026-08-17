@@ -8,6 +8,7 @@ import {
   SnippetMatcher,
   SnippetMatcherOptions,
   advanceAiDirtyReviewProgress,
+  alignmentBoundaryLengthAt,
   aiIssueRangesOverlap,
   aiIssueMatchesCapturedIdentity,
   aiWritingLanguageLabel,
@@ -1658,6 +1659,76 @@ test('Tabout exits a closed math region only when its remaining content is white
   assert.equal(explicit?.to, 5);
 });
 
+test('alignment boundaries distinguish cells, row commands, escapes, and command prefixes', () => {
+  const cell = String.raw`a & b`;
+  assert.equal(alignmentBoundaryLengthAt(cell, cell.indexOf('&')), 1);
+
+  const escapedCell = String.raw`a \& b`;
+  assert.equal(alignmentBoundaryLengthAt(escapedCell, escapedCell.indexOf('&')), 0);
+
+  for (const command of [
+    String.raw`\\`,
+    String.raw`\cr`,
+    String.raw`\crcr`,
+    String.raw`\tabularnewline`,
+  ]) {
+    const source = `a ${command} b`;
+    assert.equal(
+      alignmentBoundaryLengthAt(source, source.indexOf('\\')),
+      command.length,
+      command,
+    );
+  }
+
+  for (const ordinaryCommand of [String.raw`\cross`, String.raw`\crystal`]) {
+    assert.equal(
+      alignmentBoundaryLengthAt(ordinaryCommand, 0),
+      0,
+      ordinaryCommand,
+    );
+  }
+});
+
+test('matrix Tabout leaves a local closer but never searches a later cell or row', () => {
+  for (const source of [
+    String.raw`\begin{align*}& n^{2<CURSOR>} & z\end{align*}`,
+    String.raw`\begin{align*}& (n<CURSOR>) \\ & z\end{align*}`,
+  ]) {
+    const fixture = cursorMarked(source);
+    const plan = planTabout(fixture.text, fixture.offset);
+    assert.equal(plan?.kind, 'closing-delimiter', source);
+    assert.equal(plan?.skippedText.length, 1, source);
+  }
+
+  for (const source of [
+    String.raw`\begin{align*}& n<CURSOR> & (z)\end{align*}`,
+    String.raw`\begin{align*}& n<CURSOR> \\ & (z)\end{align*}`,
+    String.raw`\begin{align*}& n<CURSOR> \cr & (z)\end{align*}`,
+    String.raw`\begin{align*}& n<CURSOR> \crcr & (z)\end{align*}`,
+    String.raw`\begin{align*}& n<CURSOR> \tabularnewline & (z)\end{align*}`,
+  ]) {
+    const fixture = cursorMarked(source);
+    assert.equal(planTabout(fixture.text, fixture.offset), undefined, source);
+  }
+});
+
+test('matrix Tabout ignores escaped and commented alignment-looking tokens', () => {
+  const escaped = cursorMarked(
+    String.raw`\begin{align*}& n<CURSOR> \& text )\end{align*}`,
+  );
+  assert.equal(planTabout(escaped.text, escaped.offset)?.skippedText, String.raw` \& text )`);
+
+  const commented = cursorMarked(String.raw`\begin{align*}
+  & n<CURSOR> % ignored & \\ \cr \crcr \tabularnewline )
+    + z)
+\end{align*}`);
+  assert.equal(
+    planTabout(commented.text, commented.offset)?.skippedText,
+    String.raw` % ignored & \\ \cr \crcr \tabularnewline )
+    + z)`,
+  );
+});
+
 function cursorMarked(value: string): { text: string; offset: number } {
   const marker = '<CURSOR>';
   const offset = value.indexOf(marker);
@@ -1850,4 +1921,58 @@ test('auto-enlarge ignores existing size modifiers and cross-scope malformed pai
     start: fractionStart,
     end: fractionStart + String.raw`\frac`.length,
   }), undefined);
+});
+
+test('auto-enlarge never pairs delimiters across alignment cells or rows', () => {
+  for (const text of [
+    String.raw`\begin{align*}& (a + \sum & b)\end{align*}`,
+    String.raw`\begin{align*}& (a \\ \sum + b)\end{align*}`,
+    String.raw`\begin{align*}& (a \cr \sum + b)\end{align*}`,
+    String.raw`\begin{align*}& (a \crcr \sum + b)\end{align*}`,
+    String.raw`\begin{align*}& (a \tabularnewline \sum + b)\end{align*}`,
+  ]) {
+    const commandStart = text.indexOf(String.raw`\sum`);
+    assert.equal(
+      planAutoEnlarge(text, {
+        start: commandStart,
+        end: commandStart + String.raw`\sum`.length,
+      }),
+      undefined,
+      text,
+    );
+  }
+});
+
+test('auto-enlarge retains nested same-cell pairs and ignores fake boundaries', () => {
+  const nested = String.raw`\begin{align*}& [a + (\sum_i x_i)] & y\end{align*}`;
+  const nestedStart = nested.indexOf(String.raw`\sum`);
+  const nestedPlan = planAutoEnlarge(nested, {
+    start: nestedStart,
+    end: nestedStart + String.raw`\sum`.length,
+  });
+  assert.equal(nestedPlan?.open, '(');
+  assert.equal(
+    applyEnlargePlan(nested, nestedPlan!),
+    String.raw`\begin{align*}& [a + \left(\sum_i x_i\right)] & y\end{align*}`,
+  );
+
+  const escaped = String.raw`\begin{align*}& (\sum \& x)\end{align*}`;
+  const escapedStart = escaped.indexOf(String.raw`\sum`);
+  assert.ok(planAutoEnlarge(escaped, {
+    start: escapedStart,
+    end: escapedStart + String.raw`\sum`.length,
+  }));
+
+  const commented = String.raw`\begin{align*}
+  & (\sum % ignored & \\ \cr \crcr \tabularnewline )
+    + x)
+\end{align*}`;
+  const commentedStart = commented.indexOf(String.raw`\sum`);
+  const commentedPlan = planAutoEnlarge(commented, {
+    start: commentedStart,
+    end: commentedStart + String.raw`\sum`.length,
+  });
+  assert.ok(commentedPlan);
+  assert.equal(commentedPlan?.openOffset, commented.indexOf('('));
+  assert.equal(commentedPlan?.closeOffset, commented.lastIndexOf(')'));
 });

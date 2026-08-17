@@ -2,7 +2,7 @@
   "name": "texleaf",
   "displayName": "TeXLeaf — Fast LaTeX Snippets",
   "description": "安全、可定制的 LaTeX 自动片段、AI 写作检查、Math Preview 与 Zotero 引用管理。",
-  "version": "0.8.11",
+  "version": "1.0.0",
   "publisher": "zhangxh-math",
   "author": {
     "name": "zhangxh-math",
@@ -294,17 +294,17 @@
       {
         "command": "texleaf.handleSuggestTabout",
         "key": "tab",
-        "when": "texleaf.tabActionAvailable && !texleaf.snippetTabActionAvailable && !texleaf.matrixActionAvailable && editorTextFocus && !editorReadonly && !editorTabMovesFocus && !editorHasMultipleSelections && suggestWidgetVisible && suggestWidgetHasFocusedSuggestion && !renameInputVisible && !inlineSuggestionVisible && !inSnippetMode"
+        "when": "texleaf.tabActionAvailable && !texleaf.snippetTabActionAvailable && editorTextFocus && !editorReadonly && !editorTabMovesFocus && !editorHasMultipleSelections && suggestWidgetVisible && suggestWidgetHasFocusedSuggestion && !renameInputVisible && !inlineSuggestionVisible && !inSnippetMode"
       },
       {
         "command": "texleaf.handleTab",
         "key": "tab",
-        "when": "texleaf.snippetTabActionAvailable && editorTextFocus && !editorReadonly && !editorTabMovesFocus && !renameInputVisible"
+        "when": "texleaf.snippetTabActionAvailable && editorTextFocus && !editorReadonly && !editorTabMovesFocus && !editorHasMultipleSelections && !renameInputVisible"
       },
       {
         "command": "texleaf.handleTab",
         "key": "tab",
-        "when": "texleaf.tabActionAvailable && editorTextFocus && !editorReadonly && !editorTabMovesFocus && !suggestWidgetVisible && !renameInputVisible && !inlineSuggestionVisible && !inSnippetMode"
+        "when": "texleaf.tabActionAvailable && editorTextFocus && !editorReadonly && !editorTabMovesFocus && !editorHasMultipleSelections && !suggestWidgetVisible && !renameInputVisible && !inlineSuggestionVisible && !inSnippetMode"
       },
       {
         "command": "texleaf.matrixEnter",
@@ -396,13 +396,13 @@
           "scope": "resource",
           "type": "boolean",
           "default": true,
-          "description": "启用矩阵/align 的 Tab 插列、Enter 插行、Shift+Enter 跳出，以及可换行数学环境中匹配 \\left…\\right… 的安全跨行 Enter。"
+          "description": "启用矩阵/align 的 Tab（当前单元格有闭合符时先 Tabout，无目标时插列）、Enter 插行、Shift+Enter 跳出，以及可换行数学环境中匹配 \\left…\\right… 的安全跨行 Enter。"
         },
         "texleaf.tabout": {
           "scope": "resource",
           "type": "boolean",
           "default": true,
-          "description": "数学环境中用 Tab 跳到下一个闭括号或环境外。"
+          "description": "数学环境中用 Tab 跳到下一个闭括号或环境外；在 matrix/align 中不会跨单元格或行边界。"
         },
         "texleaf.skipPairedClosingCharacters": {
           "scope": "resource",
@@ -432,7 +432,7 @@
           "scope": "resource",
           "type": "boolean",
           "default": true,
-          "description": "在 VS Code 原生 Suggest 中显示与光标前输入具有非空 trigger 前缀匹配的片段；完整片段库可通过 TeXLeaf 的搜索并插入命令浏览。"
+          "description": "在 VS Code 原生 Suggest 中显示所有适用片段里与光标前输入匹配长度最长、且长度非零的 trigger 组，并额外保留所有已完整输入的字面量 trigger；只有运行时唯一选中的 exact literal 获得精确候选优先级。完整片段库可通过 TeXLeaf 的搜索并插入命令浏览。"
         },
         "texleaf.languageIds": {
           "scope": "resource",
@@ -535,7 +535,7 @@
           "scope": "resource",
           "type": "boolean",
           "default": true,
-          "description": "Zotero 引用功能总开关：启用项目 bibliography 与 Zotero 联动的原生引用补全。未信任工作区中始终停用。"
+          "description": "Zotero 引用功能总开关：启用项目 bibliography 与 Zotero 联动的原生引用补全，并在本地按 citation key、标题、作者、年份、DOI 和 ISBN 搜索。未信任工作区中始终停用。"
         },
         "texleaf.autoShowCitationPicker": {
           "order": 4,
@@ -605,7 +605,7 @@
           "default": 30,
           "minimum": 0,
           "maximum": 3600,
-          "description": "Zotero 参考文献列表在内存中的缓存秒数；可随时运行刷新命令清除。"
+          "description": "Zotero 完整参考文献快照在内存中的缓存秒数；键入查询只筛选本地快照，不逐键请求 Zotero，可随时运行刷新命令清除。"
         },
         "texleaf.bibliographyFormat": {
           "order": 3,
@@ -805,17 +805,25 @@
           "scope": "resource",
           "type": "string",
           "enum": [
-            "auto",
+            "autoBelow",
+            "autoAbove",
             "above",
             "below"
           ],
+          "enumItemLabels": [
+            "自动（优先下方）",
+            "自动（优先上方）",
+            "始终上方",
+            "始终下方"
+          ],
           "enumDescriptions": [
-            "行内公式始终放在活动源码行下方；行间公式优先放在下方，下方可见空间不足时改到上方，上下均不足时仍保持在上方并保留公式尾部视图。",
+            "自动（优先下方）：下方空间足够时放在下方，否则改到上方；上下都不足时强制放在上方并尽量保留预览底部与公式末尾。",
+            "自动（优先上方）：上方空间足够时放在上方，否则改到下方；上下都不足时强制放在上方并采用相同的末尾保留策略。",
             "始终把光标预览放在公式上方。",
             "始终把光标预览放在公式下方。"
           ],
-          "default": "auto",
-          "description": "选择光标公式预览的浮动方向。行内公式默认位于活动源码行下方：起始行对齐定界符，后续行对齐该行首个非空白字符；行间公式对齐起始定界符。卡片不参与正文换行；VS Code 没有公开的横向视口尺寸或行间占位 API，因此超宽卡片右端可能被裁切，没有空白行时也可能临时遮住相邻行。"
+          "default": "autoBelow",
+          "description": "选择光标公式预览的浮动方向。autoBelow（默认）优先下方，autoAbove 优先上方；首选侧空间不足时尝试另一侧，上下都不足时两者都强制使用上方，超高、多行公式还会保留公式尾部。above/below 始终固定方向。旧值 auto 仅作为 autoBelow 的运行时兼容别名保留，不再显示在设置选项中。卡片不参与正文换行；VS Code 没有公开横向视口尺寸或行间占位 API，因此超宽卡片和紧邻正文仍可能裁切或遮挡。"
         },
         "texleaf.mathPreview.debounceMs": {
           "order": 4,

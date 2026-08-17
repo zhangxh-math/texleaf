@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import type * as vscode from "vscode";
 import { parse, type ParseError } from "jsonc-parser";
 import { serializeDefaultSnippetLibrary } from "./defaultLibrary";
-import { TEMPLATE_LIBRARY_STATE_KEY } from "./templateLibrary";
+import {
+  ARTICLE_TEMPLATE_TRIGGER_MIGRATION_STATE_KEY,
+  TEMPLATE_LIBRARY_STATE_KEY,
+} from "./templateLibrary";
 
 /**
  * Files under ExtensionContext.globalStorageUri are deliberately not part of
@@ -15,6 +18,19 @@ export const SNIPPET_SYNC_STATE_KEY = "texleaf.snippetLibrarySync.v1";
 /** Local-only three-way merge metadata.  Do not add this key to setKeysForSync. */
 export const SNIPPET_SYNC_METADATA_KEY =
   "texleaf.snippetLibrarySyncMetadata.v1";
+
+/** Complete public state registered with Settings Sync on every activation. */
+export const SNIPPET_SYNC_GLOBAL_STATE_KEYS: readonly string[] = Object.freeze([
+  SNIPPET_SYNC_STATE_KEY,
+  TEMPLATE_LIBRARY_STATE_KEY,
+  ARTICLE_TEMPLATE_TRIGGER_MIGRATION_STATE_KEY,
+]);
+
+export function registerSnippetSyncGlobalStateKeys(globalState: {
+  setKeysForSync(keys: string[]): void;
+}): void {
+  globalState.setKeysForSync([...SNIPPET_SYNC_GLOBAL_STATE_KEYS]);
+}
 
 /**
  * Stay comfortably below VS Code's 512 KiB extension-state warning.  This is
@@ -371,10 +387,7 @@ export class SnippetSyncController implements vscode.Disposable {
 
     // Calling this with the complete set on every activation is intentional:
     // VS Code stores the registration per extension version.
-    this.context.globalState.setKeysForSync([
-      SNIPPET_SYNC_STATE_KEY,
-      TEMPLATE_LIBRARY_STATE_KEY,
-    ]);
+    registerSnippetSyncGlobalStateKeys(this.context.globalState);
 
     this.disposables.push(
       this.repository.onDidChange(() => {

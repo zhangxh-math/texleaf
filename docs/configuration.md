@@ -1,6 +1,6 @@
 # TeXLeaf 配置参考
 
-在 VS Code 设置中搜索 `@ext:zhangxh-math.texleaf` 即可修改配置。0.8.11 的 52 个用户可见设置按 **TeXLeaf · 片段**（22 项）、**TeXLeaf · 文献**（9 项）、**TeXLeaf · AI 写作**（14 项）、**TeXLeaf · 预览**（7 项）分成四个原生分类。全部 AI 写作设置都是 application 级，只能由用户/Profile 设置控制；真正联网前仍要求受信任工作区、针对实际接收地址的明确同意，以及 SecretStorage 中该目标专用的 API Key。
+在 VS Code 设置中搜索 `@ext:zhangxh-math.texleaf` 即可修改配置。1.0.0 的 52 个用户可见设置按 **TeXLeaf · 片段**（22 项）、**TeXLeaf · 文献**（9 项）、**TeXLeaf · AI 写作**（14 项）、**TeXLeaf · 预览**（7 项）分成四个原生分类。全部 AI 写作设置都是 application 级，只能由用户/Profile 设置控制；真正联网前仍要求受信任工作区、针对实际接收地址的明确同意，以及 SecretStorage 中该目标专用的 API Key。
 
 ## 设置项
 
@@ -20,7 +20,7 @@
 | `texleaf.autoDeleteMathDelimiters` | 在空数学分隔符中按退格时删除整对分隔符。 |
 | `texleaf.colorizeBrackets` | 按嵌套深度为数学区域中的配对括号着色。 |
 | `texleaf.highlightActiveBracketPair` | 突出显示光标附近或包围光标的括号对。 |
-| `texleaf.enableCompletions` | 是否把与光标前输入具有非空 trigger 前缀匹配的可用片段提供给 VS Code Suggest；当前上下文可直接插入的普通片段可用 `Ctrl+Alt+L` 浏览。 |
+| `texleaf.enableCompletions` | 是否把当前全部适用片段中与光标前输入匹配长度最长、且长度非零的 trigger 组提供给 VS Code Suggest，并额外保留所有已完整输入的 literal trigger；只有 runtime 唯一选中的 exact literal 获得 Keyword/preselect/exact sort 优先级。当前上下文可直接插入的普通片段可用 `Ctrl+Alt+L` 浏览。 |
 | `texleaf.zoteroCitations` | 是否启用项目 bibliography 与 Zotero 联动的原生引用补全；未信任工作区中始终停用。 |
 | `texleaf.autoShowCitationPicker` | 光标进入配置的 citation 命令大括号时是否自动打开 VS Code 原生 Suggest；关闭后可使用手动命令。 |
 | `texleaf.bibliographyFile` | 可自定义的 bibliography 工作区相对 `.bib` 路径，默认 `reference.bib`；拒绝绝对路径、URI 和 `..`。 |
@@ -46,7 +46,7 @@
 | `texleaf.aiWriting.maxDocumentLength` | 手动整篇检查单次最多发送的正文 UTF-16 字符数，默认 30000。 |
 | `texleaf.mathPreview.enabled` | 内置数学公式预览总开关，默认开启。 |
 | `texleaf.mathPreview.presentation` | 显示方式：光标公式旁的 `cursor`（默认）、原生 `hover`，或 `both`；默认值可避免与其他 LaTeX 扩展重复显示 Hover。 |
-| `texleaf.mathPreview.placement` | `cursor` 浮动卡片的位置：`auto`（默认）、`above` 或 `below`；自动模式以下方为首选，下方空间不足时切换到上方，上下都不足时仍使用上方并优先保住预览底部与公式末尾代码。 |
+| `texleaf.mathPreview.placement` | `cursor` 浮动卡片的位置：`autoBelow`（默认，优先下方）、`autoAbove`（优先上方）、`above` 或 `below`；两种自动模式在首选侧不足时尝试另一侧，上下都不足时都强制使用上方，并对超高、多行公式保留公式尾部；显式值固定方向。旧值 `auto` 仍按 `autoBelow` 运行，但不再显示在设置选项中。 |
 | `texleaf.mathPreview.debounceMs` | 停止输入/移动光标后延迟多少毫秒更新预览，默认 120；大文档自动至少使用 300。 |
 | `texleaf.mathPreview.scale` | 公式 SVG 的显示缩放，默认 1，范围 0.5–3。 |
 | `texleaf.mathPreview.maxSourceLength` | 单条公式送入后台渲染器的最大 UTF-16 字符数，默认 8192，范围 256–32768。 |
@@ -163,7 +163,7 @@ Zotero 引用补全使用 Zotero 桌面端本机接口，并优先利用兼容�
 
 Better BibTeX 路径使用其返回的权威 `citekey`；官方 Local API 回退则从 Zotero 的单条导出中取得 key。TeXLeaf 不会在 VS Code 端按作者、年份或标题重新计算 key，也不会调用会改变 key 的 regenerate API。`bibtex` 与 `biblatex` 会在当前连接路径中选择对应导出格式；已有 `.bib` 条目原样保留，不会因切换设置而重新格式化。
 
-去重先比较精确 citation key，再比较规范化 DOI 与 ISBN，最后在字段完整时比较规范化标题、第一作者和年份。若同一 Zotero 文献已经以另一个 key 存在于 bibliography，补全只保留 `.bib` 中的现有项；提交期间才发生的同类导入也会复用最新 `.bib` key，而不是追加重复条目。
+文献身份采用 fail-closed 规则。精确 citation key 只有在元数据没有明确冲突时才复用；双方都提供有效 DOI 时，相同的规范化 DOI 是可跨 key 复用的强身份，不同 DOI 则直接视为冲突。ISBN 不能单独证明是同一文献：只有规范化标题一致，并且双方提供的年份和第一作者 family name 不矛盾时，ISBN 才能作为辅助身份；这样共享同一本书 ISBN 的不同章节不会被折叠。没有标识符强证据时，只在规范化标题、年份与第一作者有一致证据时复用。若同一 Zotero 文献已经以另一个 key 存在于 bibliography，补全只保留 `.bib` 中的现有项；提交期间才发生的同类导入也会复用最新 `.bib` key，而不是追加重复条目。Zotero 当前库中若多个记录使用同一 citation key，整组都会从补全中隐藏并在 Output → TeXLeaf 记录组数，接受旧候选时也会拒绝，不会任意选择其中一条。
 
 ### 原生补全与连续添加
 
@@ -177,7 +177,9 @@ Better BibTeX 路径使用其返回的权威 `citekey`；官方 Local API 回退
 
 定位器支持 citation 前的一个或多个可选参数、跨行 key 列表、尚未输入闭合大括号的编辑中状态，以及光标位于已有 key 中间的情况。接受补全后只替换当前逗号分段。例如 `\cite{keepA, query, keepB}` 不会覆盖 `keepA` 与 `keepB`。
 
-补全使用 VS Code 原生 Suggest：左侧结构化 `label` 只显示标题与紧凑来源，不显示 citation key，给标题保留尽可能多的宽度；右侧详情分别显示标题、作者、期刊/出版物、年份、来源/导入状态和 citation key。插件可按标题、作者、年份与 citation key 过滤，因此 key 虽不占用左侧空间，仍可直接搜索。bibliography 已有项以更高排序权重列在前面，左侧来源是当前 `.bib` 文件名；Zotero 新项随后显示为 `Zotero`，右侧标明未导入及目标文件。原生 API 不插入不可选的分隔标题。当前逗号分段就是筛选前缀。每次接受一篇后输入逗号会再次触发补全，因此同一个 `\cite{}` 可以连续加入多篇；查询被退格清空后，后续输入也会重新触发。也可按 `Ctrl+Space` 或运行手动命令重新打开。
+补全使用 VS Code 原生 Suggest：左侧结构化 `label` 只显示标题与紧凑来源，不显示 citation key，给标题保留尽可能多的宽度；右侧详情分别显示标题、作者、期刊/出版物、年份、来源/导入状态和 citation key。当前逗号分段的光标前缀是查询；每次接受一篇后输入逗号会再次触发补全，因此同一个 `\cite{}` 可以连续加入多篇；查询被退格清空后，后续输入也会重新触发。也可按 `Ctrl+Space` 或运行手动命令重新打开。
+
+查询先折叠大小写、常见重音和标点差异，可匹配 citation key、标题、作者、年份、DOI 和 ISBN。重复查询词会先去重，多词之间采用 AND 语义并允许跨字段命中。排序先比较相关度：原始 citation key 精确命中、去标点后的紧凑 key/前缀、精确 DOI/ISBN、全词/词首、普通子串依次降级；只有相关度相同时才偏好 bibliography 已有项，最后用标题和 key 保持稳定顺序。这不是拼写纠错，也不搜索期刊/出版物、摘要、标签或笔记。TeXLeaf 会先在 bibliography 与 Zotero 全库快照上完成本地匹配和排序，再把前 100 条交给 Suggest；继续输入会从全库重算，因此先前被截断的条目仍能被更具体的查询找到。本地逐键筛选不会逐键请求 Zotero；只有缓存首次加载、过期、设置变化或手动刷新时才访问本机端口。
 
 ### bibliography 路径
 
@@ -207,13 +209,13 @@ Better BibTeX 路径使用其返回的权威 `citekey`；官方 Local API 回退
 
 Math Preview 只对已保存的 `.tex` 文件和 `latex`/`tex` language ID 生效。它复用 TeXLeaf 的 LaTeX 扫描状态机识别 `$…$`、`$$…$$`、`\(…\)`、`\[…\]` 和常见数学环境，并跳过注释、`\verb` 以及排除环境。嵌套的 `align`/`cases`/matrix 等区域只生成一个最外层预览，避免重复装饰；尚未输入闭合分隔符时，可以按光标位置生成临时闭合的编辑中预览。
 
-默认 `cursor` 模式只渲染主光标所在的一个公式。行内公式的 `auto` 卡片固定在活动源码行下方：光标仍在公式起始行时对齐 `$` 或 `\(` 的反斜杠；进入后续源码行时改为对齐该行首个非空白字符，保留缩进但不跟随光标横坐标。行间公式对齐 `$$`、`\[` 或 `\begin{…}` 的真实起始定界符列，并补偿跨行缩进和 Tab 差异。VS Code 公共扩展 API 不公开编辑器内容区的实时像素宽度，所以超宽卡片的右端可能被编辑器裁切；插件不会用窗口宽度猜测代替编辑器宽度。浮动卡片不参与源代码行宽和自动换行计算，因此在公式后继续输入不会被卡片推挤、折行或叠到一起。
+默认 `cursor` 模式只渲染主光标所在的一个公式。行内公式的浮动卡片跟随活动源码行：光标仍在公式起始行时对齐 `$` 或 `\(` 的反斜杠；进入后续源码行时改为对齐该行首个非空白字符，保留缩进但不跟随光标横坐标。默认 `autoBelow` 优先把卡片放在该行下方，`autoAbove` 则优先放在上方。行间公式对齐 `$$`、`\[` 或 `\begin{…}` 的真实起始定界符列，并补偿跨行缩进和 Tab 差异。VS Code 公共扩展 API 不公开编辑器内容区的实时像素宽度，所以超宽卡片的右端可能被编辑器裁切；插件不会用窗口宽度猜测代替编辑器宽度。浮动卡片不参与源代码行宽和自动换行计算，因此在公式后继续输入不会被卡片推挤、折行或叠到一起。
 
-`texleaf.mathPreview.placement` 可固定为 `above`/`below`。默认 `auto` 对行内公式稳定使用下方，避免移动光标时上下跳动；对行间公式先尝试下方，下方可见空间不足才切换到上方。如果超高行间公式在上下两侧都没有足够空间，`auto` 仍选择上方，并用公式末尾附近作为垂直参照，使预览公式的底部与公式代码的最后几行尽量同时留在视口内。此时预览顶部被裁掉属于预期行为。正常高公式不会压缩到旧的 8em 上限；仅当宽度超过 40em 时等比缩放，并保留 256em 的异常几何安全上限。
+`texleaf.mathPreview.placement` 提供两种空间感知模式。默认 `autoBelow` 先尝试下方，下方无法完整容纳预览时改到上方；`autoAbove` 先尝试上方，上方不足时改到下方。两种模式只有在另一侧能够完整容纳时才换边；如果上下都不足，都强制选择上方，并共用超高、多行公式的末尾保留策略，使预览底部和公式源码最后几行尽量同时留在视口内。`above` / `below` 则严格固定方向，不因可见空间自动改写。为兼容已有用户设置，旧值 `auto` 在运行时仍映射为 `autoBelow`，但 manifest 不再把它列为可选值。正常高公式不会压缩到旧的 8em 上限；仅当宽度超过 40em 时等比缩放，并保留 256em 的异常几何安全上限。
 
 0.8.11 的 `cursor` / `both` 使用 last-known-good（stale-while-revalidate）：防抖和后台渲染期间保留上一张有效卡片，通过单一稳定 decoration 原位换帧；临时不完整 TeX 或渲染失败有 750 ms 宽限，Hover SVG 只在实际请求 Hover 时写入扩展私有缓存。离开公式、禁用预览、运行“关闭当前 Math Preview”，或停在无效状态超过宽限仍会清理旧卡片。纯 `hover` 继续由 VS Code 控制生命周期，输入时可能自行关闭；连续输入不闪烁的保证针对 cursor decoration。
 
-VS Code 稳定扩展 API 没有可供此功能使用的公开 view-zone 或任意浮层定位接口。为实现上述布局，`cursor` 模式使用一小段固定、内部生成且不接受用户内容的 Monaco decoration CSS 兼容层；它只负责定位，卡片内容和底色仍由经过清理的 SVG 提供。兼容层不能为预览保留真正的编辑器行高，因此公式上下均无空白行时，卡片可能暂时遮住相邻行；超高预览也可能从顶部超出视口，`auto` 会有意保留其底部。若未来 VS Code、主题或平台不接受该定位方式，可把 `texleaf.mathPreview.presentation` 设为 `hover`，改用完全基于公开 HoverProvider 的预览；`both` 同时启用两者。如果 LaTeX Workshop 也生成数学 Hover，建议保留默认 `cursor`，避免同一位置显示两份内容。按 `Esc` 只关闭当前预览，不改变持久设置。
+VS Code 稳定扩展 API 没有可供此功能使用的公开 view-zone 或任意浮层定位接口。为实现上述布局，`cursor` 模式使用一小段固定、内部生成且不接受用户内容的 Monaco decoration CSS 兼容层；它只负责定位，卡片内容和底色仍由经过清理的 SVG 提供。兼容层不能为预览保留真正的编辑器行高，因此公式上下均无空白行时，卡片可能暂时遮住相邻行；超高预览也可能从顶部超出视口，两种自动模式都会有意保留其底部。若未来 VS Code、主题或平台不接受该定位方式，可把 `texleaf.mathPreview.presentation` 设为 `hover`，改用完全基于公开 HoverProvider 的预览；`both` 同时启用两者。如果 LaTeX Workshop 也生成数学 Hover，建议保留默认 `cursor`，避免同一位置显示两份内容。按 `Esc` 只关闭当前预览，不改变持久设置。
 
 TeXLeaf 使用离线打包的 MathJax SVG 渲染器和 New Computer Modern 字体。MathJax 在首次需要公式时才在独立 Node Worker 中载入，主扩展线程不执行排版。扫描结果按 `TextDocument.version` 缓存，重复公式复用有上限的 SVG 缓存，异步结果带代次校验，过时渲染不会覆盖新内容。渲染有 5 秒超时、长度上限、宏数量/展开上限和短暂错误冷却；SVG 会拒绝脚本、事件属性、外部链接、`foreignObject` 等活动内容。
 
@@ -233,7 +235,7 @@ VS Code 没有允许单个扩展控制 Electron GPU 的公开 API，而且 MathJ
 
 首次创建时，文件直接包含当前版本的 212 条默认规则、`GREEK`、`SYMBOL`、`MORE_SYMBOLS` 三个变量，以及 `defaultsRevision` 迁移标记。运行时只有这份全局文件和用户显式配置的项目附加文件，不再有隐藏的 `builtin` 或 `settings` 片段源。用户可以在全局文件中直接修改、禁用或删除默认规则；`defaultsRevision` 已完成后，启动时不会把用户删除的规则重新补回。
 
-article/Beamer 长模板保存在当前 Profile 的插件内部、可同步模板库中，不混入主 JSONC。首次升级会一次性迁移旧 `globalStorageUri/templates/*.tex` 的自定义内容，之后运行时不再依赖这些外部副本。模板只会在已保存、除空白与完整 trigger 外没有其他内容的 `.tex` 文档中，由单光标输入完整 trigger 后自动展开；展开会替换整份空白文档。`texleaf.autoSnippets` 是模板自动展开总开关；关闭时可在完整 trigger 后按 `Tab`。模板正文使用 v2 的 `@0`、`@1`、`@{1:默认文本}` 占位符，字面量 `@` 写成 `@@`。
+article/Beamer 长模板保存在当前 Profile 的插件内部、可同步模板库中，不混入主 JSONC。出厂 trigger 为 `article-cn`、`article-en`、`beamer-cn` 和 `beamer-en`。1.0.0 只考虑一次 article factory trigger 迁移：当前值仍等于旧出厂值 `tmpa-cn` / `tmpa-en` 时分别尝试改为 `article-cn` / `article-en`，当前已经是其他值时不改。迁移 marker 会先写入；新 trigger 被占用、存在前缀冲突或提交失败时保留旧值，**Output → TeXLeaf** 会记录原因，之后激活不会重试，用户日后主动改回旧 trigger 也不会再次迁移。首次升级会一次性迁移旧 `globalStorageUri/templates/*.tex` 的自定义内容，之后运行时不再依赖这些外部副本。模板只会在已保存、除空白与完整 trigger 外没有其他内容的 `.tex` 文档中，由单光标输入完整 trigger 后自动展开；展开会替换整份空白文档。`texleaf.autoSnippets` 是模板自动展开总开关；关闭时可在完整 trigger 后按 `Tab`。模板正文使用 v2 的 `@0`、`@1`、`@{1:默认文本}` 占位符，字面量 `@` 写成 `@@`。
 
 无论从全局文件、导入文件还是项目附加文件加载，`replacement` 都必须是字符串。函数、RegExp literal、导入语句或其他 JavaScript 表达式不会执行。
 
@@ -311,9 +313,11 @@ Snippet 配置命令和侧栏仍然可以在任意编辑器上下文中打开，
 
 普通片段没有显式 tabstop 时，0.8.11 会在扩大整个括号范围后把光标恢复到生成的 `\right` 之前；例如 `(sum)` 会成为 `\left(\sum|\right)`。可以继续输入 `+`、上下标或其他内容；当当前位置没有精确手动片段 trigger 时，按一次 `Tab` 执行 Tabout。刚停在 `\sum` 后直接按 `Tab` 时，既有 `sum`-limits 手动片段优先展开；片段已经声明 tabstop 时也不合成额外占位符，继续遵循原导航顺序。
 
+1.0.0 起，自动放大不会跨过 TeX 对齐边界寻找另一侧括号。未转义的 `&`、`\\`、`\cr`、`\crcr` 与 `\tabularnewline` 会终止当前单元格或当前行尚未闭合的候选；注释中的同形文本与转义的 `\&` 不作为边界。这样在 `align` / matrix 的某一行输入 `sum` 时，不会把上一单元格的 `(` 与下一单元格或下一行的 `)` 改写成跨区间 `\left...\right`。单纯的源码物理换行不是 TeX 行结束命令；同一单元格中跨物理换行的合法 pair 仍可放大，并逐字保留原换行与缩进。
+
 ### Matrix 快捷键
 
-矩阵快捷键只在 `texleaf.matrixEnvironments` 列出的 matrix、align 等环境中工作：`Tab` 在活动 snippet tabstop 处理完成后插入下一列的 ` & `；`Enter` 在块级环境插入 `\\`、换行并保留当前缩进，在行内矩阵中插入带空格的 `\\`；`Shift+Enter` 跳到当前数学环境之后。若某个自定义环境行为异常，将其移出列表即可。
+矩阵快捷键只在 `texleaf.matrixEnvironments` 列出的 matrix、align 等环境中工作：`Tab` 先处理活动 snippet tabstop，再尝试越过当前单元格内的右侧闭合符；只有没有局部 Tabout 目标时才插入下一列的 ` & `。`Enter` 在块级环境插入 `\\`、换行并保留当前缩进，在行内矩阵中插入带空格的 `\\`；`Shift+Enter` 跳到当前数学环境之后。Tabout 不会跨未转义的 `&` 或行结束命令去寻找下一单元格/下一行的括号。若某个自定义环境行为异常，将其移出列表即可。
 
 同一个 `texleaf.matrixShortcuts` 开关也控制安全的 left/right 跨行 Enter：在 equation、align、aligned、gather、multline、flalign、split 等可换行数学环境中，光标位于唯一、顶层匹配的 `\left…\right…` 内时，Enter 会在上一行插入 `\right.\\`，并在保持缩进的下一行插入 `\left.`。遇到跨光标嵌套 pair、花括号参数、命令 token、`&`、已有行终止、comment/verb 或嵌套环境时不会猜测，直接回到原来的矩阵或普通 Enter。
 
@@ -321,7 +325,7 @@ Snippet 配置命令和侧栏仍然可以在任意编辑器上下文中打开，
 
 Tabout 优先遵守活动 snippet 的 tabstop；没有可前往的 tabstop 时，再尝试越过临近的右括号、`\rangle` 或数学结束分隔符。原生 Suggest 会把与当前输入精确相同的 TeXLeaf trigger 优先显示并预选，例如 `\thm`、`\lem`、`\dfn`、`\cor`；普通非精确候选仍遵循 VS Code 的原生排序。模板、定理环境或 `dm` 的自动展开偶发未触发时，直接按 `Tab` 会精确展开 TeXLeaf 片段，不会接受一个相近的普通单词；这个 exact 路径在 Suggest 已打开时仍优先。
 
-0.8.10 起，TeXLeaf 的普通片段候选必须与光标前输入具有非空 trigger 前缀匹配；不再匹配的条目会在 Suggest 刷新时移除。默认开启 Tabout 时，Suggest 可见且没有精确 TeXLeaf trigger，扩展会重新规划当前位置：有真实 Tabout 目标才跳出，否则调用 VS Code 原生的“接受所选建议”。数学区域的活动 Snippet Session 若仍有下一 tabstop，会由专用路由先关闭 Suggest、再前往该占位符；普通 Suggest-aware Tabout 路径明确排除活动 Snippet Session、Inline Suggest、Rename 输入框和 Matrix action，不改变它们原有的 Tab 优先级。无需先输入 trigger 即可用 `Ctrl+Alt+L`（macOS 为 `Cmd+Alt+L`）浏览当前上下文可直接插入的普通片段。若 `Tab` 已被其他扩展接管，可通过键盘快捷方式页面检查 `texleaf` 命令的 when 条件与冲突来源。
+0.8.10 起，TeXLeaf 的普通片段候选必须与光标前输入具有非空 trigger 前缀匹配；1.0.0 进一步保留全部适用候选中的**全局最长非零前缀组**，并额外保留所有已经完整输入的 literal trigger，避免 regex shadow 或重复 ID 把完整字面量候选筛掉。只有 runtime 唯一选中的 exact literal 获得 Keyword 类型、preselect 与 exact sort 优先级；其他完整 literal 仍按普通 Snippet 候选排序。例如输入 `ss` 时，不会再把只匹配末尾单个 `s` 的 `sum`、`sim`、`sub`、`sup` 与匹配两个字符的 `SS2`、`SSE`、`SSP`、`SSS` 混在一起；输入单个 `s` 与完整 trigger 仍保持原行为。默认开启 Tabout 时，Suggest 可见且没有精确 TeXLeaf trigger，扩展会重新规划当前位置：有真实 Tabout 目标才跳出，否则调用 VS Code 原生的“接受所选建议”。数学区域的活动 Snippet Session 若仍有下一 tabstop，会由专用路由先关闭 Suggest、再前往该占位符；普通 Suggest-aware Tabout 路径明确排除活动 Snippet Session、Inline Suggest 与 Rename 输入框。Matrix/Align 中同样先使用当前单元格内的真实 Tabout 目标，再回退到插列，而且不会越过行列边界。无需先输入 trigger 即可用 `Ctrl+Alt+L`（macOS 为 `Cmd+Alt+L`）浏览当前上下文可直接插入的普通片段。若 `Tab` 已被其他扩展接管，可通过键盘快捷方式页面检查 `texleaf` 命令的 when 条件与冲突来源。
 
 ### 数学上下文
 

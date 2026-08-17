@@ -12,8 +12,7 @@
 const assert = require("node:assert/strict");
 
 const { port, scenario } = parseArguments(process.argv.slice(2));
-const openingNeedle =
-  scenario === "nested-display" || scenario === "typing-stability"
+const openingNeedle = scenario === "nested-display" || scenario === "typing-stability"
     ? String.raw`\[`
     : String.raw`\begin{align}`;
 
@@ -394,7 +393,11 @@ async function waitForVisibleEditorText(client, expectedText, label) {
   let last;
   while (Date.now() < deadline) {
     last = await evaluatePreview(client, openingNeedle);
-    if (last?.visibleText?.includes(expectedText)) {
+    if (
+      normalizeVisibleEditorText(last?.visibleText).includes(
+        normalizeVisibleEditorText(expectedText),
+      )
+    ) {
       return last;
     }
     await delay(10);
@@ -402,6 +405,10 @@ async function waitForVisibleEditorText(client, expectedText, label) {
   throw new Error(
     `Timed out waiting for ${label} to update the Monaco model: ${JSON.stringify(last)}`,
   );
+}
+
+function normalizeVisibleEditorText(value) {
+  return typeof value === "string" ? value.replace(/\u00a0/gu, " ") : "";
 }
 
 async function waitForPaintedPreview(client, needle) {
@@ -555,7 +562,11 @@ function collectPreviewMetrics(needle) {
     computedLeft: pseudo.left,
     computedRight: pseudo.right,
     baseLeft: preview.getBoundingClientRect().left,
-    visibleText: document.querySelector(".monaco-editor .view-lines")?.textContent,
+    visibleText:
+      document.querySelector(".monaco-editor.focused .view-lines")?.textContent ??
+      [...document.querySelectorAll(".monaco-editor .view-lines")]
+        .map((viewLines) => viewLines.textContent ?? "")
+        .join("\n"),
   };
 
   function findDecorationRuleCss(className) {

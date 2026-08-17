@@ -72,9 +72,8 @@ try {
         // Make the stale-while-revalidate interval deliberately visible to
         // the CDP typing regression. The old eager-clear implementation left
         // the editor blank for this entire interval after every keystroke.
-        "texleaf.mathPreview.debounceMs": options.scenario === "typing-stability"
-          ? 250
-          : 50,
+        "texleaf.mathPreview.debounceMs":
+          options.scenario === "typing-stability" ? 250 : 50,
         "texleaf.mathPreview.scale": 1.25,
       },
       null,
@@ -472,7 +471,7 @@ function parseArguments(argv) {
     "Usage: node test/run-math-preview-visual-host.cjs " +
     "[--vsix <path>] [--theme dark|light] " +
     "[--scenario inline|multiline-inline|display|nested-display|tall-display|typing-stability] " +
-    "[--placement auto|above|below] [--debug-port <port>]";
+    "[--placement autoBelow|autoAbove|above|below] [--debug-port <port>]";
   if (argv.includes("--help")) {
     process.stdout.write(
       `${usage}\n\n` +
@@ -481,7 +480,8 @@ function parseArguments(argv) {
         "  --theme dark|light            Editor theme (default: dark).\n" +
         "  --scenario inline|multiline-inline|display|nested-display|tall-display|typing-stability\n" +
         "                                Fixture to open (default: display).\n" +
-        "  --placement auto|above|below  Math Preview placement (default: auto).\n" +
+        "  --placement autoBelow|autoAbove|above|below\n" +
+        "                                Math Preview placement (default: autoBelow).\n" +
         "  --debug-port <port>           Loopback CDP port for isolated renderer QA.\n",
     );
     process.exit(0);
@@ -489,7 +489,7 @@ function parseArguments(argv) {
   let vsixPath;
   let theme = "dark";
   let scenario = "display";
-  let placement = "auto";
+  let placement = "autoBelow";
   let debugPort;
   const seenFlags = new Set();
   for (let index = 0; index < argv.length; index += 2) {
@@ -533,7 +533,12 @@ function parseArguments(argv) {
       continue;
     }
     if (flag === "--placement") {
-      if (value !== "auto" && value !== "above" && value !== "below") {
+      if (
+        value !== "autoBelow" &&
+        value !== "autoAbove" &&
+        value !== "above" &&
+        value !== "below"
+      ) {
         throw new Error(usage);
       }
       placement = value;

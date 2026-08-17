@@ -4,7 +4,7 @@
 
 TeXLeaf 是一个面向 VS Code 桌面版的 LaTeX 写作扩展，把高频片段、可选的 AI 写作检查、Zotero 引用和活动公式预览整合到同一个插件中。它不接管 LaTeX 编译，也不会把 VSIX 二进制提交到源码仓库；功能构思与交互设计受到下文所列开源项目的启发。
 
-当前版本：`0.8.11`。支持 Windows、macOS 和 Linux 上的 VS Code `1.98+`；Zotero 联动需要 Zotero 桌面端允许本机通信，推荐安装 Better BibTeX。AI 写作功能需要用户为所选服务商自行准备 API Key，默认关闭。
+当前版本：`1.0.0`。支持 Windows、macOS 和 Linux 上的 VS Code `1.98+`；Zotero 联动需要 Zotero 桌面端允许本机通信，推荐安装 Better BibTeX。AI 写作功能需要用户为所选服务商自行准备 API Key，默认关闭。
 
 安装方式：优先从 [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=zhangxh-math.texleaf) 安装；也可以从 [GitHub Releases](https://github.com/zhangxh-math/texleaf/releases) 下载对应版本的 VSIX，在 VS Code 运行“Extensions: Install from VSIX...”。源码仓库只保存可审阅的源文件，VSIX 仅作为 Release 资产发布。
 
@@ -27,22 +27,26 @@ TeXLeaf 首次创建全局用户片段库时写入 212 条可编辑的 LaTeX 默
 
 | Trigger | 模板 |
 | --- | --- |
-| `tmpa-cn` | 中文 article |
-| `tmpa-en` | 英文 article |
+| `article-cn` | 中文 article |
+| `article-en` | 英文 article |
 | `beamer-cn` | 中文 Beamer |
 | `beamer-en` | 英文 Beamer |
 
-在已保存且内容为空白的 `.tex` 文档中输入完整 trigger 即可自动展开。模板页可以修改名称、trigger、说明和完整 TeX 正文，也可以添加、复制、删除和恢复模板；保存后立即生效。出厂 article 模板使用 `reference.bib`，默认 BibTeX 样式为 `alpha`，并已移除姓名、邮箱、学校和导师等个人信息。
+在已保存且内容为空白的 `.tex` 文档中输入完整 trigger 即可自动展开。1.0.0 只会考虑一次 article factory trigger 迁移：当前值仍是旧出厂值 `tmpa-cn` / `tmpa-en` 时，分别尝试改为 `article-cn` / `article-en`；当前已经是其他值则保持不变。迁移 marker 会先写入，因此新 trigger 被占用、存在前缀冲突或提交失败时会保留旧值并在 **Output → TeXLeaf** 记录提示，之后激活不会反复覆盖；用户日后主动改回 `tmpa-cn` / `tmpa-en` 也不会再次迁移。模板页可以修改名称、trigger、说明和完整 TeX 正文，也可以添加、复制、删除和恢复模板；保存后立即生效。出厂 article 模板使用 `reference.bib`，默认 BibTeX 样式为 `alpha`，并已移除姓名、邮箱、学校和导师等个人信息。
 
 片段设置集中在 VS Code Settings 的 `TeXLeaf · 片段`，包括总开关、自动片段、补全、项目片段文件、数学快捷键和高级匹配参数。详细格式、迁移与安全边界见 Wiki 的 [片段与模板](https://github.com/zhangxh-math/texleaf/wiki/Snippets-and-Templates) 和 [Snippet 格式](https://github.com/zhangxh-math/texleaf/wiki/Snippet-Format)。
 
-0.8.10 收紧了原生 Suggest：TeXLeaf 只返回与光标前输入具有**非空 trigger 前缀匹配**的片段；继续输入后已经不再匹配的候选会从列表移除，不会在公式末尾留下 `+-` 等无关片段。需要不依赖当前前缀浏览当前上下文可直接插入的普通片段时，使用 `Ctrl+Alt+L`（macOS 为 `Cmd+Alt+L`）。默认开启 Tabout 时，Suggest 已打开且当前位置确实有可越过的右括号、`\rangle` 或数学结束分隔符，`Tab` 优先执行 Tabout；若没有真实跳出目标，则仍接受 VS Code 当前选中的原生补全。数学区域的活动 Snippet Session 仍有下一 tabstop 时会先关闭 Suggest、再前往该占位符；Suggest/Tabout 路径不会抢占精确 TeXLeaf trigger、Inline Suggest、Rename 输入框或 Matrix action 的既有 Tab 优先级。
+0.8.10 收紧了原生 Suggest：TeXLeaf 只返回与光标前输入具有**非空 trigger 前缀匹配**的片段；继续输入后已经不再匹配的候选会从列表移除，不会在公式末尾留下 `+-` 等无关片段。需要不依赖当前前缀浏览当前上下文可直接插入的普通片段时，使用 `Ctrl+Alt+L`（macOS 为 `Cmd+Alt+L`）。默认开启 Tabout 时，Suggest 已打开且当前位置确实有可越过的右括号、`\rangle` 或数学结束分隔符，`Tab` 优先执行 Tabout；若没有真实跳出目标，则仍接受 VS Code 当前选中的原生补全。数学区域的活动 Snippet Session 仍有下一 tabstop 时会先关闭 Suggest、再前往该占位符；Suggest/Tabout 路径不会抢占精确 TeXLeaf trigger、Inline Suggest 或 Rename 输入框的既有 Tab 优先级。Matrix/Align 在 1.0.0 中采用下文说明的“局部 Tabout 优先、无目标才插列”。
 
 0.8.11 修复了普通片段没有显式 tabstop、但展开时同时触发自动放大括号的光标位置。例如在 `(sum)` 中输入完成后会得到 `\left(\sum|\right)`，光标保留在生成的 `\right` 前，可以继续输入 `+`、上下限或被求和项；当当前位置没有精确手动片段 trigger 时，按一次 `Tab` 可跳到右定界符之后。刚停在 `\sum` 后直接按 `Tab` 时，既有 `sum`-limits 手动片段仍优先展开，这是有意的既有优先级。片段本身已经声明 tabstop 时仍按它原有的占位符顺序导航。
 
+1.0.0 在候选筛选中保留当前全部适用候选的**全局最长非零前缀组**，并额外保留所有已经完整输入的 literal trigger，避免 regex shadow 或重复 ID 把完整字面量候选筛掉。只有 runtime 唯一选中的 exact literal 会获得 Keyword 类型、preselect 与 exact sort 优先级；其他被保留的完整 literal 仍按普通 Snippet 候选排序。例如输入 `ss` 时，`SS2`、`SSE`、`SSP`、`SSS` 这一组可以保留，而只匹配末尾单个 `s` 的 `sum`、`sim`、`sub`、`sup` 不再挤进列表；输入单个 `s` 或完整 trigger 时仍按原规则工作。VS Code 仍会合并第三方 Completion Provider，TeXLeaf 只能收紧自己返回的候选。
+
+1.0.0 也把 `align` / matrix 中的 Tab 和括号推断限制在当前数学列表：自动放大不会跨越未转义的 `&`、`\\`、`\cr`、`\crcr` 或 `\tabularnewline` 配对括号。在当前单元格里确有右侧闭合符时，`Tab` 先跳出该闭合符；没有局部可跳目标时才插入下一列的 ` & `。因此在 `\frac{1}{n^{2}|}` 中第一次 `Tab` 会越过分母右花括号，而不是立即补 ` & `；Tabout 也不会越过行列边界去寻找下一单元格或下一行的括号。
+
 ## AI 写作助手
 
-TeXLeaf 0.8.11 提供一套可选的 Grammarly 风格写作工作流，可选择 DeepSeek 官方/自定义的 Chat Completions API，或 OpenAI 官方/自定义的 Responses API：
+TeXLeaf 1.0.0 提供一套可选的 Grammarly 风格写作工作流，可选择 DeepSeek 官方/自定义的 Chat Completions API，或 OpenAI 官方/自定义的 Responses API：
 
 - 停止键入后局部检查本次改动的正文句子，不清空其他仍有效的问题；
 - 通过编辑器装饰线、TeXLeaf 专用 Hover、灯泡 Quick Fix 和活动栏问题树展示原因；Hover 中的“应用这条建议”、灯泡或问题树都可一键替换，也可在本次会话忽略；AI 问题不会重复发布到 Problems；
@@ -94,16 +98,18 @@ DeepSeek JSON 输出为空或不是合法 JSON 时，TeXLeaf 只会自动重试�
 
 当光标位于 `\cite{...}`（以及配置的其他引用命令）参数中时，TeXLeaf 使用 VS Code 原生 Suggest 展示参考文献：
 
-- 第一组来自项目 `reference.bib` 中已有的条目；
-- 第二组来自 Zotero/Better BibTeX 中尚未写入该 `.bib` 的条目；
-- 输入题目、作者、年份或 citation key 的任意部分均可筛选；
+- 同时汇总项目 `reference.bib` 中已有的条目，以及 Zotero/Better BibTeX 中尚未写入该 `.bib` 的条目；
+- 可按 citation key、标题、作者、年份、DOI 或 ISBN 搜索；多词查询去重后按 AND 组合，可以跨字段命中；
+- 结果按相关度排序：精确原始 key（保留标点）优先，其后是紧凑 key/前缀、精确 DOI/ISBN、全词/词首和普通子串；相关度相同时才偏好已收录的 bibliography 条目；
+- 原生 Suggest 最多展示 100 条；TeXLeaf 先对全库做本地匹配与排序再截断，继续输入可以找到先前未进入前 100 条的文献；
 - 支持一个 `\cite{...}` 中连续加入多个、逗号分隔的 key；
 - 接受已有条目时只插入 key；接受 Zotero 条目时先导出 BibTeX/BibLaTeX，再以同一个 `WorkspaceEdit` 写入 bibliography 并插入 key；
+- 文献身份按 fail-closed 规则判断：双方有效 DOI 相同才作为强身份，双方有效 DOI 不同则明确冲突；ISBN 不能单独判同，只有标题一致且双方提供的第一作者姓氏与年份不矛盾时才辅助复用现有条目；Zotero 中重复 citation key 的整组候选都会隐藏，不会任意选择其中一条；
 - bibliography 文件名和导出格式均可配置，默认分别是 `reference.bib` 和 BibTeX。
 
-TeXLeaf 自己的 Suggest 条目在左侧只显示标题和来源，避免 citation key 挤占宽度；右侧详情按字段显示完整标题、作者、期刊/出版物、年份、`Citation key`、来源与导入状态。LaTeX/TeX 文档默认关闭 VS Code 的普通文档单词建议。VS Code 不允许一个 Completion Provider 删除另一个扩展的候选，因此 LaTeX Workshop 若同时提供 citation completion，仍由它自己的设置控制。
+TeXLeaf 自己的 Suggest 条目在左侧只显示标题和来源，避免 citation key 挤占宽度；右侧详情按字段显示完整标题、作者、期刊/出版物、年份、`Citation key`、来源与导入状态。原始 key 的标点精确命中与去标点后的紧凑 key 匹配属于不同等级。搜索不包含期刊/出版物、摘要、标签或笔记，也不做拼写纠错。LaTeX/TeX 文档默认关闭 VS Code 的普通文档单词建议。VS Code 不允许一个 Completion Provider 删除另一个扩展的候选，因此 LaTeX Workshop 若同时提供 citation completion，仍由它自己的设置控制。
 
-Zotero 连接固定使用 `127.0.0.1`，不会访问远程 Zotero 账户。优先调用 Better BibTeX JSON-RPC 获取稳定 citekey 和 BibTeX/BibLaTeX；不可用时回退 Zotero 官方 Local API。请在 Zotero 中启用“允许本机其他应用与 Zotero 通信”。Zotero 8+ 与当前 Better BibTeX 是推荐组合；使用旧版 Zotero 时请同时核对对应 BBT 版本。
+Zotero 连接固定使用 `127.0.0.1`，不会访问远程 Zotero 账户。优先调用 Better BibTeX JSON-RPC 获取稳定 citekey 和 BibTeX/BibLaTeX；不可用时回退 Zotero 官方 Local API。请在 Zotero 中启用“允许本机其他应用与 Zotero 通信”。Zotero 文献列表默认在内存中缓存 30 秒；每次键入只筛选本地快照，不会逐键请求 Zotero。Zotero 8+ 与当前 Better BibTeX 是推荐组合；使用旧版 Zotero 时请同时核对对应 BBT 版本。
 
 文献设置集中在 `TeXLeaf · 文献`，涵盖功能开关、自动弹出、bibliography 路径、引用命令、Zotero 端口/文库、超时/缓存和 BibTeX/BibLaTeX 格式。完整流程与故障排查见 Wiki 的 [文献与 Zotero](https://github.com/zhangxh-math/texleaf/wiki/References-and-Zotero)。
 
@@ -113,8 +119,9 @@ Math Preview 的产品方向受到 Ultra Math Preview 与 hscopes-booster 启发
 
 - 支持 `$...$`、`$$...$$`、`\(...\)`、`\[...\]` 及 equation、align、matrix 等数学环境；
 - 跳过注释、verb/verbatim 和不安全的未闭结构；
-- 行内公式预览默认位于活动源码行下方，并随光标所在行移动；
+- 行内公式预览随光标所在行移动，默认的 `autoBelow` 优先放在下方；
 - 行间公式预览对齐 opening delimiter；超宽公式保持该对齐，右端可能由编辑器裁切；
+- 位置可选默认的 `autoBelow`（优先下方）、`autoAbove`（优先上方），或固定的 `above` / `below`；两种自动模式会在首选侧空间不足时尝试另一侧，上下都不足时都强制使用上方，并对超高、多行公式采用相同的末尾保留策略；旧设置值 `auto` 仍按 `autoBelow` 运行，但不再显示在设置下拉选项中；
 - 卡片使用不透明、圆角、主题自适应背景，预览内有独立高亮光标；
 - 深色主题使用高对比纯白矢量字形和高精度 SVG 渲染提示；
 - 支持 Cursor、Hover 或两者组合，并提供防抖、长度、缩放、缓存和受限宏配置。

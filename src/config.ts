@@ -4,7 +4,10 @@ import {
   isTeXLeafSourceUri,
   sanitizeMathPreviewConfiguredMacros,
 } from "./core";
-import type { MathPreviewPlacement } from "./mathPreviewLayout";
+import {
+  normalizeMathPreviewPlacement,
+  type MathPreviewPlacement,
+} from "./mathPreviewLayout";
 
 export type ManualTrigger = "tab" | "space";
 export type BibliographyFormat = "bibtex" | "biblatex";
@@ -223,8 +226,8 @@ export function readConfig(uri?: vscode.Uri): TeXLeafConfig {
     mathPreviewPresentation: readMathPreviewPresentation(
       config.get<string>("mathPreview.presentation", "cursor"),
     ),
-    mathPreviewPlacement: readMathPreviewPlacement(
-      config.get<string>("mathPreview.placement", "auto"),
+    mathPreviewPlacement: normalizeMathPreviewPlacement(
+      config.get<string>("mathPreview.placement", "autoBelow"),
     ),
     mathPreviewDebounceMs: clamp(
       config.get<number>("mathPreview.debounceMs", 120),
@@ -451,10 +454,6 @@ function normalizeBibliographyFormat(
 
 function readMathPreviewPresentation(value: string): MathPreviewPresentation {
   return value === "hover" || value === "both" ? value : "cursor";
-}
-
-function readMathPreviewPlacement(value: string): MathPreviewPlacement {
-  return value === "above" || value === "below" ? value : "auto";
 }
 
 function readAIWritingProvider(value: string): AIWritingProvider {

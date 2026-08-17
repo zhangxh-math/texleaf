@@ -10,6 +10,13 @@ import {
   SnippetRuntime,
 } from "./snippetRuntime";
 
+interface CompletionCandidate {
+  readonly snippet: CompiledSnippet;
+  readonly prefixLength: number;
+  readonly isFullTrigger: boolean;
+  readonly isExactTrigger: boolean;
+}
+
 export class TeXLeafCompletionProvider
   implements vscode.CompletionItemProvider<vscode.CompletionItem>
 {
@@ -49,7 +56,6 @@ export class TeXLeafCompletionProvider
       return undefined;
     }
     const linePrefix = document.lineAt(position.line).text.slice(0, position.character);
-    const items: vscode.CompletionItem[] = [];
     const exactMatch = this.runtime.matchAt(
       document,
       position,
@@ -61,6 +67,8 @@ export class TeXLeafCompletionProvider
       exactMatch.match.matchedText === exactMatch.match.snippet.triggerSource
         ? exactMatch.match.snippet
         : undefined;
+    const candidates: CompletionCandidate[] = [];
+    let longestPrefixLength = 0;
 
     for (const snippet of this.runtime.compiledSnippetsFor(document, config)) {
       if (
@@ -76,7 +84,6 @@ export class TeXLeafCompletionProvider
         linePrefix,
         snippet.triggerSource,
       );
-      const isExactTrigger = snippet === exactLiteralSnippet;
       // Do not offer the whole snippet catalogue as zero-width completions.
       // An incomplete Suggest session asks the provider again after every
       // character; once a formerly matching trigger no longer shares any
@@ -86,6 +93,24 @@ export class TeXLeafCompletionProvider
       if (prefixLength === 0) {
         continue;
       }
+      longestPrefixLength = Math.max(longestPrefixLength, prefixLength);
+      candidates.push({
+        snippet,
+        prefixLength,
+        isFullTrigger: prefixLength === snippet.triggerSource.length,
+        isExactTrigger: snippet === exactLiteralSnippet,
+      });
+    }
+
+    const items: vscode.CompletionItem[] = [];
+    for (const candidate of candidates) {
+      if (
+        !candidate.isFullTrigger &&
+        candidate.prefixLength !== longestPrefixLength
+      ) {
+        continue;
+      }
+      const { snippet, prefixLength, isExactTrigger } = candidate;
       const item = new vscode.CompletionItem(
         snippet.triggerSource,
         // `editor.snippetSuggestions = bottom` groups every item whose kind is

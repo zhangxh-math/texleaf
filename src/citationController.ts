@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
 import {
   findCitationContext,
@@ -6,17 +7,27 @@ import {
   getCitationCompletionEdit,
   normalizeReferenceSearchText,
   parseBibTeX,
-  referenceMatchesQuery,
+  citationSearchMatchSortText,
+  compareCitationSearchMatches,
+  prepareCitationSearchReference,
+  rankCitationReferences,
   SerialTaskQueue,
   type BibTeXEntry,
+  type CitationReference,
+  type CitationSearchMatch,
   type CitationCompletionEdit,
   type CitationContext,
+  type PreparedCitationSearchReference,
 } from "./core";
-import { CitationRepository } from "./citationRepository";
+import {
+  CitationRepository,
+  type BibliographySnapshot,
+} from "./citationRepository";
 import { readConfig, type TeXLeafConfig } from "./config";
 import {
   createBibIdentityIndex,
   findEquivalentBibEntry,
+  findImportCompatibleBibEntry,
   isSafeCitationKey,
   referencesClearlyConflict,
 } from "./referenceMatcher";
@@ -34,14 +45,20 @@ const MARK_COMPLETION_ACCEPTED_COMMAND = "texleaf.markCitationCompletionAccepted
 const AUTO_TRIGGER_DELAY_MS = 100;
 const MINIMUM_ZOTERO_CACHE_MS = 1_000;
 const ZOTERO_FAILURE_RETRY_MS = 5_000;
+const MAX_CITATION_COMPLETION_ITEMS = 100;
 
 interface ZoteroSnapshot {
   readonly cacheKey: string;
+  /** Unique identity of this exact fetched library snapshot. */
+  readonly snapshotId: string;
   readonly expiresAt: number;
   readonly client: ZoteroClient;
   readonly ready: ZoteroReady;
   readonly library: ZoteroLibrary;
   readonly references: readonly ZoteroReference[];
+  /** Every duplicate citekey is excluded rather than ambiguously importing one. */
+  readonly duplicateCitekeys: ReadonlySet<string>;
+  readonly searchReferences: readonly PreparedCitationSearchReference<ZoteroCitationReference>[];
 }
 
 interface ZoteroLoadState {
@@ -65,9 +82,48 @@ interface LocatedCitation {
 
 interface CitationCompletionArgument {
   readonly documentUri: string;
-  readonly cacheKey: string;
+  /** Exact bibliography resolved while this candidate was constructed. */
+  readonly bibliographyUri: string;
+  readonly snapshotKey: string;
+  readonly snapshotId: string;
+  readonly contextKey: string;
   readonly reference: ZoteroReference;
 }
+
+interface ZoteroCitationReference extends CitationReference {
+  readonly zotero: ZoteroReference;
+}
+
+interface BibliographySearchSnapshot {
+  readonly uriText: string;
+  readonly text: string;
+  readonly entries: readonly BibTeXEntry[];
+  readonly duplicateKeys: ReadonlySet<string>;
+  readonly identity: ReturnType<typeof createBibIdentityIndex>;
+  readonly searchReferences: readonly PreparedCitationSearchReference<BibTeXEntry>[];
+}
+
+interface RankedCompletionCandidateBase {
+  readonly sourceRank: 0 | 1;
+  readonly match: CitationSearchMatch;
+  readonly tieBreak: string;
+}
+
+interface RankedExistingCompletionCandidate extends RankedCompletionCandidateBase {
+  readonly sourceRank: 0;
+  readonly entry: BibTeXEntry;
+}
+
+interface RankedZoteroCompletionCandidate extends RankedCompletionCandidateBase {
+  readonly sourceRank: 1;
+  readonly zotero: ZoteroReference;
+  readonly cacheKey: string;
+  readonly snapshotId: string;
+}
+
+type RankedCompletionCandidate =
+  | RankedExistingCompletionCandidate
+  | RankedZoteroCompletionCandidate;
 
 /**
  * Supplies citation references through VS Code's native suggest widget and
@@ -85,6 +141,7 @@ export class CitationController
   private zoteroLoad: ZoteroLoadState | undefined;
   private zoteroFailure: ZoteroFailure | undefined;
   private zoteroGeneration = 0;
+  private bibliographySearchCache: BibliographySearchSnapshot | undefined;
   private applying = false;
 
   public constructor(
@@ -128,7 +185,12 @@ export class CitationController
         if (!event.affectsConfiguration("texleaf")) {
           return;
         }
-        this.clearZoteroState();
+        if (zoteroSnapshotConfigurationChanged(event)) {
+          this.clearZoteroState();
+        }
+        if (event.affectsConfiguration("texleaf.bibliographyFile")) {
+          this.bibliographySearchCache = undefined;
+        }
         this.activeCitationIdentity = undefined;
         this.scheduleAutoTrigger();
       }),
@@ -179,13 +241,15 @@ export class CitationController
     }
 
     let bibliographyUri: vscode.Uri;
-    let bibliographyText: string;
+    let bibliography: BibliographySearchSnapshot;
     try {
       bibliographyUri = await this.repository.resolveBibliographyUri(
         document,
         located.config.bibliographyFile,
       );
-      bibliographyText = (await this.repository.read(bibliographyUri)).text;
+      bibliography = this.prepareBibliographySearch(
+        await this.repository.read(bibliographyUri),
+      );
     } catch (error: unknown) {
       this.output.error(`读取 bibliography 失败：${errorMessage(error)}`);
       return undefined;
@@ -194,8 +258,6 @@ export class CitationController
       return undefined;
     }
 
-    const bibEntries = parseBibTeX(bibliographyText);
-    const duplicateKeys = findDuplicateKeys(bibEntries);
     const excludedKeys = new Set(
       located.completionEdit.mode === "insert-at-cursor"
         ? located.context.keys
@@ -203,20 +265,19 @@ export class CitationController
     );
     const range = completionRange(document, located.completionEdit);
     const query = located.completionEdit.prefixQuery;
-    const items: vscode.CompletionItem[] = [];
-
-    for (const entry of bibEntries) {
-      if (
-        excludedKeys.has(entry.key) ||
-        !isSafeCitationKey(entry.key) ||
-        duplicateKeys.has(entry.key) ||
-        !referenceMatchesQuery(entry, query)
-      ) {
-        continue;
-      }
-      items.push(
-        this.createExistingCompletion(entry, bibliographyUri, range, query),
-      );
+    const candidates: RankedCompletionCandidate[] = [];
+    const eligibleBibliography = bibliography.searchReferences.filter(({ reference }) =>
+      !excludedKeys.has(reference.key) &&
+      isSafeCitationKey(reference.key) &&
+      !bibliography.duplicateKeys.has(reference.key)
+    );
+    for (const ranked of rankCitationReferences(eligibleBibliography, query)) {
+      candidates.push({
+        sourceRank: 0,
+        match: ranked.match,
+        tieBreak: ranked.prepared.tieBreak,
+        entry: ranked.prepared.reference,
+      });
     }
 
     const configCacheKey = zoteroCacheKey(located.config);
@@ -234,35 +295,80 @@ export class CitationController
     }
 
     if (cached !== undefined) {
-      const bibIdentity = createBibIdentityIndex(bibEntries);
-      const seen = new Set<string>();
-      for (const reference of cached.references) {
+      const eligibleZotero = cached.searchReferences.filter(({ reference }) => {
+        const zotero = reference.zotero;
         if (
-          seen.has(reference.citekey) ||
-          excludedKeys.has(reference.citekey) ||
-          !isSafeCitationKey(reference.citekey) ||
-          findEquivalentBibEntry(reference, bibIdentity) !== undefined ||
-          !zoteroReferenceMatchesQuery(reference, query)
+          excludedKeys.has(zotero.citekey) ||
+          !isSafeCitationKey(zotero.citekey) ||
+          cached.duplicateCitekeys.has(zotero.citekey) ||
+          findEquivalentBibEntry(zotero, bibliography.identity) !== undefined
+        ) {
+          return false;
+        }
+        return true;
+      });
+      const seenKeys = new Set<string>();
+      const seenIdentities = new Set<string>();
+      for (const ranked of rankCitationReferences(eligibleZotero, query)) {
+        const zotero = ranked.prepared.reference.zotero;
+        const identity = zoteroSearchIdentity(zotero, ranked.prepared);
+        if (
+          seenKeys.has(zotero.citekey) ||
+          (identity !== undefined && seenIdentities.has(identity))
         ) {
           continue;
         }
-        seen.add(reference.citekey);
-        items.push(
-          this.createZoteroCompletion(
-            located,
-            reference,
-            cached.cacheKey,
-            bibliographyUri,
-            range,
-            query,
-          ),
-        );
+        seenKeys.add(zotero.citekey);
+        if (identity !== undefined) {
+          seenIdentities.add(identity);
+        }
+        candidates.push({
+          sourceRank: 1,
+          match: ranked.match,
+          tieBreak: ranked.prepared.tieBreak,
+          zotero,
+          cacheKey: cached.cacheKey,
+          snapshotId: cached.snapshotId,
+        });
       }
     }
 
-    // The provider performs title/author/year/key substring matching itself.
+    candidates.sort(compareRankedCompletionCandidates);
+    const limited = candidates.slice(0, MAX_CITATION_COMPLETION_ITEMS);
+    const items = limited.map((candidate, index) => {
+      const sortText = [
+        citationSearchMatchSortText(candidate.match),
+        candidate.sourceRank,
+        String(index).padStart(3, "0"),
+      ].join(":");
+      const preselect = index === 0 && isHighConfidenceCitationMatch(candidate.match);
+      if (candidate.sourceRank === 0) {
+        return this.createExistingCompletion(
+          candidate.entry,
+          bibliographyUri,
+          range,
+          query,
+          sortText,
+          preselect,
+        );
+      }
+      return this.createZoteroCompletion(
+        located,
+        candidate.zotero,
+        candidate.cacheKey,
+        candidate.snapshotId,
+        bibliographyUri,
+        range,
+        query,
+        sortText,
+        preselect,
+      );
+    });
+
+    // TeXLeaf performs normalized, field-aware matching and ranking itself.
     // Keeping the list incomplete makes VS Code ask again after every typed
-    // character instead of locally filtering only by the visible title.
+    // character, so a reference outside the current top 100 can enter as the
+    // query becomes more specific instead of being filtered only by its label.
     return new vscode.CompletionList(items, true);
   }
 
@@ -271,12 +377,14 @@ export class CitationController
     bibliographyUri: vscode.Uri,
     range: vscode.Range,
     query: string,
+    sortText: string,
+    preselect: boolean,
   ): vscode.CompletionItem {
     const bibliographyName = fileName(bibliographyUri);
     const authors = splitBibAuthors(entry.authors);
     const item = new vscode.CompletionItem(
       {
-        label: displayTitle(entry.title),
+        label: displayCitationTitle(entry.title, authors, entry.year),
         description: bibliographyName,
       },
       vscode.CompletionItemKind.Reference,
@@ -291,7 +399,8 @@ export class CitationController
       action: "接受后直接插入现有 citation key，不会改写 bibliography。",
     });
     setManualFilterText(item, query);
-    item.sortText = `0:${normalizedSortTitle(entry.title)}:${entry.key}`;
+    item.sortText = sortText;
+    item.preselect = preselect;
     item.range = range;
     item.insertText = snippetText(entry.key);
     item.command = {
@@ -305,14 +414,21 @@ export class CitationController
     located: LocatedCitation,
     reference: ZoteroReference,
     cacheKey: string,
+    snapshotId: string,
     bibliographyUri: vscode.Uri,
     range: vscode.Range,
     query: string,
+    sortText: string,
+    preselect: boolean,
   ): vscode.CompletionItem {
     const bibliographyName = fileName(bibliographyUri);
     const item = new vscode.CompletionItem(
       {
-        label: displayTitle(reference.title),
+        label: displayCitationTitle(
+          reference.title,
+          reference.authors,
+          reference.year,
+        ),
         description: "Zotero",
       },
       vscode.CompletionItemKind.Reference,
@@ -327,7 +443,8 @@ export class CitationController
       action: `接受后按 ${located.config.bibliographyFormat === "biblatex" ? "BibLaTeX" : "BibTeX"} 格式导入 ${bibliographyName}。`,
     });
     setManualFilterText(item, query);
-    item.sortText = `1:${normalizedSortTitle(reference.title)}:${reference.citekey}`;
+    item.sortText = sortText;
+    item.preselect = preselect;
     item.range = range;
 
     // Completion commands run after the primary edit. Reinsert the exact
@@ -341,7 +458,10 @@ export class CitationController
       title: "导入 Zotero 文献并插入引用",
       arguments: [{
         documentUri: located.document.uri.toString(),
-        cacheKey,
+        bibliographyUri: bibliographyUri.toString(),
+        snapshotKey: cacheKey,
+        snapshotId,
+        contextKey: zoteroCompletionContextKey(located.config),
         reference,
       } satisfies CitationCompletionArgument],
     };
@@ -509,8 +629,10 @@ export class CitationController
       if (generation !== this.zoteroGeneration) {
         throw new Error("Zotero 引用设置已变化，请重新打开补全列表。");
       }
+      const duplicateCitekeys = findDuplicateZoteroCitekeys(references);
       const snapshot: ZoteroSnapshot = {
         cacheKey,
+        snapshotId: randomUUID(),
         expiresAt:
           Date.now() +
           Math.max(
@@ -521,12 +643,19 @@ export class CitationController
         ready,
         library,
         references,
+        duplicateCitekeys,
+        searchReferences: references.map(prepareZoteroCitationSearchReference),
       };
       this.zoteroCache = snapshot;
       this.zoteroFailure = undefined;
       this.output.info(
         `Zotero ${ready.zotero} / ${ready.betterbibtex}：${library.name} 加载 ${references.length} 条参考文献。`,
       );
+      if (duplicateCitekeys.size > 0) {
+        this.output.warn(
+          `Zotero 当前库有 ${duplicateCitekeys.size} 组重复 citation key；为避免导入错文献，这些组不会显示在补全中。`,
+        );
+      }
       return snapshot;
     })();
     this.zoteroLoad = { cacheKey, promise };
@@ -600,6 +729,36 @@ export class CitationController
     this.zoteroFailure = undefined;
   }
 
+  private prepareBibliographySearch(
+    snapshot: BibliographySnapshot,
+  ): BibliographySearchSnapshot {
+    const uriText = snapshot.uri.toString();
+    const cached = this.bibliographySearchCache;
+    if (
+      cached !== undefined &&
+      cached.uriText === uriText &&
+      cached.text === snapshot.text
+    ) {
+      return cached;
+    }
+    const entries = parseBibTeX(snapshot.text);
+    const prepared: BibliographySearchSnapshot = {
+      uriText,
+      text: snapshot.text,
+      entries,
+      duplicateKeys: findDuplicateKeys(entries),
+      identity: createBibIdentityIndex(entries),
+      searchReferences: entries.map((entry) =>
+        prepareCitationSearchReference(entry, {
+          doi: entry.fields.doi ?? "",
+          isbn: entry.fields.isbn ?? "",
+        })
+      ),
+    };
+    this.bibliographySearchCache = prepared;
+    return prepared;
+  }
+
   private async acceptZoteroCompletion(
     argument: CitationCompletionArgument,
   ): Promise<void> {
@@ -625,16 +784,38 @@ export class CitationController
     // does not reopen Suggest while Zotero export is still in progress.
     this.activeCitationIdentity = citationIdentity(located);
     const configKey = zoteroCacheKey(located.config);
+    const contextKey = zoteroCompletionContextKey(located.config);
     try {
-      if (argument.cacheKey !== configKey) {
+      if (
+        argument.snapshotKey !== configKey ||
+        argument.contextKey !== contextKey
+      ) {
         throw new Error("Zotero 引用设置已变化，请重新选择文献。");
       }
       if (!isSafeCitationKey(argument.reference.citekey)) {
         throw new Error("Zotero 返回了不安全的 citation key。");
       }
-      let snapshot = this.zoteroCache;
-      if (snapshot === undefined || snapshot.cacheKey !== configKey) {
-        snapshot = await this.loadZotero(located.config, false);
+      const currentBibliographyUri = await this.repository.resolveBibliographyUri(
+        editor.document,
+        located.config.bibliographyFile,
+      );
+      if (currentBibliographyUri.toString() !== argument.bibliographyUri) {
+        throw new Error(
+          "当前项目解析到的 bibliography 已变化，请从当前补全列表重新选择。",
+        );
+      }
+      const snapshot = this.zoteroCache;
+      if (
+        snapshot === undefined ||
+        snapshot.cacheKey !== configKey ||
+        snapshot.snapshotId !== argument.snapshotId
+      ) {
+        throw new Error("Zotero 文献列表已刷新，请从当前补全列表重新选择。");
+      }
+      if (snapshot.duplicateCitekeys.has(argument.reference.citekey)) {
+        throw new Error(
+          "该 citation key 在 Zotero 当前库中重复；请先在 Zotero 中消除冲突。",
+        );
       }
       const reference = snapshot.references.find(
         (candidate) =>
@@ -665,6 +846,7 @@ export class CitationController
           reference,
           raw,
           exportedEntries[0]!,
+          currentBibliographyUri,
         ),
       );
       this.markCurrentCitationHandled();
@@ -689,14 +871,21 @@ export class CitationController
     reference: ZoteroReference,
     rawEntry: string,
     exportedEntry: BibTeXEntry,
+    expectedBibliographyUri: vscode.Uri,
   ): Promise<{ readonly imported: boolean; readonly saved: boolean }> {
     const texDocument = editor.document;
     const texVersion = texDocument.version;
     const cursorOffset = texDocument.offsetAt(editor.selection.active);
-    const bibliographyUri = await this.repository.resolveBibliographyUri(
+    const resolvedBibliographyUri = await this.repository.resolveBibliographyUri(
       texDocument,
       located.config.bibliographyFile,
     );
+    if (resolvedBibliographyUri.toString() !== expectedBibliographyUri.toString()) {
+      throw new Error(
+        "导出期间项目解析到的 bibliography 已变化，请重新选择文献。",
+      );
+    }
+    const bibliographyUri = expectedBibliographyUri;
     let bibliography = await this.repository.read(bibliographyUri);
     let bibliographyDocument: vscode.TextDocument | undefined;
 
@@ -717,8 +906,9 @@ export class CitationController
       }
       resolvedKey = exact.key;
     } else {
-      const equivalent = findEquivalentBibEntry(
+      const equivalent = findImportCompatibleBibEntry(
         reference,
+        exportedEntry,
         createBibIdentityIndex(freshEntries),
       );
       if (equivalent !== undefined) {
@@ -761,8 +951,9 @@ export class CitationController
         resolvedKey = reopenedExact.key;
         appendText = "";
       } else {
-        const reopenedEquivalent = findEquivalentBibEntry(
+        const reopenedEquivalent = findImportCompatibleBibEntry(
           reference,
+          exportedEntry,
           createBibIdentityIndex(reopenedEntries),
         );
         if (reopenedEquivalent !== undefined) {
@@ -897,20 +1088,43 @@ function setManualFilterText(
   }
 }
 
-function zoteroReferenceMatchesQuery(
+function prepareZoteroCitationSearchReference(
   reference: ZoteroReference,
-  query: string,
-): boolean {
-  return referenceMatchesQuery(
+): PreparedCitationSearchReference<ZoteroCitationReference> {
+  return prepareCitationSearchReference(
     {
       key: reference.citekey,
       title: reference.title,
       authors: reference.authors.join(" "),
       container: reference.container,
       year: reference.year,
+      zotero: reference,
     },
-    query,
+    { doi: reference.doi, isbn: reference.isbn },
   );
+}
+
+function zoteroSearchIdentity(
+  reference: ZoteroReference,
+  prepared: PreparedCitationSearchReference,
+): string | undefined {
+  if (prepared.canonicalDoi.length > 0) {
+    return `doi:${prepared.canonicalDoi}`;
+  }
+  const isbn = prepared.canonicalIsbns[0];
+  const title = normalizeReferenceSearchText(reference.title);
+  const year = normalizeReferenceSearchText(reference.year);
+  const firstAuthor = normalizeReferenceSearchText(reference.authors[0] ?? "");
+  if (
+    isbn !== undefined &&
+    title.length > 0 &&
+    firstAuthor.length > 0
+  ) {
+    return `isbn:${isbn}\u0000${title}\u0000${firstAuthor}\u0000${year}`;
+  }
+  return title.length > 0 && year.length > 0 && firstAuthor.length > 0
+    ? `fallback:${title}\u0000${firstAuthor}\u0000${year}`
+    : undefined;
 }
 
 interface CompletionDocumentationFields {
@@ -967,8 +1181,51 @@ function zoteroCacheKey(config: TeXLeafConfig): string {
     config.zoteroLibrary,
     config.zoteroRequestTimeoutMs,
     config.bibliographyFormat,
+  ]);
+}
+
+function zoteroCompletionContextKey(config: TeXLeafConfig): string {
+  return JSON.stringify([
+    zoteroCacheKey(config),
     config.bibliographyFile,
   ]);
+}
+
+function zoteroSnapshotConfigurationChanged(
+  event: vscode.ConfigurationChangeEvent,
+): boolean {
+  return [
+    "texleaf.enabled",
+    "texleaf.zoteroCitations",
+    "texleaf.zoteroPort",
+    "texleaf.zoteroLibrary",
+    "texleaf.zoteroRequestTimeoutMs",
+    "texleaf.zoteroCacheSeconds",
+    "texleaf.bibliographyFormat",
+  ].some((setting) => event.affectsConfiguration(setting));
+}
+
+function compareRankedCompletionCandidates(
+  left: RankedCompletionCandidate,
+  right: RankedCompletionCandidate,
+): number {
+  return (
+    compareCitationSearchMatches(left.match, right.match) ||
+    left.sourceRank - right.sourceRank ||
+    compareCitationStrings(left.tieBreak, right.tieBreak)
+  );
+}
+
+function compareCitationStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function isHighConfidenceCitationMatch(match: CitationSearchMatch): boolean {
+  return (
+    match.kind === "key-exact" ||
+    match.kind === "doi-exact" ||
+    match.kind === "isbn-exact"
+  );
 }
 
 function validateBibliographyText(
@@ -1003,6 +1260,20 @@ function findDuplicateKeys(entries: readonly BibTeXEntry[]): ReadonlySet<string>
   return duplicates;
 }
 
+function findDuplicateZoteroCitekeys(
+  references: readonly ZoteroReference[],
+): ReadonlySet<string> {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const reference of references) {
+    if (seen.has(reference.citekey)) {
+      duplicates.add(reference.citekey);
+    }
+    seen.add(reference.citekey);
+  }
+  return duplicates;
+}
+
 function splitBibAuthors(authors: string): readonly string[] {
   return authors
     .split(/\s+and\s+/iu)
@@ -1021,15 +1292,26 @@ function displayTitle(title: string): string {
   return compactText(title, 220) || "[无标题]";
 }
 
+function displayCitationTitle(
+  title: string,
+  authors: readonly string[],
+  year: string,
+): string {
+  const displayedTitle = compactText(title, 220);
+  if (displayedTitle.length > 0) {
+    return displayedTitle;
+  }
+  const author = compactText(authors[0] ?? "", 160);
+  const displayedYear = compactText(year, 20);
+  const fallback = [author, displayedYear].filter((value) => value.length > 0);
+  return fallback.length > 0 ? fallback.join(" · ") : "[无标题]";
+}
+
 function compactText(value: string, maximum: number): string {
   const normalized = value.replace(/\s+/gu, " ").trim();
   return normalized.length <= maximum
     ? normalized
     : `${normalized.slice(0, Math.max(1, maximum - 1))}…`;
-}
-
-function normalizedSortTitle(title: string): string {
-  return normalizeReferenceSearchText(title).slice(0, 160);
 }
 
 function fileName(uri: vscode.Uri): string {

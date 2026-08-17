@@ -5,6 +5,8 @@ import {
   CitationReference,
   appendBibTeXEntry,
   bibTeXValueToText,
+  citationSearchMatchSortText,
+  compareCitationSearchMatches,
   detectLineEnding,
   filterReferences,
   findCitationContext,
@@ -12,8 +14,11 @@ import {
   formatBibTeXAppendBlock,
   getCitationCompletionEdit,
   indexBibTeX,
+  matchPreparedCitationReference,
   normalizeReferenceSearchText,
   parseBibTeX,
+  prepareCitationSearchReference,
+  rankCitationReferences,
   referenceMatchesQuery,
   splitCitationKeys,
 } from '../src/core';
@@ -318,4 +323,325 @@ test('reference search folds Unicode accents and filters key, title, author, and
     true,
     'a year must remain searchable even when it is absent from the citation key',
   );
+});
+
+test('prepared citation search tokenizes unique AND terms across searchable metadata only', () => {
+  const prepared = prepareCitationSearchReference(
+    {
+      key: 'Chatelet1740Energy',
+      title: 'Foundations of Energy',
+      authors: 'Émilie du Châtelet',
+      container: 'Académie Press',
+      year: '1740',
+    },
+    {
+      doi: 'https://doi.org/10.1234/Energy.1740',
+      isbn: '978-0-12-345678-9',
+    },
+  );
+
+  const ordered = matchPreparedCitationReference(
+    prepared,
+    '  foundations—ÉMILIE, 1740  foundations ',
+  );
+  const reordered = matchPreparedCitationReference(
+    prepared,
+    '1740 emilie foundations',
+  );
+  assert.equal(ordered?.kind, 'all-words');
+  assert.deepEqual(reordered, ordered, 'duplicate terms and query order must not change scoring');
+  assert.equal(
+    matchPreparedCitationReference(prepared, 'emilie 1740 missing'),
+    undefined,
+    'every distinct query term must match at least one searchable field',
+  );
+  assert.equal(
+    matchPreparedCitationReference(prepared, 'academie press'),
+    undefined,
+    'container/publisher text is display metadata, not a citation search field',
+  );
+  assert.equal(matchPreparedCitationReference(prepared, '  --- ,  ')?.kind, 'empty');
+});
+
+test('prepared citation search folds accents, canonical equivalence, and non-Latin text', () => {
+  const references: readonly CitationReference[] = [
+    {
+      key: 'Unicode2024',
+      title: 'Crème-Brûlée in Łódź and Straße',
+      authors: 'Jose\u0301 García and Zoë Müller',
+      container: '',
+      year: '2024',
+    },
+    {
+      key: 'Algebra2025',
+      title: '代数几何导论',
+      authors: '张三',
+      container: '',
+      year: '2025',
+    },
+  ];
+  const prepared = references.map((reference) =>
+    prepareCitationSearchReference(reference)
+  );
+
+  assert.deepEqual(
+    rankCitationReferences(prepared, 'creme brulee lodz strasse garcia muller')
+      .map(({ prepared: match }) => match.reference.key),
+    ['Unicode2024'],
+  );
+  assert.deepEqual(
+    rankCitationReferences(prepared, '数')
+      .map(({ prepared: match }) => match.reference.key),
+    ['Algebra2025'],
+    'a single CJK character may use ordinary substring matching',
+  );
+});
+
+test('single Latin characters require a full-word or word-prefix strength match', () => {
+  const substringOnly = prepareCitationSearchReference({
+    key: 'Method2024',
+    title: 'Data Methods',
+    authors: 'Tester',
+    container: '',
+    year: '2024',
+  });
+  const strong = prepareCitationSearchReference({
+    key: 'Strong2024',
+    title: 'Ada Methods',
+    authors: 'Tester',
+    container: '',
+    year: '2024',
+  });
+
+  assert.equal(matchPreparedCitationReference(substringOnly, 'a'), undefined);
+  assert.equal(matchPreparedCitationReference(strong, 'a')?.kind, 'word-prefix');
+});
+
+test('citation key matching preserves punctuation before compact and prefix fallbacks', () => {
+  const exact = prepareCitationSearchReference({
+    key: 'Smith:2024',
+    title: 'Exact punctuation',
+    authors: 'Smith',
+    container: '',
+    year: '2024',
+  });
+  const compact = prepareCitationSearchReference({
+    key: 'Smith-2024',
+    title: 'Compact punctuation',
+    authors: 'Smith',
+    container: '',
+    year: '2024',
+  });
+  const prefix = prepareCitationSearchReference({
+    key: 'Smith:2024Supplement',
+    title: 'Key prefix',
+    authors: 'Smith',
+    container: '',
+    year: '2024',
+  });
+
+  assert.equal(matchPreparedCitationReference(exact, 'smith:2024')?.kind, 'key-exact');
+  assert.equal(
+    matchPreparedCitationReference(compact, 'smith:2024')?.kind,
+    'key-compact-exact',
+  );
+  assert.equal(matchPreparedCitationReference(prefix, 'smith:2024')?.kind, 'key-prefix');
+  assert.deepEqual(
+    rankCitationReferences([prefix, compact, exact], 'smith:2024')
+      .map(({ prepared }) => prepared.reference.key),
+    ['Smith:2024', 'Smith-2024', 'Smith:2024Supplement'],
+  );
+});
+
+test('citation ranking orders exact and structured identifiers before textual matches', () => {
+  const query = '10.1234/rank.2024';
+  const prepared = [
+    prepareCitationSearchReference({
+      key: `${query}-supplement`,
+      title: 'Key prefix',
+      authors: '',
+      container: '',
+      year: '',
+    }),
+    prepareCitationSearchReference({
+      key: 'TextSubstring',
+      title: 'x10 x1234 xrank x2024',
+      authors: '',
+      container: '',
+      year: '',
+    }),
+    prepareCitationSearchReference({
+      key: 'DoiExact',
+      title: 'DOI',
+      authors: '',
+      container: '',
+      year: '',
+    }, { doi: `https://doi.org/${query}` }),
+    prepareCitationSearchReference({
+      key: 'TextWords',
+      title: '10 1234 rank 2024',
+      authors: '',
+      container: '',
+      year: '',
+    }),
+    prepareCitationSearchReference({
+      key: '10-1234-rank-2024',
+      title: 'Compact key',
+      authors: '',
+      container: '',
+      year: '',
+    }),
+    prepareCitationSearchReference({
+      key: 'TextPrefixes',
+      title: '10th 1234series ranking 2024edition',
+      authors: '',
+      container: '',
+      year: '',
+    }),
+    prepareCitationSearchReference({
+      key: query,
+      title: 'Exact key',
+      authors: '',
+      container: '',
+      year: '',
+    }),
+  ];
+
+  const ranked = rankCitationReferences(prepared, query);
+  assert.deepEqual(
+    ranked.map(({ match }) => match.kind),
+    [
+      'key-exact',
+      'key-compact-exact',
+      'key-prefix',
+      'doi-exact',
+      'all-words',
+      'word-prefix',
+      'substring',
+    ],
+  );
+  for (let index = 1; index < ranked.length; index += 1) {
+    const previous = ranked[index - 1]!.match;
+    const current = ranked[index]!.match;
+    assert.equal(compareCitationSearchMatches(previous, current) < 0, true);
+    assert.equal(
+      citationSearchMatchSortText(previous) < citationSearchMatchSortText(current),
+      true,
+      'lexical completion sort keys must preserve semantic match ordering',
+    );
+  }
+});
+
+test('DOI and ISBN searches canonicalize exact and prefix forms', () => {
+  const prepared = prepareCitationSearchReference(
+    {
+      key: 'Identifiers2024',
+      title: 'Identifier Search',
+      authors: 'Example Author',
+      container: '',
+      year: '2024',
+    },
+    {
+      doi: 'https://doi.org/10.5555/Graph.Search.2024',
+      isbn: '978-0-12-345678-9; 0-306-40615-2',
+    },
+  );
+
+  assert.equal(
+    matchPreparedCitationReference(prepared, 'DOI: 10.5555/graph.search.2024')?.kind,
+    'doi-exact',
+  );
+  assert.equal(
+    matchPreparedCitationReference(prepared, '10.5555/graph')?.kind,
+    'doi-prefix',
+  );
+  assert.equal(
+    matchPreparedCitationReference(prepared, 'ISBN-13: 978-0-12-345678-9')?.kind,
+    'isbn-exact',
+  );
+  assert.equal(
+    matchPreparedCitationReference(prepared, '978012')?.kind,
+    'isbn-prefix',
+  );
+  assert.equal(
+    matchPreparedCitationReference(prepared, '97801234567890'),
+    undefined,
+    'a 14-digit value must not be truncated into a high-confidence ISBN match',
+  );
+});
+
+test('unlabelled prose with years is not misclassified as an ISBN query', () => {
+  const andMatch = prepareCitationSearchReference(
+    {
+      key: 'Smith2020History',
+      title: 'Collected Results from 2017',
+      authors: 'Alice Smith',
+      container: '',
+      year: '2020',
+    },
+    { isbn: '2017-2020-12' },
+  );
+  const missingAuthor = prepareCitationSearchReference(
+    {
+      key: 'Other2020History',
+      title: 'Collected Results from 2017',
+      authors: 'Other Author',
+      container: '',
+      year: '2020',
+    },
+    { isbn: '2017-2020-12' },
+  );
+
+  assert.equal(
+    matchPreparedCitationReference(andMatch, 'Smith 2017 2020')?.kind,
+    'all-words',
+    'ordinary author/year prose must use tokenized AND matching',
+  );
+  assert.equal(
+    matchPreparedCitationReference(missingAuthor, 'Smith 2017 2020'),
+    undefined,
+    'digits embedded in prose must not become an accidental ISBN prefix',
+  );
+  assert.equal(
+    matchPreparedCitationReference(andMatch, 'ISBN: 2017 2020 12')?.kind,
+    'isbn-exact',
+    'an explicit ISBN label may intentionally contain spaces',
+  );
+  assert.equal(
+    matchPreparedCitationReference(andMatch, '2017-2020-12')?.kind,
+    'isbn-exact',
+    'an unlabelled compact or hyphenated ISBN remains searchable',
+  );
+});
+
+test('citation ranking has a deterministic metadata and raw-key tie break', () => {
+  const alpha = prepareCitationSearchReference({
+    key: 'ZuluKey',
+    title: 'Alpha Title',
+    authors: 'Shared Author',
+    container: '',
+    year: '2024',
+  });
+  const betaA = prepareCitationSearchReference({
+    key: 'AlphaKey',
+    title: 'Beta Title',
+    authors: 'Shared Author',
+    container: '',
+    year: '2024',
+  });
+  const betaZ = prepareCitationSearchReference({
+    key: 'ZuluKeyTwo',
+    title: 'Beta Title',
+    authors: 'Shared Author',
+    container: '',
+    year: '2024',
+  });
+  const expected = ['ZuluKey', 'AlphaKey', 'ZuluKeyTwo'];
+  const keys = (values: typeof alpha[]) =>
+    rankCitationReferences(values, 'shared')
+      .map(({ prepared }) => prepared.reference.key);
+
+  assert.deepEqual(keys([betaZ, alpha, betaA]), expected);
+  assert.deepEqual(keys([betaA, alpha, betaZ]), expected);
+  assert.deepEqual(keys([alpha, betaZ, betaA]), expected);
 });

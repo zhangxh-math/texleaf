@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  prepareCitationSearchReference,
+  rankCitationReferences,
+} from '../src/core';
+import {
   FetchLike,
   FetchRequestInitLike,
   FetchResponseLike,
@@ -394,6 +398,108 @@ test('Local API group search uses q/titleCreatorYear and native BibLaTeX export'
   assert.equal(references[0]?.libraryID, 42);
   assert.equal(await client.exportBibTeX(references[0]!), biblatex);
   assert.equal(calls.filter((url) => url.includes('/api/groups/42/items/top')).length, 1);
+});
+
+test('Better BibTeX and Local API snapshots produce identical ranked citation searches', async () => {
+  const bbt = rpcQueue(
+    (request) => result(request, [{ id: 1, name: 'My Library' }]),
+    (request) => result(request, [
+      {
+        title: 'Crème-Brûlée Graph Methods',
+        author: [{ given: 'José', family: 'García' }],
+        'container-title': 'Journal of Examples',
+        issued: { 'date-parts': [[2024]] },
+        DOI: '10.5555/Graph.2024',
+        ISBN: '978-0-12-345678-9',
+        citekey: 'Garcia2024Graph',
+      },
+      {
+        title: '代数几何导论',
+        author: [{ literal: '张三' }],
+        publisher: '数学出版社',
+        issued: { 'date-parts': [[2025]] },
+        citekey: 'Zhang2025Algebra',
+      },
+    ]),
+  );
+  const bbtClient = new ZoteroClient({ fetch: bbt.fetch });
+  const bbtReferences = await bbtClient.search('', 1);
+
+  const localFetch: FetchLike = async (input, init) => {
+    const url = new URL(input);
+    if (init.method === 'POST') {
+      return response({}, 404, 'Not Found');
+    }
+    if (url.pathname === '/api/users/0/items/top' && url.searchParams.get('limit') === '1') {
+      return response([]);
+    }
+    if (url.pathname === '/api/users/0/groups') {
+      return response([]);
+    }
+    if (url.pathname === '/api/users/0/items/top') {
+      return response([
+        {
+          data: {
+            itemType: 'book',
+            title: '代数几何导论',
+            creators: [{ creatorType: 'author', name: '张三' }],
+            publisher: '数学出版社',
+            date: '2025',
+          },
+          bibtex: '@book{Zhang2025Algebra, title={代数几何导论}}\n',
+        },
+        {
+          data: {
+            itemType: 'journalArticle',
+            title: 'Crème-Brûlée Graph Methods',
+            creators: [{ creatorType: 'author', firstName: 'José', lastName: 'García' }],
+            publicationTitle: 'Journal of Examples',
+            date: '2024',
+            DOI: '10.5555/Graph.2024',
+            ISBN: '978-0-12-345678-9',
+          },
+          bibtex: '@article{Garcia2024Graph, title={Crème-Brûlée Graph Methods}}\n',
+        },
+      ]);
+    }
+    throw new Error(`unexpected Local API request ${input}`);
+  };
+  const localClient = new ZoteroClient({ fetch: localFetch });
+  await localClient.ready();
+  const localReferences = await localClient.search('', 0);
+
+  const prepare = (references: typeof bbtReferences) => references.map((reference) =>
+    prepareCitationSearchReference(
+      {
+        key: reference.citekey,
+        title: reference.title,
+        authors: reference.authors.join(' '),
+        container: reference.container,
+        year: reference.year,
+      },
+      { doi: reference.doi, isbn: reference.isbn },
+    )
+  );
+  const rankedKeys = (
+    references: typeof bbtReferences,
+    query: string,
+  ): readonly string[] => rankCitationReferences(prepare(references), query)
+    .map(({ prepared }) => prepared.reference.key);
+
+  for (const query of [
+    '',
+    'garcia creme 2024',
+    'Garcia2024',
+    '10.5555/graph.2024',
+    '9780123456789',
+    '数',
+  ]) {
+    assert.deepEqual(
+      rankedKeys(localReferences, query),
+      rankedKeys(bbtReferences, query),
+      `BBT and Local API must share one local ranking contract for ${JSON.stringify(query)}`,
+    );
+  }
 });
 
 test('item.export selects Better BibTeX/BibLaTeX and accepts legacy wrapped results', async () => {

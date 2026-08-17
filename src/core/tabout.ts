@@ -1,8 +1,21 @@
 import { scanLatexRegions, isMatrixEnvironment } from './latexScanner';
 import { LatexMathRegion, TaboutOptions, TaboutPlan } from './types';
+import { alignmentBoundaryLengthAt } from './alignmentBoundary';
 
 const SINGLE_CHARACTER_CLOSERS = new Set(['}', ')', ']', '>', '|']);
 const COMMAND_CLOSER = '\\rangle';
+
+function isEscapedAt(text: string, offset: number): boolean {
+  let precedingSlashes = 0;
+  for (
+    let index = offset - 1;
+    index >= 0 && text[index] === '\\';
+    index -= 1
+  ) {
+    precedingSlashes += 1;
+  }
+  return precedingSlashes % 2 === 1;
+}
 
 function innermostRegionAt(text: string, cursorOffset: number): LatexMathRegion | undefined {
   let result: LatexMathRegion | undefined;
@@ -56,6 +69,23 @@ export function planTabout(
   );
 
   for (let index = cursorOffset; index < innerEnd; index += 1) {
+    if (text[index] === '%' && !isEscapedAt(text, index)) {
+      // TeX comments are not part of the math list. Ignore boundary-looking
+      // tokens and closing delimiters until the physical line ends.
+      while (
+        index < innerEnd &&
+        text[index] !== '\n' &&
+        text[index] !== '\r'
+      ) {
+        index += 1;
+      }
+      continue;
+    }
+    if (arrayMode && alignmentBoundaryLengthAt(text, index) > 0) {
+      // An alignment cell/row is a separate math list. Tabout may leave local
+      // braces before the boundary, but must not jump into a later cell/row.
+      break;
+    }
     if (text.startsWith(COMMAND_CLOSER, index)) {
       const to = index + COMMAND_CLOSER.length;
       return {

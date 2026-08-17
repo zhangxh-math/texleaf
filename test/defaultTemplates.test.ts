@@ -9,12 +9,25 @@ import {
 } from "../src/core";
 import { DEFAULT_TEMPLATES } from "../src/defaultTemplates";
 import {
+  registerSnippetSyncGlobalStateKeys,
+  SNIPPET_SYNC_GLOBAL_STATE_KEYS,
+  SNIPPET_SYNC_METADATA_KEY,
+  SNIPPET_SYNC_STATE_KEY,
+} from "../src/snippetSync";
+import {
+  ARTICLE_TEMPLATE_TRIGGER_MIGRATION_STATE_KEY,
   createManagedTemplateCatalog,
   decodeManagedTemplateCatalog,
   MAX_TEMPLATE_CONTENT_BYTES,
+  TEMPLATE_LIBRARY_STATE_KEY,
   toStoredTemplateCatalog,
   type ManagedTemplate,
+  type ManagedTemplateCatalog,
 } from "../src/templateLibrary";
+import {
+  migrateLegacyFactoryTemplateTriggers,
+  type TemplateTriggerMigrationDependencies,
+} from "../src/templateTriggerMigration";
 
 const templateRoot = path.join(process.cwd(), "templates");
 const theoremEnvironments = [
@@ -63,11 +76,123 @@ const beamerCustomTitles: Readonly<
     remark: "Remark",
   },
 };
+const factoryTemplateIds = new Set(DEFAULT_TEMPLATES.map(({ id }) => id));
+
+interface MigrationHarnessOptions {
+  readonly acknowledged?: boolean;
+  readonly acknowledgeError?: Error;
+  readonly createError?: Error;
+  readonly commitError?: Error;
+  readonly latestCatalog?: ManagedTemplateCatalog;
+  readonly useNextAsLatestBeforeCommitError?: boolean;
+}
+
+function createTemplateCatalogFixture(
+  triggerOverrides: Readonly<Record<string, string>>,
+  userTemplates: readonly ManagedTemplate[] = [],
+  revision = "legacy-revision",
+): ManagedTemplateCatalog {
+  return createManagedTemplateCatalog(
+    [
+      ...DEFAULT_TEMPLATES.map((definition) => ({
+        id: definition.id,
+        name: definition.label,
+        trigger: triggerOverrides[definition.id] ?? definition.trigger,
+        description: definition.description,
+        content: "\\documentclass{article}\n@0",
+        isFactory: true,
+      })),
+      ...userTemplates,
+    ],
+    revision,
+    factoryTemplateIds,
+  );
+}
+
+function createMigrationHarness(
+  initialCatalog: ManagedTemplateCatalog,
+  options: MigrationHarnessOptions = {},
+): {
+  readonly dependencies: TemplateTriggerMigrationDependencies;
+  readonly state: {
+    acknowledged: boolean;
+    acknowledgeCalls: number;
+    createCalls: number;
+    commitCalls: number;
+    latestCatalog: ManagedTemplateCatalog;
+    readonly events: string[];
+    readonly infos: string[];
+    readonly warnings: string[];
+  };
+} {
+  const state = {
+    acknowledged: options.acknowledged ?? false,
+    acknowledgeCalls: 0,
+    createCalls: 0,
+    commitCalls: 0,
+    latestCatalog: options.latestCatalog ?? initialCatalog,
+    events: [] as string[],
+    infos: [] as string[],
+    warnings: [] as string[],
+  };
+  return {
+    state,
+    dependencies: {
+      isAcknowledged: () => state.acknowledged,
+      acknowledge: async () => {
+        state.acknowledgeCalls += 1;
+        state.events.push("acknowledge");
+        if (options.acknowledgeError !== undefined) {
+          throw options.acknowledgeError;
+        }
+        state.acknowledged = true;
+      },
+      createCatalog: (templates) => {
+        state.createCalls += 1;
+        state.events.push("create");
+        if (options.createError !== undefined) {
+          throw options.createError;
+        }
+        return createManagedTemplateCatalog(
+          templates,
+          "migrated-revision",
+          factoryTemplateIds,
+        );
+      },
+      commitCatalog: async (next, previous) => {
+        state.commitCalls += 1;
+        state.events.push("commit");
+        assert.equal(previous, initialCatalog);
+        if (options.commitError !== undefined) {
+          if (options.useNextAsLatestBeforeCommitError === true) {
+            state.latestCatalog = next;
+          }
+          throw options.commitError;
+        }
+        state.latestCatalog = next;
+      },
+      readLatestCatalog: () => state.latestCatalog,
+      logger: {
+        info: (message) => state.infos.push(message),
+        warn: (message) => state.warnings.push(message),
+      },
+    },
+  };
+}
 
 test("factory templates are independent, unique, and free of personal data", () => {
   assert.deepEqual(
     DEFAULT_TEMPLATES.map(({ trigger }) => trigger).sort(),
-    ["beamer-cn", "beamer-en", "tmpa-cn", "tmpa-en"],
+    ["article-cn", "article-en", "beamer-cn", "beamer-en"],
+  );
+  assert.deepEqual(
+    DEFAULT_TEMPLATES
+      .filter(({ legacyTriggers }) => legacyTriggers !== undefined)
+      .map(({ id, legacyTriggers }) => [id, legacyTriggers]),
+    [
+      ["template.article-cn", ["tmpa-cn"]],
+      ["template.article-en", ["tmpa-en"]],
+    ],
   );
   assert.equal(
     new Set(DEFAULT_TEMPLATES.map(({ id }) => id)).size,
@@ -269,4 +394,337 @@ test("managed template catalogs reject collisions and unsafe payloads", () => {
     ).kind,
     "invalid",
   );
+});
+
+test("legacy factory article triggers migrate once to article-cn/article-en", async () => {
+  const catalog = createTemplateCatalogFixture({
+    "template.article-cn": "tmpa-cn",
+    "template.article-en": "tmpa-en",
+  });
+  const harness = createMigrationHarness(catalog);
+
+  const migrated = await migrateLegacyFactoryTemplateTriggers(
+    catalog,
+    DEFAULT_TEMPLATES,
+    harness.dependencies,
+  );
+
+  assert.deepEqual(
+    migrated.templates
+      .filter(({ id }) => id.startsWith("template.article-"))
+      .map(({ trigger }) => trigger),
+    ["article-cn", "article-en"],
+  );
+  assert.deepEqual(harness.state.events, ["acknowledge", "create", "commit"]);
+  assert.equal(harness.state.acknowledged, true);
+  assert.equal(harness.state.commitCalls, 1);
+  assert.match(harness.state.infos[0] ?? "", /迁移 2 个/u);
+});
+
+test("a late Settings Sync catalog uses the one-time migration before runtime apply", async () => {
+  const source = readFileSync(
+    path.join(process.cwd(), "src", "templateManager.ts"),
+    "utf8",
+  );
+  const reloadStart = source.indexOf("private async reloadFromState");
+  const reloadBody = source.slice(reloadStart);
+  const migration = reloadBody.indexOf(
+    "await this.migrateLegacyFactoryTriggers(decoded.catalog)",
+  );
+  const apply = reloadBody.indexOf("this.applyCatalogIfChanged(catalog)");
+  assert.ok(reloadStart >= 0);
+  assert.ok(migration >= 0, "late valid catalogs must enter the migration helper");
+  assert.ok(apply > migration, "runtime apply must use the helper's safe result");
+
+  const lateCatalog = createTemplateCatalogFixture({
+    "template.article-cn": "tmpa-cn",
+    "template.article-en": "tmpa-en",
+  });
+  const harness = createMigrationHarness(lateCatalog);
+  const migrated = await migrateLegacyFactoryTemplateTriggers(
+    lateCatalog,
+    DEFAULT_TEMPLATES,
+    harness.dependencies,
+  );
+  assert.deepEqual(
+    migrated.templates
+      .filter(({ id }) => id.startsWith("template.article-"))
+      .map(({ trigger }) => trigger),
+    ["article-cn", "article-en"],
+  );
+  assert.deepEqual(harness.state.events, ["acknowledge", "create", "commit"]);
+});
+
+test("late Settings Sync migration failures retain a safe catalog and stop after acknowledgement", async (t) => {
+  const lateCatalog = createTemplateCatalogFixture({
+    "template.article-cn": "tmpa-cn",
+    "template.article-en": "tmpa-en",
+  });
+
+  await t.test("marker write", async () => {
+    const harness = createMigrationHarness(lateCatalog, {
+      acknowledgeError: new Error("globalState unavailable"),
+    });
+    const result = await migrateLegacyFactoryTemplateTriggers(
+      lateCatalog,
+      DEFAULT_TEMPLATES,
+      harness.dependencies,
+    );
+    assert.equal(result, lateCatalog);
+    assert.equal(harness.state.createCalls, 0);
+    assert.equal(harness.state.commitCalls, 0);
+  });
+
+  await t.test("catalog commit", async () => {
+    const harness = createMigrationHarness(lateCatalog, {
+      commitError: new Error("catalog write failed"),
+    });
+    const result = await migrateLegacyFactoryTemplateTriggers(
+      lateCatalog,
+      DEFAULT_TEMPLATES,
+      harness.dependencies,
+    );
+    assert.equal(result, lateCatalog);
+    assert.equal(harness.state.acknowledged, true);
+    assert.equal(harness.state.commitCalls, 1);
+
+    const secondResult = await migrateLegacyFactoryTemplateTriggers(
+      lateCatalog,
+      DEFAULT_TEMPLATES,
+      harness.dependencies,
+    );
+    assert.equal(secondResult, lateCatalog);
+    assert.equal(harness.state.acknowledgeCalls, 1);
+    assert.equal(harness.state.commitCalls, 1);
+  });
+});
+
+test("trigger migration preserves factory customisations and user templates", async () => {
+  const baseCatalog = createTemplateCatalogFixture(
+    {
+      "template.article-cn": "my-paper-cn",
+      "template.article-en": "tmpa-en",
+    },
+    [
+      {
+        id: "template.user.legacy-name",
+        name: "User legacy name",
+        trigger: "tmpa-cn",
+        description: "",
+        content: "@0",
+        isFactory: false,
+      },
+    ],
+  );
+  const customName = "My edited English article";
+  const customDescription = "Keep this user-authored description verbatim.";
+  const customContent = "\\documentclass{article}\n% user edits must survive\n@0";
+  const catalog = createManagedTemplateCatalog(
+    baseCatalog.templates.map((template) =>
+      template.id === "template.article-en"
+        ? {
+            ...template,
+            name: customName,
+            description: customDescription,
+            content: customContent,
+          }
+        : template,
+    ),
+    baseCatalog.revision,
+    factoryTemplateIds,
+  );
+  const harness = createMigrationHarness(catalog);
+
+  const migrated = await migrateLegacyFactoryTemplateTriggers(
+    catalog,
+    DEFAULT_TEMPLATES,
+    harness.dependencies,
+  );
+
+  assert.equal(
+    migrated.templates.find(({ id }) => id === "template.article-cn")?.trigger,
+    "my-paper-cn",
+  );
+  assert.equal(
+    migrated.templates.find(({ id }) => id === "template.article-en")?.trigger,
+    "article-en",
+  );
+  const migratedEnglish = migrated.templates.find(
+    ({ id }) => id === "template.article-en",
+  );
+  assert.equal(migratedEnglish?.name, customName);
+  assert.equal(migratedEnglish?.description, customDescription);
+  assert.equal(migratedEnglish?.content, customContent);
+  assert.equal(
+    migrated.templates.find(({ id }) => id === "template.user.legacy-name")
+      ?.trigger,
+    "tmpa-cn",
+  );
+});
+
+test("exact and prefix trigger conflicts skip automatic migration", async (t) => {
+  for (const conflictTrigger of [
+    "article-cn",
+    "article",
+    "article-cn-extra",
+  ]) {
+    await t.test(conflictTrigger, async () => {
+      const catalog = createTemplateCatalogFixture(
+        {
+          "template.article-cn": "tmpa-cn",
+          "template.article-en": "my-paper-en",
+        },
+        [
+          {
+            id: `template.user.conflict.${conflictTrigger.length}`,
+            name: "Conflicting user template",
+            trigger: conflictTrigger,
+            description: "",
+            content: "@0",
+            isFactory: false,
+          },
+        ],
+      );
+      const harness = createMigrationHarness(catalog);
+
+      const result = await migrateLegacyFactoryTemplateTriggers(
+        catalog,
+        DEFAULT_TEMPLATES,
+        harness.dependencies,
+      );
+
+      assert.equal(result, catalog);
+      assert.equal(harness.state.acknowledged, true);
+      assert.equal(harness.state.createCalls, 0);
+      assert.equal(harness.state.commitCalls, 0);
+      assert.match(harness.state.warnings[0] ?? "", /新 trigger 已被/u);
+    });
+  }
+});
+
+test("an acknowledged migration never rewrites a later legacy trigger choice", async () => {
+  const catalog = createTemplateCatalogFixture({
+    "template.article-cn": "tmpa-cn",
+    "template.article-en": "my-paper-en",
+  });
+  const harness = createMigrationHarness(catalog, { acknowledged: true });
+
+  const result = await migrateLegacyFactoryTemplateTriggers(
+    catalog,
+    DEFAULT_TEMPLATES,
+    harness.dependencies,
+  );
+
+  assert.equal(result, catalog);
+  assert.equal(harness.state.acknowledgeCalls, 0);
+  assert.equal(harness.state.createCalls, 0);
+  assert.equal(harness.state.commitCalls, 0);
+});
+
+test("marker update failure prevents a trigger migration commit", async () => {
+  const catalog = createTemplateCatalogFixture({
+    "template.article-cn": "tmpa-cn",
+    "template.article-en": "tmpa-en",
+  });
+  const harness = createMigrationHarness(catalog, {
+    acknowledgeError: new Error("globalState unavailable"),
+  });
+
+  const result = await migrateLegacyFactoryTemplateTriggers(
+    catalog,
+    DEFAULT_TEMPLATES,
+    harness.dependencies,
+  );
+
+  assert.equal(result, catalog);
+  assert.equal(harness.state.acknowledged, false);
+  assert.equal(harness.state.createCalls, 0);
+  assert.equal(harness.state.commitCalls, 0);
+  assert.match(harness.state.warnings[0] ?? "", /保留旧 trigger/u);
+});
+
+test("construction, backup, write, and CAS failures retain an old or latest catalog", async (t) => {
+  const catalog = createTemplateCatalogFixture({
+    "template.article-cn": "tmpa-cn",
+    "template.article-en": "tmpa-en",
+  });
+  const externalCatalog = createTemplateCatalogFixture(
+    {
+      "template.article-cn": "synced-paper-cn",
+      "template.article-en": "synced-paper-en",
+    },
+    [],
+    "external-revision",
+  );
+  const cases: readonly {
+    readonly name: string;
+    readonly options: MigrationHarnessOptions;
+    readonly expected: "old" | "external" | "next";
+  }[] = [
+    {
+      name: "catalog construction",
+      options: { createError: new Error("payload limit") },
+      expected: "old",
+    },
+    {
+      name: "verified backup",
+      options: { commitError: new Error("backup verification failed") },
+      expected: "old",
+    },
+    {
+      name: "catalog write verification",
+      options: {
+        commitError: new Error("stored catalog failed verification"),
+        useNextAsLatestBeforeCommitError: true,
+      },
+      expected: "next",
+    },
+    {
+      name: "compare-and-swap",
+      options: {
+        commitError: new Error("catalog revision changed"),
+        latestCatalog: externalCatalog,
+      },
+      expected: "external",
+    },
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      const harness = createMigrationHarness(catalog, fixture.options);
+      const result = await migrateLegacyFactoryTemplateTriggers(
+        catalog,
+        DEFAULT_TEMPLATES,
+        harness.dependencies,
+      );
+
+      assert.equal(harness.state.acknowledged, true);
+      assert.equal(
+        result,
+        fixture.expected === "old"
+          ? catalog
+          : fixture.expected === "external"
+            ? externalCatalog
+            : harness.state.latestCatalog,
+      );
+      assert.match(harness.state.warnings[0] ?? "", /自动迁移未提交/u);
+    });
+  }
+});
+
+test("Settings Sync registers the article-trigger migration marker", () => {
+  let registered: string[] | undefined;
+  registerSnippetSyncGlobalStateKeys({
+    setKeysForSync: (keys) => {
+      registered = keys;
+    },
+  });
+
+  assert.deepEqual(registered, [
+    SNIPPET_SYNC_STATE_KEY,
+    TEMPLATE_LIBRARY_STATE_KEY,
+    ARTICLE_TEMPLATE_TRIGGER_MIGRATION_STATE_KEY,
+  ]);
+  assert.deepEqual(registered, SNIPPET_SYNC_GLOBAL_STATE_KEYS);
+  assert.equal(registered?.includes(SNIPPET_SYNC_METADATA_KEY), false);
 });
