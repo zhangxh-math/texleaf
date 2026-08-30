@@ -9,6 +9,7 @@ coverage/**
 .vscode-test/**
 .pnpm-store/**
 .test-dist/**
+.tmp/**
 out/**
 node_modules/**
 vscode-ultra-math-preview/**

@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 /**
  * Pure helpers for presenting LaTeX prose to a remote writing assistant.
  *
@@ -25,11 +32,33 @@ export interface AiProseSegment {
   readonly sourceEnd: number;
   /** Segment-relative ranges which a model is allowed to replace. */
   readonly editableRanges: readonly AiProseOffsetRange[];
+  /**
+   * Protected-source boundaries where a zero-width punctuation insertion is
+   * explicitly safe. These are used for a display formula whose body has no
+   * terminal punctuation; formula contents remain immutable.
+   */
+  readonly editableInsertionOffsets?: readonly number[];
 }
 
 export interface AiProseDocument {
   readonly sourceLength: number;
   readonly segments: readonly AiProseSegment[];
+}
+
+export interface AiProseCompletionContext {
+  readonly segment: AiProseSegment;
+  readonly segmentOffset: number;
+  readonly prefix: string;
+  readonly suffix: string;
+}
+
+export interface AiProseCompletionContextOptions {
+  /** Defaults to the provider limit of 12,288 UTF-16 units. */
+  readonly maximumPrefixLength?: number;
+  /** Defaults to the provider limit of 6,144 UTF-16 units. */
+  readonly maximumSuffixLength?: number;
+  /** Defaults to the combined provider limit of 16,384 UTF-16 units. */
+  readonly maximumTotalLength?: number;
 }
 
 export interface AiProseDocumentReviewSelection {
@@ -272,11 +301,14 @@ type AiProtectedPlaceholderKind = 'inline-math' | 'display-math';
 
 interface AiProtectedPlaceholderRange extends AiProseOffsetRange {
   readonly kind: AiProtectedPlaceholderKind;
+  /** Absolute source boundary immediately after the rendered marker. */
+  readonly markerEnd: number;
 }
 
 interface AiEditableMask {
   readonly editable: readonly boolean[];
   readonly placeholders: readonly AiProtectedPlaceholderRange[];
+  readonly editableInsertionOffsets: readonly number[];
 }
 
 function normalizedEnvironmentName(name: string): string {
@@ -728,9 +760,61 @@ function markTailProseCommandGroup(
   }
 }
 
+const DISPLAY_MATH_TERMINAL_PUNCTUATION = /[,.!?;:。，！？；：]/u;
+
+function displayMathBodyEnd(source: string, start: number, end: number): number {
+  let closeStart = end;
+  if (source.slice(Math.max(start, end - 2), end) === '$$'
+    || source.slice(Math.max(start, end - 2), end) === '\\]') {
+    closeStart = end - 2;
+  } else {
+    const environmentClose = source.lastIndexOf('\\end', end - 1);
+    if (environmentClose >= start) {
+      closeStart = environmentClose;
+    }
+  }
+
+  let bodyEnd = closeStart;
+  while (bodyEnd > start && /\s/u.test(source[bodyEnd - 1] ?? '')) {
+    bodyEnd -= 1;
+  }
+  // A trailing TeX row break is structural. Sentence punctuation belongs
+  // before it, not between `\\` and the closing display delimiter.
+  if (bodyEnd - start >= 2 && source.slice(bodyEnd - 2, bodyEnd) === '\\\\') {
+    bodyEnd -= 2;
+    while (bodyEnd > start && /\s/u.test(source[bodyEnd - 1] ?? '')) {
+      bodyEnd -= 1;
+    }
+  }
+  return bodyEnd;
+}
+
+function displayMathTerminalPunctuationOffset(
+  source: string,
+  start: number,
+  bodyEnd: number,
+): number | undefined {
+  if (bodyEnd <= start) {
+    return undefined;
+  }
+  const punctuationOffset = bodyEnd - 1;
+  const punctuation = source[punctuationOffset];
+  if (!DISPLAY_MATH_TERMINAL_PUNCTUATION.test(punctuation ?? '')) {
+    return undefined;
+  }
+  // `\\left.` and `\\right.` use a period as an invisible delimiter. It is
+  // math syntax, not sentence punctuation, and must stay protected.
+  const before = source.slice(Math.max(start, bodyEnd - 16), bodyEnd);
+  if (/\\(?:left|right)[,.!?;:]$/u.test(before)) {
+    return undefined;
+  }
+  return punctuationOffset;
+}
+
 function buildEditableMask(source: string): AiEditableMask {
   const editable = Array.from<boolean>({ length: source.length }).fill(true);
   const placeholders: AiProtectedPlaceholderRange[] = [];
+  const editableInsertionOffsets: number[] = [];
   const protectMath = (
     start: number,
     end: number,
@@ -738,7 +822,23 @@ function buildEditableMask(source: string): AiEditableMask {
   ): void => {
     setProtected(editable, start, end);
     if (end > start) {
-      placeholders.push({ start, end, kind });
+      if (kind === 'display-math') {
+        const bodyEnd = displayMathBodyEnd(source, start, end);
+        const punctuationOffset = displayMathTerminalPunctuationOffset(source, start, bodyEnd);
+        if (punctuationOffset === undefined) {
+          editableInsertionOffsets.push(bodyEnd);
+        } else {
+          editable[punctuationOffset] = true;
+        }
+        placeholders.push({
+          start,
+          end,
+          kind,
+          markerEnd: punctuationOffset ?? bodyEnd,
+        });
+      } else {
+        placeholders.push({ start, end, kind, markerEnd: end });
+      }
     }
   };
   let index = 0;
@@ -892,7 +992,7 @@ function buildEditableMask(source: string): AiEditableMask {
     index = protectCommandArguments(source, editable, command);
   }
 
-  return { editable, placeholders };
+  return { editable, placeholders, editableInsertionOffsets };
 }
 
 function semanticMathPlaceholder(
@@ -909,7 +1009,7 @@ function semanticMathPlaceholder(
     : ['⟦INLINE_FORMULA⟧', '⟦MATH_EXPRESSION⟧', '⟦FORMULA⟧', '⟦MATH⟧', '⟦M⟧'];
   const marker = candidates.find((candidate) => candidate.length <= length)
     ?? '¤'.repeat(Math.min(2, length));
-  return marker.padEnd(length, ' ');
+  return marker;
 }
 
 function maskedSource(
@@ -925,12 +1025,18 @@ function maskedSource(
     }
   }
   for (const placeholder of placeholders) {
+    const capacity = placeholder.kind === 'display-math'
+      ? placeholder.markerEnd - placeholder.start
+      : placeholder.end - placeholder.start;
     const replacement = semanticMathPlaceholder(
-      placeholder.end - placeholder.start,
+      capacity,
       placeholder.kind,
     );
+    const replacementStart = placeholder.kind === 'display-math'
+      ? placeholder.markerEnd - replacement.length
+      : placeholder.start;
     for (let index = 0; index < replacement.length; index += 1) {
-      result[placeholder.start + index] = replacement[index] ?? ' ';
+      result[replacementStart + index] = replacement[index] ?? ' ';
     }
   }
   return result.join('');
@@ -997,14 +1103,34 @@ function splitParagraphRanges(text: string): readonly AiProseOffsetRange[] {
   return ranges;
 }
 
+function paragraphBoundaryView(
+  masked: string,
+  placeholders: readonly AiProtectedPlaceholderRange[],
+): string {
+  const view: string[] = Array.from(
+    { length: masked.length },
+    (_unused, index) => masked[index] ?? '',
+  );
+  for (const placeholder of placeholders) {
+    // Newlines inside display syntax are layout, not prose paragraph breaks.
+    // A same-width non-whitespace sentinel lets the ordinary paragraph regex
+    // keep exact offsets without mistaking `\\[ ... \\]` for blank lines.
+    for (let index = placeholder.start; index < placeholder.end; index += 1) {
+      view[index] = '¤';
+    }
+  }
+  return view.join('');
+}
+
 /** Extract paragraph-sized natural-language segments from a LaTeX document. */
 export function extractAiProseDocument(source: string): AiProseDocument {
   const mask = buildEditableMask(source);
   const { editable } = mask;
   const masked = maskedSource(source, editable, mask.placeholders);
+  const boundaryView = paragraphBoundaryView(masked, mask.placeholders);
   const segments: AiProseSegment[] = [];
 
-  for (const candidate of splitParagraphRanges(masked)) {
+  for (const candidate of splitParagraphRanges(boundaryView)) {
     const range = trimWhitespace(masked, candidate.start, candidate.end);
     if (range.start >= range.end) {
       continue;
@@ -1020,10 +1146,115 @@ export function extractAiProseDocument(source: string): AiProseDocument {
       sourceStart: range.start,
       sourceEnd: range.end,
       editableRanges,
+      editableInsertionOffsets: mask.editableInsertionOffsets
+        .filter((offset) => offset >= range.start && offset <= range.end)
+        .map((offset) => offset - range.start),
     });
   }
 
   return { sourceLength: source.length, segments };
+}
+
+/**
+ * Build bounded, masked context on both sides of an inline-completion cursor.
+ * Adjacent prose paragraphs are included with a blank-line separator, while
+ * protected LaTeX and formula contents remain absent from every segment.
+ */
+export function aiProseCompletionContextAtOffset(
+  document: AiProseDocument,
+  sourceOffset: number,
+  options: AiProseCompletionContextOptions = {},
+): AiProseCompletionContext | undefined {
+  if (!Number.isSafeInteger(sourceOffset) || sourceOffset < 0 || sourceOffset > document.sourceLength) {
+    return undefined;
+  }
+  const segmentIndex = document.segments.findIndex((candidate) =>
+    sourceOffset >= candidate.sourceStart && sourceOffset <= candidate.sourceEnd
+  );
+  const segment = document.segments[segmentIndex];
+  if (segment === undefined) {
+    return undefined;
+  }
+  const maximumPrefixLength = positiveContextLimit(options.maximumPrefixLength, 12_288);
+  const maximumSuffixLength = positiveContextLimit(options.maximumSuffixLength, 6_144);
+  const maximumTotalLength = positiveContextLimit(options.maximumTotalLength, 16_384);
+  const segmentOffset = sourceOffset - segment.sourceStart;
+
+  const suffixBudget = Math.min(maximumSuffixLength, maximumTotalLength);
+  let suffix = segment.text.slice(segmentOffset, segmentOffset + suffixBudget);
+  for (let index = segmentIndex + 1; index < document.segments.length && suffix.length < suffixBudget; index += 1) {
+    const following = document.segments[index];
+    if (following === undefined) {
+      continue;
+    }
+    suffix = `${suffix}\n\n${following.text}`.slice(0, suffixBudget);
+  }
+
+  const prefixBudget = Math.min(maximumPrefixLength, maximumTotalLength - suffix.length);
+  let prefix = segment.text.slice(Math.max(0, segmentOffset - prefixBudget), segmentOffset);
+  for (let index = segmentIndex - 1; index >= 0 && prefix.length < prefixBudget; index -= 1) {
+    const preceding = document.segments[index];
+    if (preceding === undefined) {
+      continue;
+    }
+    prefix = `${preceding.text}\n\n${prefix}`.slice(-prefixBudget);
+  }
+
+  return { segment, segmentOffset, prefix, suffix };
+}
+
+function positiveContextLimit(value: number | undefined, fallback: number): number {
+  return Number.isSafeInteger(value) && (value ?? 0) > 0 ? value! : fallback;
+}
+
+/**
+ * Remove an exact overlap between a proposed completion and text which is
+ * already present after the cursor. This is a final local guard in addition to
+ * the provider prompt; it never performs fuzzy or case-insensitive matching.
+ */
+export function removeAiCompletionSuffixOverlap(
+  completion: string,
+  suffix: string,
+): string {
+  if (completion.length === 0 || suffix.length === 0) {
+    return completion;
+  }
+
+  const maximum = Math.min(completion.length, suffix.length);
+  for (let length = maximum; length > 0; length -= 1) {
+    const overlap = suffix.slice(0, length);
+    if (!completion.endsWith(overlap)) {
+      continue;
+    }
+    const before = completion[completion.length - length - 1];
+    const after = suffix[length];
+    const wholeCompletion = length === completion.length;
+    const substantial = length >= 4;
+    const punctuation = /^[\s,.;:!?，。；：！？]+$/u.test(overlap);
+    const wholeWord = /^[\p{L}\p{N}]+$/u.test(overlap)
+      && (before === undefined || /[^\p{L}\p{N}]/u.test(before))
+      && (after === undefined || /[^\p{L}\p{N}]/u.test(after));
+    if (wholeCompletion || substantial || punctuation || wholeWord) {
+      const trimmed = completion.slice(0, completion.length - length);
+      return trimmed.trim().length === 0 ? '' : trimmed;
+    }
+  }
+
+  let commonPrefixLength = 0;
+  while (
+    commonPrefixLength < maximum
+    && completion[commonPrefixLength] === suffix[commonPrefixLength]
+  ) {
+    commonPrefixLength += 1;
+  }
+  const commonPrefix = completion.slice(0, commonPrefixLength);
+  const duplicateBeginning = commonPrefixLength === completion.length
+    || (commonPrefixLength >= 4 && (
+      /\s$/u.test(commonPrefix)
+      || /[^\p{L}\p{N}]/u.test(completion[commonPrefixLength] ?? '')
+      || /[^\p{L}\p{N}]/u.test(suffix[commonPrefixLength] ?? '')
+    ));
+  return duplicateBeginning ? '' : completion;
 }
 
 /** Map a segment-relative UTF-16 boundary to its source document boundary. */
@@ -1324,6 +1555,9 @@ function sliceAiProseSegment(
       end: Math.min(range.end, relativeEnd) - relativeStart,
     }))
     .filter((range) => range.start < range.end);
+  const editableInsertionOffsets = paragraph.editableInsertionOffsets
+    ?.filter((offset) => offset >= relativeStart && offset <= relativeEnd)
+    .map((offset) => offset - relativeStart);
   if (
     editableRanges.length === 0 ||
     !containsEditableAlphaNumeric(text, editableRanges)
@@ -1336,6 +1570,9 @@ function sliceAiProseSegment(
     sourceStart: paragraph.sourceStart + relativeStart,
     sourceEnd: paragraph.sourceStart + relativeEnd,
     editableRanges,
+    ...(editableInsertionOffsets === undefined
+      ? {}
+      : { editableInsertionOffsets }),
   };
 }
 
@@ -1386,22 +1623,6 @@ function rangeIsEditable(
 ): boolean {
   return start < end
     && ranges.some((range) => start >= range.start && end <= range.end);
-}
-
-function insertionBoundaryIsEditable(
-  ranges: readonly AiProseOffsetRange[],
-  offset: number,
-  textLength: number,
-): boolean {
-  const leftEditable = offset > 0 && ranges.some((range) => offset - 1 >= range.start && offset - 1 < range.end);
-  const rightEditable = offset < textLength && ranges.some((range) => offset >= range.start && offset < range.end);
-  if (offset === 0) {
-    return rightEditable;
-  }
-  if (offset === textLength) {
-    return leftEditable;
-  }
-  return leftEditable && rightEditable;
 }
 
 function unsafeReplacement(replacement: string, maxLength: number): boolean {
@@ -1514,8 +1735,14 @@ export function planAiProseIssues(
       rejected.push({ issueIndex, reason: 'original-mismatch' });
       continue;
     }
+    const formulaPunctuationInsertion = issue.start === issue.end
+      && segment.editableInsertionOffsets?.includes(issue.start) === true;
     const editable = issue.start === issue.end
-      ? insertionBoundaryIsEditable(segment.editableRanges, issue.start, segment.text.length)
+      // A model-produced empty original has no textual anchor. Keep the one
+      // narrowly approved exception for missing display-formula punctuation;
+      // ordinary prose insertions must use an adjacent non-empty source range
+      // as required by the provider prompt.
+      ? formulaPunctuationInsertion
       : rangeIsEditable(segment.editableRanges, issue.start, issue.end);
     if (!editable) {
       rejected.push({ issueIndex, reason: 'protected-source' });
@@ -1533,6 +1760,16 @@ export function planAiProseIssues(
       continue;
     }
     if (unsafeReplacement(issue.replacement, maxReplacementLength)) {
+      rejected.push({ issueIndex, reason: 'unsafe-replacement' });
+      continue;
+    }
+    if (
+      formulaPunctuationInsertion
+      && (
+        issue.replacement.length !== 1
+        || !DISPLAY_MATH_TERMINAL_PUNCTUATION.test(issue.replacement)
+      )
+    ) {
       rejected.push({ issueIndex, reason: 'unsafe-replacement' });
       continue;
     }

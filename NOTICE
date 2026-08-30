@@ -1,0 +1,51 @@
+TeXLeaf Attribution Notice and GNU GPLv3 Section 7 Terms
+
+Copyright (C) 2026 zhangxh-math
+Original project: https://github.com/zhangxh-math/texleaf
+
+The portions of TeXLeaf authored by the TeXLeaf project are licensed under
+the GNU General Public License, version 3 only (GPL-3.0-only), together with
+the following additional attribution term permitted by section 7(b) of that
+license.
+
+When conveying TeXLeaf, or a work based on TeXLeaf, in source or object-code
+form, you must preserve this NOTICE file and the following reasonable author
+attribution in the source materials and in either:
+
+  (a) the accompanying README or other documentation; or
+  (b) an About, Credits, or Legal Notices view that is readily accessible to
+      users of the conveyed work.
+
+Required attribution:
+
+  This software includes code from or is based on TeXLeaf, originally
+  developed by zhangxh-math:
+  https://github.com/zhangxh-math/texleaf
+
+The attribution may be translated or reformatted, provided that the TeXLeaf
+project name, the original author credit, and the original-project URL remain
+clear and accurate. The attribution does not imply endorsement by the
+original author. Modified versions must also be marked as modified in
+accordance with section 5 of the GNU GPLv3.
+
+This additional term applies only to TeXLeaf-authored material. Third-party
+components retain the separate licenses and notices identified in
+THIRD_PARTY_NOTICES.md and the licenses directory.
+
+User Document Output Exception (additional permission under GPLv3 section 7):
+
+Using TeXLeaf to create, open, edit, render, check, compile, or transform a
+user document does not by itself cause that document to be covered by the
+GNU GPLv3 or by the attribution term above. The same permission applies when
+TeXLeaf's bundled snippets or document templates are expanded into a user's
+LaTeX, bibliography, Markdown, or other authored document. Users may use,
+modify, license, and distribute those resulting documents under terms of
+their choice, without mentioning TeXLeaf.
+
+This exception does not permit redistribution of TeXLeaf itself, its snippet
+library, or its template library as a software/library collection outside
+the terms of the GNU GPLv3 and this NOTICE. It also does not change the
+license of independently copyrighted third-party material.
+
+Historical TeXLeaf versions already received under the MIT License remain
+available to those recipients under the terms that accompanied those copies.

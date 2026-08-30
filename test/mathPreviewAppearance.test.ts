@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -6,14 +13,17 @@ import {
   resolveMathPreviewAppearance,
 } from "../src/mathPreviewAppearance";
 import {
+  createMathPreviewErrorCard,
+  createMathPreviewCursorViewport,
   fitMathPreviewSvgForCursor,
   frameMathPreviewSvg,
+  inferMathPreviewErrorLocation,
 } from "../src/mathPreviewCard";
 
 test("dark Math Preview appearance keeps glyphs, cursor, and card readable", () => {
   assert.deepEqual(resolveMathPreviewAppearance(true), {
     foreground: "#ffffff",
-    cursor: "#00e5ff",
+    cursor: "#ff2bd6",
     cardBackground: "#0b0f14",
     cardBackgroundOpacity: 1,
     cardBorder: "#ffffff",
@@ -24,12 +34,46 @@ test("dark Math Preview appearance keeps glyphs, cursor, and card readable", () 
 test("light Math Preview appearance uses a distinct high-contrast palette", () => {
   assert.deepEqual(resolveMathPreviewAppearance(false), {
     foreground: "#202020",
-    cursor: "#e0005a",
+    cursor: "#006dff",
     cardBackground: "#fafafc",
     cardBackgroundOpacity: 1,
     cardBorder: "#000000",
     cardBorderOpacity: 0.28,
   });
+});
+
+test("render errors become bounded red SVG cards with a highlighted source token", () => {
+  const source = String.raw`\[x+\unknowncommand{y}\]`;
+  const card = createMathPreviewErrorCard(
+    String.raw`Undefined control sequence \unknowncommand`,
+    source,
+    resolveMathPreviewAppearance(true),
+  );
+
+  assert.ok(card.widthEm >= 18 && card.widthEm <= 40);
+  assert.ok(card.heightEm > 6 && card.heightEm < 10);
+  assert.match(card.svg, /data-texleaf-preview-error="true"/u);
+  assert.match(card.svg, /stroke="#ff4d64"/u);
+  assert.match(card.svg, /fill="#ff4d64" font-weight="700">\\unknowncommand/u);
+  assert.doesNotMatch(card.svg, /<script|<foreignObject/iu);
+});
+
+test("render error location inference handles commands, offsets, and unmatched braces", () => {
+  assert.deepEqual(
+    inferMathPreviewErrorLocation(
+      String.raw`Undefined control sequence \oops`,
+      String.raw`x+\oops{y}`,
+    ),
+    { from: 2, to: 7 },
+  );
+  assert.deepEqual(
+    inferMathPreviewErrorLocation("Parse error at position 3", "abcdef"),
+    { from: 3, to: 4 },
+  );
+  assert.deepEqual(
+    inferMathPreviewErrorLocation("Missing close brace", String.raw`\frac{1}{2`),
+    { from: 8, to: 9 },
+  );
 });
 
 test("preview card is painted as a padded rounded SVG layer", () => {
@@ -86,12 +130,12 @@ test("preview card framing fails open for unexpected SVG dimensions", () => {
 
 test("cursor marker is a narrow sanitized rule with a theme color", () => {
   assert.equal(
-    createMathPreviewCursorMarker("#e0005a"),
-    "\\mathord{\\color{#E0005A}\\rule[-0.2em]{0.09em}{1.2em}}",
+    createMathPreviewCursorMarker("#006dff"),
+    "\\mathord{\\color{#006DFF}\\rule[-0.2em]{0.09em}{1.2em}}",
   );
   assert.equal(
     createMathPreviewCursorMarker("var(--unsafe)"),
-    "\\mathord{\\color{#00E5FF}\\rule[-0.2em]{0.09em}{1.2em}}",
+    "\\mathord{\\color{#FF2BD6}\\rule[-0.2em]{0.09em}{1.2em}}",
   );
 });
 
@@ -154,4 +198,28 @@ test("pathological SVG height uses only the high paint-safety ceiling", () => {
   assert.equal(fitted.widthEm, 5.12);
   assert.equal(fitted.heightEm, 256);
   assert.match(fitted.svg, /width="10\.24ex" height="512ex"/u);
+});
+
+test("oversized native previews crop around measured caret geometry and expose scroll positions", () => {
+  const viewport = createMathPreviewCursorViewport(
+    {
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" width="200ex" height="80ex" viewBox="0 0 1000 400"><rect data-texleaf-preview-caret="true" x="800" y="300" width="10" height="20"/></svg>',
+      widthEm: 100,
+      heightEm: 40,
+      cursor: { x: 800, y: 300, width: 10, height: 20 },
+    },
+    40,
+    18,
+    resolveMathPreviewAppearance(true),
+  );
+
+  assert.equal(viewport.widthEm, 40);
+  assert.equal(viewport.heightEm, 18);
+  assert.match(viewport.svg, /data-texleaf-preview-scroll-viewport="true"/u);
+  assert.match(viewport.svg, /width="80ex" height="36ex"/u);
+  assert.match(viewport.svg, /viewBox="600 220 400 180"/u);
+  assert.match(viewport.svg, /data-texleaf-preview-scroll-thumb-x="true"/u);
+  assert.match(viewport.svg, /data-texleaf-preview-scroll-thumb-y="true"/u);
+  assert.match(viewport.svg, /data-texleaf-preview-caret="true"/u);
+  assert.deepEqual(viewport.cursor, { x: 800, y: 300, width: 10, height: 20 });
 });

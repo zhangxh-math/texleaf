@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 /**
  * Resolves model-produced text offsets without ever using fuzzy text matching.
  *
@@ -189,7 +196,23 @@ export function resolveIssueLocation(
   original: string,
 ): IssueLocationResult {
   if (!Number.isSafeInteger(rawStart) || !Number.isSafeInteger(rawEnd)
-    || (rawStart as number) < 0 || (rawEnd as number) <= (rawStart as number)) {
+    || (rawStart as number) < 0 || (rawEnd as number) < (rawStart as number)) {
+    return { ok: false, code: 'invalid-issue-offset' };
+  }
+
+  // Empty originals represent a zero-width insertion. There is no textual
+  // anchor to reconcile across coordinate systems, so accept only the model's
+  // exact zero-based UTF-16 boundary and let the prose planner independently
+  // verify that the boundary is editable (or an approved formula-punctuation
+  // slot). Never enumerate the many empty-string occurrences as a fallback.
+  if (original.length === 0) {
+    const start = rawStart as number;
+    const end = rawEnd as number;
+    return start === end && end <= text.length
+      ? { ok: true, start, end }
+      : { ok: false, code: 'invalid-issue-offset' };
+  }
+  if ((rawEnd as number) === (rawStart as number)) {
     return { ok: false, code: 'invalid-issue-offset' };
   }
 

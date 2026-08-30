@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 export type MathPreviewPlacement =
   | "autoBelow"
   | "autoAbove"
@@ -33,6 +40,8 @@ export interface MathPreviewLayoutPlan {
   readonly side: MathPreviewSide;
   readonly anchor: MathPreviewLayoutPoint;
   readonly requiredVisibleLines: number;
+  /** Exact source-to-card clearance shared by native and visual editors. */
+  readonly gapPx: number;
   readonly hostTextDecoration: string;
   readonly attachmentTextDecoration: string;
 }
@@ -42,15 +51,19 @@ export interface MathPreviewLayoutPlan {
 export function normalizeMathPreviewPlacement(
   value: string,
 ): MathPreviewPlacement {
+  if (value === "auto") {
+    return "autoBelow";
+  }
   return value === "autoBelow" ||
       value === "autoAbove" ||
       value === "above" ||
       value === "below"
     ? value
-    : "autoBelow";
+    : "autoAbove";
 }
 
-const PREVIEW_GAP_EM = 0.35;
+const NORMAL_PREVIEW_GAP_EM = 0.75;
+const OVERFLOW_PREVIEW_GAP_PX = 50;
 const DEFAULT_FONT_SIZE_PX = 14;
 const DEFAULT_LINE_HEIGHT_MULTIPLIER = 1.5;
 const OVERFLOW_SOURCE_TAIL_LINES = 3;
@@ -89,13 +102,24 @@ export function planMathPreviewLayout(
   const start = normalizePoint(request.formulaStart);
   const end = normalizePoint(request.formulaEnd);
   const visible = selectVisibleRange(request.visibleRanges, cursorLine);
-  const requiredVisibleLines = estimateRequiredVisibleLines(request);
+  const normalGapPx = resolveNormalMathPreviewGapPx(request);
+  const normalRequiredVisibleLines = estimateRequiredVisibleLines(
+    request,
+    normalGapPx,
+  );
   if (request.mode === "inline") {
+    const visibleLinesAbove = Math.max(0, cursorLine - visible.startLine);
+    const visibleLinesBelow = Math.max(0, visible.endLine - cursorLine);
+    const gapPx = visibleLinesAbove < normalRequiredVisibleLines &&
+        visibleLinesBelow < normalRequiredVisibleLines
+      ? OVERFLOW_PREVIEW_GAP_PX
+      : normalGapPx;
+    const requiredVisibleLines = estimateRequiredVisibleLines(request, gapPx);
     const side = chooseSide(
       request.placement,
       requiredVisibleLines,
-      Math.max(0, cursorLine - visible.startLine),
-      Math.max(0, visible.endLine - cursorLine),
+      visibleLinesAbove,
+      visibleLinesBelow,
     );
     return {
       side,
@@ -106,10 +130,12 @@ export function planMathPreviewLayout(
           : cursorLineStartCharacter,
       },
       requiredVisibleLines,
+      gapPx,
       hostTextDecoration: HOST_TEXT_DECORATION,
       attachmentTextDecoration: createMathPreviewAttachmentTextDecoration(
         side,
         { kind: "static" },
+        gapPx,
       ),
     };
   }
@@ -125,6 +151,11 @@ export function planMathPreviewLayout(
     0,
     endVisible ? visible.endLine - belowAnchorLine : 0,
   );
+  const gapPx = visibleLinesAbove < normalRequiredVisibleLines &&
+      visibleLinesBelow < normalRequiredVisibleLines
+    ? OVERFLOW_PREVIEW_GAP_PX
+    : normalGapPx;
+  const requiredVisibleLines = estimateRequiredVisibleLines(request, gapPx);
   const side = chooseSide(
     request.placement,
     requiredVisibleLines,
@@ -159,10 +190,12 @@ export function planMathPreviewLayout(
     side,
     anchor,
     requiredVisibleLines,
+    gapPx,
     hostTextDecoration: HOST_TEXT_DECORATION,
     attachmentTextDecoration: createMathPreviewAttachmentTextDecoration(
       side,
       { kind: "static" },
+      gapPx,
     ),
   };
 }
@@ -176,14 +209,22 @@ export function planMathPreviewLayout(
 export function createMathPreviewAttachmentTextDecoration(
   side: MathPreviewSide,
   horizontal: number | MathPreviewHorizontalStrategy = 0,
+  gapPx = DEFAULT_FONT_SIZE_PX *
+    NORMAL_PREVIEW_GAP_EM,
 ): string {
   const strategy: MathPreviewHorizontalStrategy = typeof horizontal === "number"
     ? { kind: "static", offsetColumns: horizontal }
     : horizontal;
   const horizontalCss = createStaticPositionCss(strategy.offsetColumns);
+  const clearance = roundCssPixels(
+    positiveFinite(
+      gapPx,
+      DEFAULT_FONT_SIZE_PX * NORMAL_PREVIEW_GAP_EM,
+    ),
+  );
   const vertical = side === "above"
-    ? "bottom: calc(100% + 0.35em);"
-    : "top: calc(100% + 0.35em);";
+    ? `bottom: calc(100% + ${clearance}px);`
+    : `top: calc(100% + ${clearance}px);`;
   return (
     "none; position: absolute; display: inline-block; " +
     horizontalCss +
@@ -255,8 +296,16 @@ function isAutomaticPlacement(
   return placement === "autoBelow" || placement === "autoAbove";
 }
 
+function resolveNormalMathPreviewGapPx(
+  request: MathPreviewLayoutRequest,
+): number {
+  const fontSize = positiveFinite(request.fontSizePx, DEFAULT_FONT_SIZE_PX);
+  return fontSize * NORMAL_PREVIEW_GAP_EM;
+}
+
 function estimateRequiredVisibleLines(
   request: MathPreviewLayoutRequest,
+  gapPx: number,
 ): number {
   const fontSize = positiveFinite(request.fontSizePx, DEFAULT_FONT_SIZE_PX);
   const lineHeight = positiveFinite(
@@ -266,8 +315,12 @@ function estimateRequiredVisibleLines(
   const heightEm = positiveFinite(request.previewHeightEm, 1);
   return Math.max(
     1,
-    Math.ceil(((heightEm + PREVIEW_GAP_EM) * fontSize) / lineHeight),
+    Math.ceil((heightEm * fontSize + gapPx) / lineHeight),
   );
+}
+
+function roundCssPixels(value: number): string {
+  return String(Math.round(value * 100) / 100);
 }
 
 function selectVisibleRange(

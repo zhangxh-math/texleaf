@@ -1,3 +1,11 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * TeXLeaf-authored portions are licensed under GPL-3.0-only with
+ * additional attribution terms; upstream portions retain the MIT notice below.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 /**
  * TeXLeaf's factory-default, declarative snippet library.
  *
@@ -63,8 +71,10 @@ export const DEFAULT_SNIPPETS: readonly DefaultSnippetDefinition[] = [
   { id: 'basic.text-subscript', trigger: 'sts', replacement: '_\\text{@0}', options: 'mA', description: 'Text subscript', category: 'Basic operations' },
   { id: 'basic.sqrt', trigger: 'sq', replacement: '\\sqrt{ @0 }@1', options: 'mA', description: 'Square root', category: 'Basic operations' },
   { id: 'basic.fraction', trigger: '//', replacement: '\\frac{@0}{@1}@2', options: 'mA', description: 'Fraction', category: 'Basic operations' },
+  { id: 'user.3a5bc67f-6735-4edd-ae9e-2fb25c76e048', trigger: 'bino', replacement: '\\binom{@0}{@1}@2', options: 'mA', category: 'Basic operations' },
   { id: 'basic.exponential', trigger: 'ee', replacement: 'e^{ @0 }@1', options: 'mA', description: 'Exponential', category: 'Basic operations' },
   { id: 'basic.inverse', trigger: 'invs', replacement: '^{-1}', options: 'mA', description: 'Inverse', category: 'Basic operations' },
+  { id: 'user.56cd881b-75b3-4f08-b6f0-ffb7b58a35df', trigger: 'res', replacement: '\\operatorname{Res}', options: 'mA', description: 'Residue', category: 'Basic operations' },
   { id: 'basic.letter-digit', trigger: '([A-Za-z])(\\d)', replacement: '@[0]_{@[1]}', options: 'rmA', priority: -1, description: 'Single-digit letter subscript', category: 'Basic operations' },
   { id: 'basic.named-function', trigger: '([^\\\\])(exp|log|ln)', replacement: '@[0]\\@[1]', options: 'rmA', description: 'Prefix exp, log, or ln with a backslash', category: 'Basic operations' },
   { id: 'basic.conjugate', trigger: 'conj', replacement: '^{*}', options: 'mA', description: 'Complex conjugate', category: 'Basic operations' },
@@ -101,6 +111,7 @@ export const DEFAULT_SNIPPETS: readonly DefaultSnippetDefinition[] = [
   { id: 'subscript.hat-digit', trigger: '\\\\hat\\{([A-Za-z])\\}(\\d)', replacement: '\\hat{@[0]}_{@[1]}', options: 'rmA', description: 'Subscript a hatted letter', category: 'Subscripts' },
   { id: 'subscript.vector-digit', trigger: '\\\\vec\\{([A-Za-z])\\}(\\d)', replacement: '\\vec{@[0]}_{@[1]}', options: 'rmA', description: 'Subscript a vector', category: 'Subscripts' },
   { id: 'subscript.bold-digit', trigger: '\\\\mathbf\\{([A-Za-z])\\}(\\d)', replacement: '\\mathbf{@[0]}_{@[1]}', options: 'rmA', description: 'Subscript a bold letter', category: 'Subscripts' },
+  { id: 'user.ed7776ad-5770-4799-b01d-0a8f096c1042', trigger: 'sst', replacement: '\\substack{@0}', options: 'mA', category: 'Subscripts' },
   { id: 'subscript.x-n', trigger: 'xnn', replacement: 'x_{n}', options: 'mA', description: 'x sub n', category: 'Subscripts' },
   { id: 'subscript.x-n-plus-one', trigger: 'xp1', replacement: 'x_{n+1}', options: 'mA', description: 'x sub n plus one', category: 'Subscripts' },
   { id: 'subscript.y-n', trigger: 'ynn', replacement: 'y_{n}', options: 'mA', description: 'y sub n', category: 'Subscripts' },
@@ -116,6 +127,10 @@ export const DEFAULT_SNIPPETS: readonly DefaultSnippetDefinition[] = [
   { id: 'symbol.plus-minus', trigger: '+-', replacement: '\\pm', options: 'mA', description: 'Plus or minus', category: 'Symbols' },
   { id: 'symbol.minus-plus', trigger: '-+', replacement: '\\mp', options: 'mA', description: 'Minus or plus', category: 'Symbols' },
   { id: 'symbol.dots', trigger: '...', replacement: '\\dots', options: 'mA', description: 'Ellipsis', category: 'Symbols' },
+  { id: 'user.49db8ae5-a34a-4d0d-ab0e-73f8acf70225', trigger: '..c', replacement: '\\cdots', options: 'mA', category: 'Symbols' },
+  { id: 'user.47a034bb-5885-4829-8ea1-45b207fa8c50', trigger: '..l', replacement: '\\ldots', options: 'mA', category: 'Symbols' },
+  { id: 'user.c75ad237-c972-4082-96bf-a626ab9f4da7', trigger: '..v', replacement: '\\vdots', options: 'mA', category: 'Symbols' },
+  { id: 'user.e346ffa5-8767-4ca4-ac65-74cbd0ad8f2d', trigger: '..d', replacement: '\\ddots', options: 'mA', category: 'Symbols' },
   { id: 'symbol.nabla', trigger: 'nabl', replacement: '\\nabla', options: 'mA', description: 'Nabla', category: 'Symbols' },
   { id: 'symbol.times', trigger: 'xx', replacement: '\\times', options: 'mA', description: 'Multiplication sign', category: 'Symbols' },
   { id: 'symbol.centered-dot', trigger: '**', replacement: '\\cdot', options: 'mA', description: 'Centered dot', category: 'Symbols' },
@@ -144,12 +159,14 @@ export const DEFAULT_SNIPPETS: readonly DefaultSnippetDefinition[] = [
   { id: 'set.empty', trigger: 'eset', replacement: '\\emptyset', options: 'mA', description: 'Empty set', category: 'Sets' },
   { id: 'set.builder', trigger: 'set', replacement: '\\{ @0 \\}@1', options: 'mA', description: 'Set braces', category: 'Sets' },
   { id: 'set.exists', trigger: 'exists', replacement: '\\exists', options: 'mA', description: 'Exists', category: 'Sets' },
+  { id: 'user.17e74395-dccf-4909-bbb0-071a22d08b39', trigger: 'nsor', replacement: '\\sqcup', options: 'mA', category: 'Sets' },
   { id: 'font.calligraphic-l', trigger: 'LL', replacement: '\\mathcal{L}', options: 'mA', description: 'Calligraphic L', category: 'Math fonts' },
   { id: 'font.calligraphic-h', trigger: 'HH', replacement: '\\mathcal{H}', options: 'mA', description: 'Calligraphic H', category: 'Math fonts' },
   { id: 'font.complex', trigger: 'CC', replacement: '\\mathbb{C}', options: 'mA', description: 'Complex numbers', category: 'Math fonts' },
   { id: 'font.real', trigger: 'RR', replacement: '\\mathbb{R}', options: 'mA', description: 'Real numbers', category: 'Math fonts' },
   { id: 'font.integer', trigger: 'ZZ', replacement: '\\mathbb{Z}', options: 'mA', description: 'Integers', category: 'Math fonts' },
   { id: 'font.natural', trigger: 'NN', replacement: '\\mathbb{N}', options: 'mA', description: 'Natural numbers', category: 'Math fonts' },
+  { id: 'user.058db17a-01d7-4318-9b97-96c4c97b32be', trigger: '([A-Za-z])cal', replacement: '\\mathcal{@[0]}', options: 'rmA', category: 'Math fonts' },
 
   // Command normalization and postfix operations
   { id: 'normalize.greek-command', trigger: '([^\\\\])(${GREEK})', replacement: '@[0]\\@[1]', options: 'rmA', description: 'Prefix a Greek command with a backslash', category: 'Normalization' },
@@ -168,15 +185,17 @@ export const DEFAULT_SNIPPETS: readonly DefaultSnippetDefinition[] = [
   // Derivatives, integrals, and trigonometry
   { id: 'calculus.partial', trigger: 'par', replacement: '\\frac{ \\partial @{0:y} }{ \\partial @{1:x} } @2', options: 'm', description: 'Partial derivative', category: 'Calculus' },
   { id: 'calculus.partial-compact', trigger: 'pa([A-Za-z])([A-Za-z])', replacement: '\\frac{ \\partial @[0] }{ \\partial @[1] } ', options: 'rm', description: 'Compact partial derivative', category: 'Calculus' },
-  { id: 'calculus.ddt', trigger: 'ddt', replacement: '\\frac{d}{dt} ', options: 'mA', description: 'Time derivative', category: 'Calculus' },
+  { id: 'user.3b706456-e4af-4fc1-bf5a-44f3143c862f', trigger: 'dd', replacement: '\\dd ', options: 'mA', description: 'differential', category: 'Calculus' },
+  { id: 'user.c24cb652-ea92-4d85-8c87-92a5abac3a4c', trigger: 'part', replacement: '\\partial', options: 'mA', category: 'Calculus' },
+  { id: 'calculus.ddt', trigger: '\\ddt', replacement: '\\frac{\\dd}{\\dd t} ', options: 'mA', description: 'Time derivative', category: 'Calculus' },
   { id: 'calculus.integral-command', trigger: '([^\\\\])int', replacement: '@[0]\\int', options: 'rmA', priority: -1, description: 'Prefix int with a backslash', category: 'Calculus' },
-  { id: 'calculus.integral-template', trigger: '\\int', replacement: '\\int @0 \\, d@{1:x} @2', options: 'm', description: 'Integral with differential', category: 'Calculus' },
-  { id: 'calculus.definite-integral', trigger: 'dint', replacement: '\\int_{@{0:0}}^{@{1:1}} @2 \\, d@{3:x} @4', options: 'mA', description: 'Definite integral', category: 'Calculus' },
+  { id: 'calculus.integral-template', trigger: '\\int', replacement: '\\int @0 \\, \\dd@{1:x} @2', options: 'm', description: 'Integral with differential', category: 'Calculus' },
+  { id: 'calculus.definite-integral', trigger: 'dint', replacement: '\\int_{@{0:0}}^{@{1:1}} @2 \\, \\dd@{3:x} @4', options: 'mA', description: 'Definite integral', category: 'Calculus' },
   { id: 'calculus.contour-integral', trigger: 'oint', replacement: '\\oint', options: 'mA', description: 'Contour integral', category: 'Calculus' },
   { id: 'calculus.double-integral', trigger: 'iint', replacement: '\\iint', options: 'mA', description: 'Double integral', category: 'Calculus' },
   { id: 'calculus.triple-integral', trigger: 'iiint', replacement: '\\iiint', options: 'mA', description: 'Triple integral', category: 'Calculus' },
   { id: 'calculus.zero-infinity', trigger: 'oinf', replacement: '\\int_{0}^{\\infty} @0 \\, d@{1:x} @2', options: 'mA', description: 'Integral from zero to infinity', category: 'Calculus' },
-  { id: 'calculus.all-real', trigger: 'infi', replacement: '\\int_{-\\infty}^{\\infty} @0 \\, d@{1:x} @2', options: 'mA', description: 'Integral over the real line', category: 'Calculus' },
+  { id: 'calculus.all-real', trigger: 'infi', replacement: '\\int_{-\\infty}^{\\infty} @0 \\, \\dd@{1:x} @2', options: 'mA', description: 'Integral over the real line', category: 'Calculus' },
   { id: 'trig.command', trigger: '([^\\\\])(arcsin|sin|arccos|cos|arctan|tan|csc|sec|cot)', replacement: '@[0]\\@[1]', options: 'rmA', description: 'Prefix a trigonometric function with a backslash', category: 'Trigonometry' },
   { id: 'trig.command-space', trigger: '\\\\(arcsin|sin|arccos|cos|arctan|tan|csc|sec|cot)([A-Za-gi-z])', replacement: '\\@[0] @[1]', options: 'rmA', description: 'Insert a space after a trigonometric function', category: 'Trigonometry' },
   { id: 'trig.hyperbolic-space', trigger: '\\\\(sinh|cosh|tanh|coth)([A-Za-z])', replacement: '\\@[0] @[1]', options: 'rmA', description: 'Insert a space after a hyperbolic function', category: 'Trigonometry' },

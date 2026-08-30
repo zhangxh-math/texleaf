@@ -1,6 +1,13 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import * as vscode from "vscode";
 import { AIWritingController } from "./aiWritingController";
-import { registerAiIssuesTree } from "./aiIssuesTree";
+import { registerAiIssueForwardingCommands } from "./aiIssuesTree";
 import { BracketDecorationController } from "./bracketDecorations";
 import { CitationController } from "./citationController";
 import { registerCompletionProvider } from "./completionProvider";
@@ -13,6 +20,7 @@ import { SnippetRuntime } from "./snippetRuntime";
 import { SnippetSyncController } from "./snippetSync";
 import { SnippetTreeProvider } from "./snippetTree";
 import { TemplateManager } from "./templateManager";
+import { VisualEditorProvider } from "./visualEditorProvider";
 
 const LEGACY_EXTENSION_ID = "local-lab.texleaf";
 let activeAiWriting: AIWritingController | undefined;
@@ -104,7 +112,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   aiWriting.register();
   activeAiWriting = aiWriting;
   context.subscriptions.push(aiWriting);
-  registerAiIssuesTree(context, aiWriting);
+  registerAiIssueForwardingCommands(context);
+
+  const visualEditor = new VisualEditorProvider(
+    context,
+    output,
+    runtime,
+    templates,
+    citations,
+    aiWriting,
+  );
+  visualEditor.register();
+  context.subscriptions.push(visualEditor);
 
   const treeProvider = new SnippetTreeProvider(repository);
   const tree = vscode.window.createTreeView("texleaf.snippets", {

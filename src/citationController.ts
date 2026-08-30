@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
 import {
@@ -47,6 +54,28 @@ const MINIMUM_ZOTERO_CACHE_MS = 1_000;
 const ZOTERO_FAILURE_RETRY_MS = 5_000;
 const MAX_CITATION_COMPLETION_ITEMS = 100;
 
+export interface CitationBibliographyPreview {
+  readonly configuredPath: string;
+  readonly uri: vscode.Uri;
+  readonly exists: boolean;
+  readonly entries: readonly BibTeXEntry[];
+}
+
+export interface VisualBibliographyRevealResult {
+  readonly status: "found" | "missing" | "duplicate";
+  readonly uri: vscode.Uri;
+}
+
+export interface ProjectBibliographyRevealResult {
+  readonly status: "found" | "missing" | "duplicate";
+  readonly matchedUri?: vscode.Uri;
+  readonly searchedUris: readonly vscode.Uri[];
+}
+
+const MAX_PROJECT_BIBLIOGRAPHY_FILES = 64;
+const MAX_PROJECT_BIBLIOGRAPHY_CHARACTERS = 32 * 1024 * 1024;
+const MAX_PROJECT_BIBLIOGRAPHY_TOTAL_CHARACTERS = 64 * 1024 * 1024;
+
 interface ZoteroSnapshot {
   readonly cacheKey: string;
   /** Unique identity of this exact fetched library snapshot. */
@@ -84,10 +113,22 @@ interface CitationCompletionArgument {
   readonly documentUri: string;
   /** Exact bibliography resolved while this candidate was constructed. */
   readonly bibliographyUri: string;
+  /** Relative bibliography path used to resolve bibliographyUri. */
+  readonly bibliographyPath: string;
   readonly snapshotKey: string;
   readonly snapshotId: string;
   readonly contextKey: string;
   readonly reference: ZoteroReference;
+}
+
+interface VisualCitationCompletionOptions {
+  readonly requestedBibliographyPath?: string;
+}
+
+interface CitationCompletionTarget {
+  readonly document: vscode.TextDocument;
+  readonly position: vscode.Position;
+  readonly setSelection?: (position: vscode.Position) => void;
 }
 
 interface ZoteroCitationReference extends CitationReference {
@@ -212,13 +253,171 @@ export class CitationController
     }
   }
 
+  /** Read the bibliography metadata needed by the visual editor without writing. */
+  public async readBibliographyPreview(
+    document: vscode.TextDocument,
+    requestedPath?: string,
+  ): Promise<CitationBibliographyPreview> {
+    const configuredPath = visualBibliographyPath(
+      requestedPath,
+      readConfig(document.uri).bibliographyFile,
+    );
+    const uri = await this.repository.resolveBibliographyUri(document, configuredPath);
+    const snapshot = await this.repository.read(uri);
+    return {
+      configuredPath,
+      uri,
+      exists: snapshot.exists,
+      entries: this.prepareBibliographySearch(snapshot).entries,
+    };
+  }
+
+  /** Open the exact bibliography represented by the visual bibliography card. */
+  public async openVisualBibliography(
+    document: vscode.TextDocument,
+    requestedPath?: string,
+  ): Promise<void> {
+    const configuredPath = visualBibliographyPath(
+      requestedPath,
+      readConfig(document.uri).bibliographyFile,
+    );
+    const uri = await this.repository.resolveBibliographyUri(document, configuredPath);
+    const snapshot = await this.repository.read(uri);
+    const bibliography = await this.repository.openForEditing(snapshot);
+    await vscode.window.showTextDocument(bibliography, {
+      preview: false,
+      preserveFocus: false,
+    });
+  }
+
+  /** Resolve one citation key and reveal its exact BibTeX entry without writing. */
+  public async revealVisualBibliographyEntry(
+    document: vscode.TextDocument,
+    requestedPath: string | undefined,
+    key: string,
+  ): Promise<VisualBibliographyRevealResult> {
+    const configuredPath = visualBibliographyPath(
+      requestedPath,
+      readConfig(document.uri).bibliographyFile,
+    );
+    const uri = await this.repository.resolveBibliographyUri(document, configuredPath);
+    const snapshot = await this.repository.read(uri);
+    if (!snapshot.exists) {
+      return { status: "missing", uri };
+    }
+    const matches = parseBibTeX(snapshot.text).filter((entry) => entry.key === key);
+    if (matches.length !== 1) {
+      return {
+        status: matches.length === 0 ? "missing" : "duplicate",
+        uri,
+      };
+    }
+    const bibliography = await this.repository.openForEditing(snapshot);
+    const editor = await vscode.window.showTextDocument(bibliography, {
+      preview: false,
+      preserveFocus: false,
+    });
+    const match = matches[0]!;
+    const start = bibliography.positionAt(match.range.start);
+    const end = bibliography.positionAt(match.range.end);
+    editor.selection = new vscode.Selection(start, start);
+    editor.revealRange(
+      new vscode.Range(start, end),
+      vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+    );
+    return { status: "found", uri };
+  }
+
+  /** Resolve a declared bibliography using the repository's safe path rules. */
+  public resolveProjectBibliographyUri(
+    document: vscode.TextDocument,
+    configuredPath: string,
+  ): Promise<vscode.Uri> {
+    return this.repository.resolveBibliographyUri(document, configuredPath);
+  }
+
+  /**
+   * Resolve one key across an explicit, bounded project bibliography set.
+   * Ambiguous keys fail closed instead of opening an arbitrary `.bib` file.
+   */
+  public async revealProjectBibliographyEntry(
+    bibliographyUris: readonly vscode.Uri[],
+    key: string,
+    viewColumn?: vscode.ViewColumn,
+  ): Promise<ProjectBibliographyRevealResult> {
+    const searchedUris = uniqueBibliographyUris(bibliographyUris);
+    if (searchedUris.length > MAX_PROJECT_BIBLIOGRAPHY_FILES) {
+      throw new Error("项目声明的 bibliography 文件过多，已拒绝无界扫描。");
+    }
+    if (!isSafeCitationKey(key)) {
+      return { status: "missing", searchedUris };
+    }
+    const matches: Array<{
+      readonly snapshot: BibliographySnapshot;
+      readonly entry: BibTeXEntry;
+    }> = [];
+    let scannedCharacters = 0;
+    for (const uri of searchedUris) {
+      const snapshot = await this.repository.read(uri);
+      if (!snapshot.exists) {
+        continue;
+      }
+      if (
+        snapshot.text.length > MAX_PROJECT_BIBLIOGRAPHY_CHARACTERS ||
+        scannedCharacters + snapshot.text.length >
+          MAX_PROJECT_BIBLIOGRAPHY_TOTAL_CHARACTERS
+      ) {
+        throw new Error("项目 bibliography 超过安全扫描上限，已停止反向定位。");
+      }
+      scannedCharacters += snapshot.text.length;
+      for (const entry of parseBibTeX(snapshot.text)) {
+        if (entry.key !== key) {
+          continue;
+        }
+        matches.push({ snapshot, entry });
+        if (matches.length > 1) {
+          return { status: "duplicate", searchedUris };
+        }
+      }
+    }
+    const match = matches[0];
+    if (match === undefined) {
+      return { status: "missing", searchedUris };
+    }
+    const bibliography = await this.repository.openForEditing(match.snapshot);
+    const editor = await vscode.window.showTextDocument(bibliography, {
+      preview: false,
+      preserveFocus: false,
+      ...(viewColumn === undefined ? {} : { viewColumn }),
+    });
+    const start = bibliography.positionAt(match.entry.range.start);
+    const end = bibliography.positionAt(match.entry.range.end);
+    editor.selection = new vscode.Selection(start, start);
+    editor.revealRange(
+      new vscode.Range(start, end),
+      vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+    );
+    return {
+      status: "found",
+      matchedUri: match.snapshot.uri,
+      searchedUris,
+    };
+  }
+
   public async provideCompletionItems(
     document: vscode.TextDocument,
     position: vscode.Position,
     token: vscode.CancellationToken,
     completionContext: vscode.CompletionContext,
+    visualOptions?: VisualCitationCompletionOptions,
   ): Promise<vscode.CompletionList<vscode.CompletionItem> | undefined> {
-    const located = this.locateCitation(document, position);
+    const initialLocated = this.locateCitation(document, position);
+    const located = initialLocated === undefined
+      ? undefined
+      : withVisualBibliographyPath(
+          initialLocated,
+          visualOptions?.requestedBibliographyPath,
+        );
     if (located === undefined || token.isCancellationRequested) {
       return undefined;
     }
@@ -265,6 +464,12 @@ export class CitationController
     );
     const range = completionRange(document, located.completionEdit);
     const query = located.completionEdit.prefixQuery;
+    // An empty citation segment is the project bibliography picker. Do not
+    // mix a previously cached Zotero library into `\cite{}`: apart from being
+    // noisy, a large Zotero cache can consume the UI cap and make the user's
+    // already-collected references appear to be missing. Zotero joins the
+    // search only after the user supplies a non-whitespace term.
+    const includeZotero = query.trim().length > 0;
     const candidates: RankedCompletionCandidate[] = [];
     const eligibleBibliography = bibliography.searchReferences.filter(({ reference }) =>
       !excludedKeys.has(reference.key) &&
@@ -290,11 +495,11 @@ export class CitationController
       : undefined;
     const retryCoolingDown =
       failure !== undefined && failure.retryAfter > Date.now();
-    if (needsRefresh && !retryCoolingDown) {
+    if (includeZotero && needsRefresh && !retryCoolingDown) {
       this.startBackgroundZoteroLoad(located.config, document.uri);
     }
 
-    if (cached !== undefined) {
+    if (includeZotero && cached !== undefined) {
       const eligibleZotero = cached.searchReferences.filter(({ reference }) => {
         const zotero = reference.zotero;
         if (
@@ -337,8 +542,8 @@ export class CitationController
     const limited = candidates.slice(0, MAX_CITATION_COMPLETION_ITEMS);
     const items = limited.map((candidate, index) => {
       const sortText = [
-        citationSearchMatchSortText(candidate.match),
         candidate.sourceRank,
+        citationSearchMatchSortText(candidate.match),
         String(index).padStart(3, "0"),
       ].join(":");
       const preselect = index === 0 && isHighConfidenceCitationMatch(candidate.match);
@@ -370,6 +575,39 @@ export class CitationController
     // character, so a reference outside the current top 100 can enter as the
     // query becomes more specific instead of being filtered only by its label.
     return new vscode.CompletionList(items, true);
+  }
+
+  /**
+   * Only these two internally-created completion commands may cross the
+   * custom-editor bridge. The Webview receives an opaque one-shot token rather
+   * than either the command name or its arguments.
+   */
+  public isVisualCompletionCommand(
+    command: vscode.Command | undefined,
+  ): command is vscode.Command {
+    return command?.command === MARK_COMPLETION_ACCEPTED_COMMAND ||
+      command?.command === COMMIT_COMPLETION_COMMAND;
+  }
+
+  /** Execute one allow-listed citation completion follow-up without requiring
+   * a native TextEditor to be focused. */
+  public async acceptVisualCompletion(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    command: vscode.Command,
+  ): Promise<vscode.Position | undefined> {
+    if (command.command === MARK_COMPLETION_ACCEPTED_COMMAND) {
+      this.markCitationHandled(document, position);
+      return position;
+    }
+    if (command.command !== COMMIT_COMPLETION_COMMAND) {
+      throw new Error("拒绝执行非引用补全动作。");
+    }
+    const argument = command.arguments?.[0] as CitationCompletionArgument | undefined;
+    if (!validCitationCompletionArgument(argument)) {
+      throw new Error("引用补全动作参数无效，请重新触发补全。");
+    }
+    return this.acceptZoteroCompletion(argument, { document, position });
   }
 
   private createExistingCompletion(
@@ -459,6 +697,7 @@ export class CitationController
       arguments: [{
         documentUri: located.document.uri.toString(),
         bibliographyUri: bibliographyUri.toString(),
+        bibliographyPath: located.config.bibliographyFile,
         snapshotKey: cacheKey,
         snapshotId,
         contextKey: zoteroCompletionContextKey(located.config),
@@ -466,6 +705,79 @@ export class CitationController
       } satisfies CitationCompletionArgument],
     };
     return item;
+  }
+
+  /**
+   * Return project-bibliography candidates immediately. Zotero is loaded in
+   * the shared background path below, so an unavailable Zotero instance never
+   * holds existing `.bib` entries behind its request timeout.
+   */
+  public provideVisualCompletionItems(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    token: vscode.CancellationToken,
+    requestedBibliographyPath?: string,
+  ): Promise<vscode.CompletionList<vscode.CompletionItem> | undefined> {
+    return this.provideCompletionItems(
+      document,
+      position,
+      token,
+      {
+        triggerKind: vscode.CompletionTriggerKind.Invoke,
+        triggerCharacter: undefined,
+      },
+      {
+        ...(requestedBibliographyPath === undefined
+          ? {}
+          : { requestedBibliographyPath }),
+      },
+    );
+  }
+
+  /**
+   * Wait for the background Zotero snapshot started by a visual completion
+   * request. The custom editor uses the boolean result to retrigger its picker
+   * only when a genuinely newer snapshot became available.
+   */
+  public async waitForVisualZoteroCompletionRefresh(
+    document: vscode.TextDocument,
+  ): Promise<boolean> {
+    const config = readConfig(document.uri);
+    if (
+      !config.enabled ||
+      !config.zoteroCitations ||
+      !vscode.workspace.isTrusted
+    ) {
+      return false;
+    }
+    const cacheKey = zoteroCacheKey(config);
+    const cached = this.zoteroCache?.cacheKey === cacheKey
+      ? this.zoteroCache
+      : undefined;
+    // A visual picker that already received any Zotero snapshot can use it
+    // immediately.  In particular, a zero-second cache is useful for QA and
+    // explicit freshness, but must not turn into an endless
+    // load -> completionRefresh -> load loop that keeps replacing the active
+    // completion just before Enter is pressed.  Background refresh still runs
+    // from provideCompletionItems; the next query observes that newer cache.
+    if (cached !== undefined) {
+      return false;
+    }
+    const failure = this.zoteroFailure?.cacheKey === cacheKey
+      ? this.zoteroFailure
+      : undefined;
+    if (failure !== undefined && failure.retryAfter > Date.now()) {
+      return false;
+    }
+    try {
+      const snapshot = await this.loadZotero(config, false);
+      return snapshot.cacheKey === cacheKey;
+    } catch {
+      // Existing bibliography candidates have already been returned. A failed
+      // Zotero refresh is therefore a soft, logged fallback rather than an
+      // empty visual completion list.
+      return false;
+    }
   }
 
   private scheduleAutoTrigger(): void {
@@ -535,7 +847,14 @@ export class CitationController
       this.activeCitationIdentity = undefined;
       return;
     }
-    const located = this.locateCitation(editor.document, editor.selection.active);
+    this.markCitationHandled(editor.document, editor.selection.active);
+  }
+
+  private markCitationHandled(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+  ): void {
+    const located = this.locateCitation(document, position);
     this.activeCitationIdentity = located === undefined
       ? undefined
       : citationIdentity(located);
@@ -761,24 +1080,42 @@ export class CitationController
 
   private async acceptZoteroCompletion(
     argument: CitationCompletionArgument,
-  ): Promise<void> {
-    const editor = vscode.window.activeTextEditor;
+    visualTarget?: CitationCompletionTarget,
+  ): Promise<vscode.Position | undefined> {
+    const editor = visualTarget === undefined
+      ? vscode.window.activeTextEditor
+      : undefined;
+    const target: CitationCompletionTarget | undefined = visualTarget ?? (
+      editor === undefined
+        ? undefined
+        : {
+            document: editor.document,
+            position: editor.selection.active,
+            setSelection: (position) => {
+              editor.selection = new vscode.Selection(position, position);
+            },
+          }
+    );
     if (
-      editor === undefined ||
-      editor.document.uri.toString() !== argument.documentUri
+      target === undefined ||
+      target.document.uri.toString() !== argument.documentUri
     ) {
       void vscode.window.showErrorMessage(
         "TeXLeaf：接受引用后活动文档发生了变化，请重试。",
       );
-      return;
+      return undefined;
     }
-    const located = this.locateCitation(editor.document, editor.selection.active);
-    if (located === undefined) {
+    const initialLocated = this.locateCitation(target.document, target.position);
+    if (initialLocated === undefined) {
       void vscode.window.showErrorMessage(
         "TeXLeaf：当前光标已经不在 citation 大括号内，请重试。",
       );
-      return;
+      return undefined;
     }
+    const located = withVisualBibliographyPath(
+      initialLocated,
+      argument.bibliographyPath,
+    );
     // The primary completion edit deliberately restores the original query.
     // Record its new document version immediately so the auto-trigger timer
     // does not reopen Suggest while Zotero export is still in progress.
@@ -796,7 +1133,7 @@ export class CitationController
         throw new Error("Zotero 返回了不安全的 citation key。");
       }
       const currentBibliographyUri = await this.repository.resolveBibliographyUri(
-        editor.document,
+        target.document,
         located.config.bibliographyFile,
       );
       if (currentBibliographyUri.toString() !== argument.bibliographyUri) {
@@ -841,7 +1178,7 @@ export class CitationController
       }
       const result = await this.commitQueue.enqueue(() =>
         this.commitImportedReference(
-          editor,
+          target,
           located,
           reference,
           raw,
@@ -849,33 +1186,40 @@ export class CitationController
           currentBibliographyUri,
         ),
       );
-      this.markCurrentCitationHandled();
+      target.setSelection?.(result.caret);
+      this.markCitationHandled(target.document, result.caret);
       if (result.imported) {
         const savedSuffix = result.saved ? "" : "；bibliography 保持未保存状态";
         void vscode.window.showInformationMessage(
           `TeXLeaf 已导入“${reference.citekey}”${savedSuffix}。`,
         );
       }
+      return result.caret;
     } catch (error: unknown) {
       const message = errorMessage(error);
       this.output.error(`引用补全提交失败：${message}`);
       void vscode.window.showErrorMessage(
         `TeXLeaf 未修改引用：${message}`,
       );
+      return undefined;
     }
   }
 
   private async commitImportedReference(
-    editor: vscode.TextEditor,
+    target: CitationCompletionTarget,
     located: LocatedCitation,
     reference: ZoteroReference,
     rawEntry: string,
     exportedEntry: BibTeXEntry,
     expectedBibliographyUri: vscode.Uri,
-  ): Promise<{ readonly imported: boolean; readonly saved: boolean }> {
-    const texDocument = editor.document;
+  ): Promise<{
+    readonly imported: boolean;
+    readonly saved: boolean;
+    readonly caret: vscode.Position;
+  }> {
+    const texDocument = target.document;
     const texVersion = texDocument.version;
-    const cursorOffset = texDocument.offsetAt(editor.selection.active);
+    const cursorOffset = texDocument.offsetAt(target.position);
     const resolvedBibliographyUri = await this.repository.resolveBibliographyUri(
       texDocument,
       located.config.bibliographyFile,
@@ -1024,8 +1368,6 @@ export class CitationController
     const caret = texDocument.positionAt(
       located.context.replacementRange.start + resolvedKey.length,
     );
-    editor.selection = new vscode.Selection(caret, caret);
-    this.markCurrentCitationHandled();
 
     let saved = false;
     if (appendText.length > 0) {
@@ -1044,8 +1386,23 @@ export class CitationController
         );
       }
     }
-    return { imported: appendText.length > 0, saved };
+    return { imported: appendText.length > 0, saved, caret };
   }
+}
+
+function validCitationCompletionArgument(
+  value: CitationCompletionArgument | undefined,
+): value is CitationCompletionArgument {
+  return value !== undefined &&
+    typeof value.documentUri === "string" &&
+    typeof value.bibliographyUri === "string" &&
+    typeof value.bibliographyPath === "string" &&
+    typeof value.snapshotKey === "string" &&
+    typeof value.snapshotId === "string" &&
+    typeof value.contextKey === "string" &&
+    typeof value.reference === "object" &&
+    value.reference !== null &&
+    typeof value.reference.citekey === "string";
 }
 
 function isCitationDocument(
@@ -1191,6 +1548,63 @@ function zoteroCompletionContextKey(config: TeXLeafConfig): string {
   ]);
 }
 
+function visualBibliographyPath(
+  requestedPath: string | undefined,
+  configuredPath: string,
+): string {
+  const requested = requestedPath?.trim().replaceAll("\\", "/") ?? "";
+  if (
+    requested.length === 0 ||
+    requested.includes("#") ||
+    requested.includes("{") ||
+    requested.includes("}") ||
+    requested.includes("..") ||
+    requested.startsWith("/") ||
+    /^[A-Za-z]:/u.test(requested)
+  ) {
+    return configuredPath;
+  }
+  return /\.bib$/iu.test(requested) ? requested : `${requested}.bib`;
+}
+
+function uniqueBibliographyUris(values: readonly vscode.Uri[]): readonly vscode.Uri[] {
+  const seen = new Set<string>();
+  const result: vscode.Uri[] = [];
+  for (const value of values) {
+    if (value.scheme !== "file" || !/\.bib$/iu.test(value.fsPath)) {
+      continue;
+    }
+    const key = process.platform === "win32"
+      ? value.fsPath.toLocaleLowerCase("en-US")
+      : value.fsPath;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
+}
+
+function withVisualBibliographyPath(
+  located: LocatedCitation,
+  requestedPath: string | undefined,
+): LocatedCitation {
+  const bibliographyFile = visualBibliographyPath(
+    requestedPath,
+    located.config.bibliographyFile,
+  );
+  return bibliographyFile === located.config.bibliographyFile
+    ? located
+    : {
+        ...located,
+        config: {
+          ...located.config,
+          bibliographyFile,
+        },
+      };
+}
+
 function zoteroSnapshotConfigurationChanged(
   event: vscode.ConfigurationChangeEvent,
 ): boolean {
@@ -1210,8 +1624,8 @@ function compareRankedCompletionCandidates(
   right: RankedCompletionCandidate,
 ): number {
   return (
-    compareCitationSearchMatches(left.match, right.match) ||
     left.sourceRank - right.sourceRank ||
+    compareCitationSearchMatches(left.match, right.match) ||
     compareCitationStrings(left.tieBreak, right.tieBreak)
   );
 }

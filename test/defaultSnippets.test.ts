@@ -1,6 +1,16 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  materializeReplacement,
+  parseReplacementTemplate,
+  remapTabstopsForVsCode,
   SnippetMatcher,
   compileSnippetFile,
   replacementPartsToText,
@@ -17,8 +27,8 @@ import {
 } from "../src/defaultLibrary";
 
 test("factory library remains complete, unique, and declarative", () => {
-  assert.equal(DEFAULT_SNIPPETS.length, 212);
-  assert.equal(DEFAULT_SNIPPETS.filter((snippet) => snippet.options.includes("r")).length, 35);
+  assert.equal(DEFAULT_SNIPPETS.length, 223);
+  assert.equal(DEFAULT_SNIPPETS.filter((snippet) => snippet.options.includes("r")).length, 36);
   assert.equal(DEFAULT_SNIPPETS.filter((snippet) => snippet.options.includes("v")).length, 9);
 
   const normalizedIds = DEFAULT_SNIPPETS.map((snippet) => snippet.id.toLowerCase());
@@ -30,6 +40,38 @@ test("factory library remains complete, unique, and declarative", () => {
   assert.equal(byTrigger.get("lm")?.replacement, "\\(@0\\)");
   assert.equal(byTrigger.get("//")?.replacement, "\\frac{@0}{@1}@2");
   assert.equal(byTrigger.get(";a")?.replacement, "\\alpha");
+  assert.equal(byTrigger.has("new-trigger"), false);
+
+  const importedUserDefaults = new Map([
+    ["res", ["\\operatorname{Res}", "mA"]],
+    ["([A-Za-z])cal", ["\\mathcal{@[0]}", "rmA"]],
+    ["dd", ["\\dd ", "mA"]],
+    ["part", ["\\partial", "mA"]],
+    ["..c", ["\\cdots", "mA"]],
+    ["..l", ["\\ldots", "mA"]],
+    ["..v", ["\\vdots", "mA"]],
+    ["..d", ["\\ddots", "mA"]],
+    ["nsor", ["\\sqcup", "mA"]],
+    ["bino", ["\\binom{@0}{@1}@2", "mA"]],
+    ["sst", ["\\substack{@0}", "mA"]],
+  ]);
+  for (const [trigger, [replacement, options]] of importedUserDefaults) {
+    assert.equal(byTrigger.get(trigger)?.replacement, replacement, trigger);
+    assert.equal(byTrigger.get(trigger)?.options, options, trigger);
+  }
+  assert.equal(byTrigger.get("\\ddt")?.replacement, "\\frac{\\dd}{\\dd t} ");
+  assert.equal(
+    byTrigger.get("\\int")?.replacement,
+    "\\int @0 \\, \\dd@{1:x} @2",
+  );
+  assert.equal(
+    byTrigger.get("dint")?.replacement,
+    "\\int_{@{0:0}}^{@{1:1}} @2 \\, \\dd@{3:x} @4",
+  );
+  assert.equal(
+    byTrigger.get("infi")?.replacement,
+    "\\int_{-\\infty}^{\\infty} @0 \\, \\dd@{1:x} @2",
+  );
 
   const theoremTriggers = new Map([
     ["\\axm", "axiom"],
@@ -56,6 +98,29 @@ test("factory library remains complete, unique, and declarative", () => {
     );
     assert.equal(byTrigger.has(trigger.slice(1)), false, trigger);
   }
+});
+
+test("partial derivative placeholders advance from numerator to denominator", () => {
+  const partial = DEFAULT_SNIPPETS.find(
+    (snippet) => snippet.id === "calculus.partial",
+  );
+  assert.ok(partial);
+  assert.equal(partial.trigger, "par");
+  assert.equal(
+    partial.replacement,
+    "\\frac{ \\partial @{0:y} }{ \\partial @{1:x} } @2",
+  );
+
+  const nativeParts = remapTabstopsForVsCode(
+    materializeReplacement(
+      parseReplacementTemplate(partial.replacement, partial.syntaxVersion ?? 2),
+    ),
+  ).parts.filter((part) => part.kind === "tabstop");
+  assert.deepEqual(nativeParts, [
+    { kind: "tabstop", index: 1, placeholder: "y" },
+    { kind: "tabstop", index: 2, placeholder: "x" },
+    { kind: "tabstop", index: 0, placeholder: undefined },
+  ]);
 });
 
 test("revision-2 theorem defaults upgrade only when the complete record is untouched", () => {
@@ -213,6 +278,7 @@ test("every factory definition validates and compiles through the production cor
     mathMode: "text" as const,
     inComment: false,
     inVerbatim: false,
+    inTextCommandArgument: false,
     inSnippetSuppressedArgument: false,
     snippetSuppressionCommand: undefined,
     environments: [],
@@ -255,6 +321,7 @@ test("every factory definition validates and compiles through the production cor
     mathMode: "inline" as const,
     inComment: false,
     inVerbatim: false,
+    inTextCommandArgument: false,
     inSnippetSuppressedArgument: false,
     snippetSuppressionCommand: undefined,
     environments: [],

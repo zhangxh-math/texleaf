@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 "use strict";
 
 const assert = require("node:assert/strict");
@@ -61,11 +68,64 @@ async function settlesWithin(promise, description, timeoutMs = 1_500) {
 
 function assertNoAiDiagnostics(document, description) {
   assert.deepEqual(
-    vscode.languages
-      .getDiagnostics(document.uri)
-      .filter((diagnostic) => diagnostic.source === "TeXLeaf AI"),
+    texLeafAiDiagnostics(document),
     [],
     description,
+  );
+}
+
+function texLeafAiDiagnosticEntries(document) {
+  const path = document.uri.path.toLowerCase();
+  return vscode.languages
+    .getDiagnostics()
+    .filter(([uri]) => {
+      // AI diagnostics for a visual-editor document intentionally live on a
+      // selectable read-only mirror.  Its invisible basename guard prevents
+      // the `*.tex` custom-editor association from claiming the transient tab,
+      // while the remaining path and every diagnostic offset stay identical
+      // to the source document.  Accept both the source URI (for ordinary text
+      // editors/backward compatibility) and that guarded Problems mirror.
+      const diagnosticPath = uri.path.replace(/\u2063+$/gu, "").toLowerCase();
+      return diagnosticPath === path;
+    })
+    .flatMap(([uri, diagnostics]) => diagnostics
+      .filter((diagnostic) => diagnostic.source === "TeXLeaf AI")
+      .map((diagnostic) => ({ uri, diagnostic }))
+    );
+}
+
+function texLeafAiDiagnostics(document) {
+  return texLeafAiDiagnosticEntries(document).map(({ diagnostic }) => diagnostic);
+}
+
+function assertSingleAiDiagnostic(
+  document,
+  start,
+  end,
+  description,
+) {
+  const diagnostics = texLeafAiDiagnostics(document);
+  assert.equal(diagnostics.length, 1, description);
+  const [diagnostic] = diagnostics;
+  assert.deepEqual(
+    {
+      start: document.offsetAt(diagnostic.range.start),
+      end: document.offsetAt(diagnostic.range.end),
+      severity: diagnostic.severity,
+      source: diagnostic.source,
+    },
+    {
+      start,
+      end,
+      severity: vscode.DiagnosticSeverity.Warning,
+      source: "TeXLeaf AI",
+    },
+    `${description}: the native Problems diagnostic must preserve the exact issue range`,
+  );
+  assert.match(
+    diagnostic.message,
+    /建议修改用词/u,
+    `${description}: the native Problems diagnostic must preserve the AI issue message`,
   );
 }
 
@@ -272,6 +332,77 @@ async function typeEach(text, expectedEditor) {
   }
 }
 
+async function typeBatch(text, expectedEditor) {
+  const expectedDocument = expectedEditor?.document;
+  if (
+    expectedDocument !== undefined &&
+    vscode.window.activeTextEditor?.document.uri.toString() !==
+      expectedDocument.uri.toString()
+  ) {
+    await vscode.window.showTextDocument(expectedDocument, { preview: false });
+  }
+  if (expectedDocument !== undefined) {
+    await waitFor(
+      () =>
+        vscode.window.activeTextEditor?.document.uri.toString() ===
+        expectedDocument.uri.toString(),
+      `the expected editor before batch typing ${JSON.stringify(text)}`,
+    );
+  }
+
+  const versionBeforeType = expectedDocument?.version;
+  await vscode.commands.executeCommand("type", { text });
+  if (expectedDocument !== undefined && versionBeforeType !== undefined) {
+    await waitFor(
+      () => expectedDocument.version > versionBeforeType,
+      `the expected document change after batch typing ${JSON.stringify(text)}`,
+    );
+  }
+}
+
+async function waitForDocumentText(document, expected, description) {
+  try {
+    await waitFor(() => document.getText() === expected, description);
+  } catch {
+    assert.equal(document.getText(), expected, description);
+  }
+}
+
+function observeDocumentText(document, expected, description, timeoutMs = 1_000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer;
+    let subscription;
+    const finish = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      subscription?.dispose();
+      if (error === undefined) {
+        resolve();
+      } else {
+        reject(error);
+      }
+    };
+    subscription = vscode.workspace.onDidChangeTextDocument((event) => {
+      if (event.document === document && document.getText() === expected) {
+        finish();
+      }
+    });
+    timer = setTimeout(
+      () => finish(new Error(`Timed out waiting for ${description}`)),
+      timeoutMs,
+    );
+    if (document.getText() === expected) {
+      finish();
+    }
+  });
+}
+
 async function editEach(editor, text) {
   for (const character of text) {
     const document = editor.document;
@@ -354,6 +485,38 @@ async function assertMatrixShortcuts(
   assert.equal(editor.document.eol, endOfLine);
   assert.equal(editor.selection.active.line, 2);
   assert.equal(editor.selection.active.character, 2);
+
+  await vscode.commands.executeCommand("texleaf.handleTab");
+  await waitFor(
+    () => editor.document.lineAt(2).text === "  & ",
+    `${environment} row-start Tab without cumulative indentation`,
+  );
+  assert.equal(editor.selection.active.character, 4);
+
+  if (enterThroughType) {
+    await vscode.commands.executeCommand("type", {
+      source: "keyboard",
+      text: "\n",
+    });
+  } else {
+    await vscode.commands.executeCommand("texleaf.matrixEnter");
+  }
+  await waitFor(
+    () => editor.document.lineCount === 5,
+    `${environment} second Enter row insertion`,
+  );
+  assert.equal(editor.document.lineAt(2).text, "  &  \\\\");
+  assert.equal(editor.document.lineAt(3).text, "  ");
+  await vscode.commands.executeCommand("texleaf.handleTab");
+  await waitFor(
+    () => editor.document.lineAt(3).text === "  & ",
+    `${environment} repeated row-start Tab without indentation growth`,
+  );
+  assert.equal(
+    editor.document.lineAt(3).text.match(/^ */u)?.[0].length,
+    2,
+    `${environment} repeated row indentation must remain stable`,
+  );
 }
 
 async function assertLeftRightEnter(
@@ -579,18 +742,28 @@ async function assertAutomaticSnippetScope(
   trigger = "lm",
 ) {
   await replaceDocument(editor, "", 0);
-  await typeEach(trigger);
+  await typeEach(trigger, editor);
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(editor.document.getText(), expected, description);
 }
 
 async function assertTemplateExpansion(editor, trigger, expectedClass) {
   await replaceDocument(editor, "", 0);
-  await typeEach(trigger);
-  await waitFor(
-    () => editor.document.getText().includes(expectedClass),
-    `${trigger} automatic independent template expansion`,
-  );
+  await typeEach(trigger, editor);
+  try {
+    await waitFor(
+      () => editor.document.getText().includes(expectedClass),
+      `${trigger} automatic independent template expansion`,
+      10_000,
+    );
+  } catch (error) {
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}; ` +
+      `actual=${JSON.stringify(editor.document.getText())}; ` +
+      `active=${JSON.stringify(vscode.window.activeTextEditor?.document.uri.toString())}; ` +
+      `autoSnippets=${JSON.stringify(vscode.workspace.getConfiguration("texleaf", editor.document.uri).get("autoSnippets"))}`,
+    );
+  }
   const expanded = editor.document.getText();
   assert.match(expanded, /\\begin\{document\}/u, trigger);
   assert.match(expanded, /\\end\{document\}/u, trigger);
@@ -657,6 +830,50 @@ async function assertImePunctuation(editor, punctuation, replacementCommand) {
     editor.document.getText(),
     punctuation,
     `IME punctuation ${punctuation} must not be duplicated`,
+  );
+}
+
+async function commitImeText(editor, provisionalText, committedText, replacementCommand) {
+  const document = editor.document;
+  const versionBeforeComposition = document.version;
+  const initialType = vscode.commands.executeCommand("type", {
+    text: provisionalText,
+  });
+  const replacement = vscode.commands.executeCommand(
+    replacementCommand,
+    replacementCommand === "replacePreviousChar"
+      ? { text: committedText, replaceCharCnt: provisionalText.length }
+      : {
+          text: committedText,
+          replacePrevCharCnt: provisionalText.length,
+          replaceNextCharCnt: 0,
+          positionDelta: 0,
+        },
+  );
+  await Promise.all([initialType, replacement]);
+  await waitFor(
+    () => document.version > versionBeforeComposition,
+    `${replacementCommand} IME commit ${JSON.stringify(committedText)}`,
+  );
+}
+
+async function commitImeSequence(editor, replacementSteps) {
+  const document = editor.document;
+  const versionBeforeComposition = document.version;
+  const operations = [
+    vscode.commands.executeCommand("compositionStart"),
+    ...replacementSteps.map(([command, args]) =>
+      vscode.commands.executeCommand(command, args)
+    ),
+    vscode.commands.executeCommand("compositionEnd"),
+  ];
+  // Real editor composition events can arrive while the contributed handler
+  // for the previous event is still awaiting its extension-host round trip.
+  // Queue the whole lifecycle first, then await it as one unit.
+  await Promise.all(operations);
+  await waitFor(
+    () => document.version > versionBeforeComposition,
+    "the concurrent IME composition lifecycle to change the document",
   );
 }
 
@@ -834,7 +1051,7 @@ async function run() {
     );
     assert.equal(
       parseJsonc(invalidFallbackText).snippets.length,
-      212,
+      223,
       "an invalid old-publisher library must fall back to the complete factory library",
     );
     assert.equal(
@@ -939,11 +1156,18 @@ async function run() {
     assert.ok(commands.includes("texleaf.openSnippetFile"));
     assert.ok(commands.includes("texleaf.openTemplateFile"));
     assert.ok(commands.includes("texleaf.restoreDefaultSnippets"));
+    assert.ok(commands.includes("texleaf.handleSnippetTab"));
+    assert.ok(commands.includes("texleaf.handleSuggestSnippetTab"));
     assert.ok(commands.includes("texleaf.pickCitation"));
     assert.ok(commands.includes("texleaf.refreshZotero"));
     assert.ok(commands.includes("texleaf.toggleMathPreview"));
     assert.ok(commands.includes("texleaf.refreshMathPreview"));
     assert.ok(commands.includes("texleaf.dismissMathPreview"));
+    assert.ok(commands.includes("texleaf.visualEditor.open"));
+    assert.ok(commands.includes("texleaf.visualEditor.openSource"));
+    assert.ok(commands.includes("texleaf.visualEditor.build"));
+    assert.ok(commands.includes("texleaf.visualEditor.viewPdf"));
+    assert.ok(commands.includes("texleaf.visualEditor.synctex"));
     assert.ok(commands.includes("texleaf.aiWriting.toggle"));
     assert.ok(commands.includes("texleaf.aiWriting.setApiKey"));
     assert.ok(commands.includes("texleaf.aiWriting.clearApiKey"));
@@ -962,6 +1186,10 @@ async function run() {
     assert.ok(commands.includes("texleaf.aiIssues.ignore"));
     assert.ok(commands.includes("default:replacePreviousChar"));
     assert.ok(commands.includes("default:compositionType"));
+    assert.ok(commands.includes("compositionStart"));
+    assert.ok(commands.includes("compositionEnd"));
+    assert.ok(commands.includes("default:compositionStart"));
+    assert.ok(commands.includes("default:compositionEnd"));
     await settlesWithin(
       vscode.commands.executeCommand("texleaf.aiWriting.showIssues"),
       "opening the dedicated AI issue list",
@@ -1137,7 +1365,6 @@ async function run() {
     for (const competingContext of [
       "suggestWidgetVisible",
       "inlineSuggestionVisible",
-      "inSnippetMode",
     ]) {
       assert.equal(
         exactSnippetTabKeybinding.when.includes(competingContext),
@@ -1149,6 +1376,11 @@ async function run() {
       exactSnippetTabKeybinding.when.includes("!editorHasMultipleSelections"),
       true,
       "an exact snippet Tab binding must not rewrite only one of multiple cursors",
+    );
+    assert.equal(
+      exactSnippetTabKeybinding.when.includes("!inSnippetMode"),
+      true,
+      "the exact-match handleTab route must never compete with a live Snippet Session",
     );
     const genericTabKeybinding = tabKeybindings.find(
       (keybinding) =>
@@ -1201,7 +1433,7 @@ async function run() {
       false,
       "Suggest-visible matrix cells must still route Tab through local Tabout before column insertion",
     );
-    const snippetPlaceholderTabKeybinding =
+    const suggestSnippetPlaceholderTabKeybinding =
       extension.packageJSON.contributes.keybindings.find(
         (keybinding) =>
           keybinding.command === "texleaf.handleSuggestSnippetTab" &&
@@ -1209,16 +1441,53 @@ async function run() {
           keybinding.when.includes("suggestWidgetVisible"),
       );
     assert.ok(
-      snippetPlaceholderTabKeybinding,
+      suggestSnippetPlaceholderTabKeybinding,
       "a live snippet placeholder needs a Suggest-visible Tab override",
     );
     for (const requiredContext of [
       "texleaf.enabled",
-      "texleaf.mathTabContext",
       "inSnippetMode",
       "hasNextTabstop",
       "suggestWidgetVisible",
-      "!texleaf.snippetTabActionAvailable",
+      "!inlineSuggestionVisible",
+      "!inSnippetChoice",
+      "!renameInputVisible",
+    ]) {
+      assert.equal(
+        suggestSnippetPlaceholderTabKeybinding.when.includes(requiredContext),
+        true,
+        `the Suggest-visible snippet-placeholder Tab override must include ${requiredContext}`,
+      );
+    }
+    for (const forbiddenDependency of [
+      "texleaf.mathTabContext",
+      "texleaf.snippetTabActionAvailable",
+    ]) {
+      assert.equal(
+        suggestSnippetPlaceholderTabKeybinding.when.includes(forbiddenDependency),
+        false,
+        `the Suggest-visible snippet wrapper must not depend on stale ${forbiddenDependency}`,
+      );
+    }
+    const snippetPlaceholderTabKeybinding =
+      extension.packageJSON.contributes.keybindings.find(
+        (keybinding) =>
+          keybinding.command === "texleaf.handleSnippetTab" &&
+          keybinding.key === "tab" &&
+          keybinding.when.includes("!suggestWidgetVisible"),
+      );
+    assert.ok(
+      snippetPlaceholderTabKeybinding,
+      "a live snippet placeholder needs a no-Suggest queued-input Tab override",
+    );
+    for (const requiredContext of [
+      "texleaf.enabled",
+      "editorTextFocus",
+      "!editorReadonly",
+      "!editorTabMovesFocus",
+      "inSnippetMode",
+      "hasNextTabstop",
+      "!suggestWidgetVisible",
       "!inlineSuggestionVisible",
       "!inSnippetChoice",
       "!renameInputVisible",
@@ -1226,9 +1495,38 @@ async function run() {
       assert.equal(
         snippetPlaceholderTabKeybinding.when.includes(requiredContext),
         true,
-        `the snippet-placeholder Tab override must include ${requiredContext}`,
+        `the no-Suggest snippet-placeholder Tab override must include ${requiredContext}`,
       );
     }
+    for (const forbiddenDependency of [
+      "texleaf.mathTabContext",
+      "texleaf.snippetTabActionAvailable",
+    ]) {
+      assert.equal(
+        snippetPlaceholderTabKeybinding.when.includes(forbiddenDependency),
+        false,
+        `the no-Suggest snippet wrapper must not depend on stale ${forbiddenDependency}`,
+      );
+    }
+    const liveSnippetTabKeybindings =
+      extension.packageJSON.contributes.keybindings.filter(
+        (keybinding) =>
+          keybinding.key === "tab" &&
+          keybinding.when.includes("inSnippetMode") &&
+          !keybinding.when.includes("!inSnippetMode") &&
+          keybinding.when.includes("hasNextTabstop"),
+      );
+    assert.deepEqual(
+      liveSnippetTabKeybindings.map((keybinding) => keybinding.command).sort(),
+      ["texleaf.handleSnippetTab", "texleaf.handleSuggestSnippetTab"],
+      "all live next-stop Tab routes must be owned by the queued-input wrappers",
+    );
+    assert.ok(
+      tabKeybindings.every((keybinding) =>
+        keybinding.when.includes("!inSnippetMode")
+      ),
+      "legacy handleTab bindings must be completely excluded from live Snippet Sessions",
+    );
 
     const contributedCommands = new Map(
       extension.packageJSON.contributes.commands.map((command) => [
@@ -1272,7 +1570,10 @@ async function run() {
         ["texleaf.aiWriting.rewriteSelection", "TeXLeaf: AI 改写选区或当前句"],
         ["texleaf.aiWriting.triggerCompletion", "TeXLeaf: 触发 AI 行内补全"],
         ["texleaf.aiWriting.clearDiagnostics", "TeXLeaf: 清除 AI 写作问题"],
-        ["texleaf.aiWriting.showIssues", "TeXLeaf: 显示 AI 写作问题列表"],
+        [
+          "texleaf.aiWriting.showIssues",
+          "TeXLeaf: 在“问题”面板显示 AI 写作问题",
+        ],
         ["texleaf.aiWriting.applyAll", "TeXLeaf: 应用当前全部 AI 建议"],
       ],
       "all public AI writing commands must have stable titles",
@@ -1348,20 +1649,17 @@ async function run() {
     );
     assert.equal(
       extension.packageJSON.contributes.views.texleaf.some(
-        (view) =>
-          view.id === "texleaf.aiIssues" && view.name === "AI 写作问题",
+        (view) => view.id === "texleaf.aiIssues" || view.name === "文档问题",
       ),
-      true,
-      "the TeXLeaf container must expose a dedicated AI issue list",
+      false,
+      "AI language issues must use VS Code Problems instead of a custom document-problem view",
     );
     assert.equal(
       extension.packageJSON.contributes.viewsWelcome.some(
-        (item) =>
-          item.view === "texleaf.aiIssues" &&
-          item.contents.includes("command:texleaf.aiWriting.reviewDocument"),
+        (item) => item.view === "texleaf.aiIssues",
       ),
-      true,
-      "the empty AI issue list must explain how to start a review",
+      false,
+      "the retired AI issue view must not leave a stale welcome contribution",
     );
     assert.deepEqual(
       configurationProperties["texleaf.snippetFiles"].default,
@@ -1382,6 +1680,7 @@ async function run() {
       [
         "texleaf.snippetFiles",
         "texleaf.bibliographyFile",
+        "texleaf.project.rootFile",
         "texleaf.zoteroPort",
         "texleaf.zoteroLibrary",
         "texleaf.mathPreview.macros",
@@ -1400,7 +1699,7 @@ async function run() {
         "texleaf.aiWriting.maxParagraphLength",
         "texleaf.aiWriting.maxDocumentLength",
       ],
-      "untrusted projects must not inject snippet or Zotero connection settings",
+      "untrusted projects must not inject project paths, snippets, provider, or Zotero connection settings",
     );
     assert.equal(
       extension.packageJSON.capabilities.untrustedWorkspaces.supported,
@@ -1413,9 +1712,10 @@ async function run() {
         "TeXLeaf · 片段",
         "TeXLeaf · 文献",
         "TeXLeaf · AI 写作",
+        "TeXLeaf · 可视化编辑器",
         "TeXLeaf · 预览",
       ],
-      "Settings UI must expose exactly the snippet, reference, AI writing, and preview categories",
+      "Settings UI must expose exactly the snippet, reference, AI writing, visual editor, and preview categories",
     );
     assert.deepEqual(
       configurationGroups.map((group) => Object.keys(group.properties)),
@@ -1470,6 +1770,12 @@ async function run() {
           "texleaf.aiWriting.completionDelayMs",
           "texleaf.aiWriting.maxParagraphLength",
           "texleaf.aiWriting.maxDocumentLength",
+        ],
+        [
+          "texleaf.project.rootFile",
+          "texleaf.visualEditor.defaultMode",
+          "texleaf.visualEditor.providerCompletions",
+          "texleaf.visualEditor.latexWorkshopCompatibility",
         ],
         [
           "texleaf.mathPreview.enabled",
@@ -1583,16 +1889,54 @@ async function run() {
       true,
     );
     assert.equal(
+      configurationProperties["texleaf.visualEditor.defaultMode"].default,
+      "visual",
+    );
+    assert.equal(
+      configurationProperties["texleaf.visualEditor.defaultMode"].scope,
+      "application",
+    );
+    assert.deepEqual(
+      configurationProperties["texleaf.visualEditor.defaultMode"].enum,
+      ["visual", "source"],
+    );
+    assert.equal(
+      configurationProperties["texleaf.visualEditor.renderFormulas"],
+      undefined,
+    );
+    assert.equal(
+      configurationProperties["texleaf.visualEditor.providerCompletions"].default,
+      true,
+    );
+    assert.equal(
+      configurationProperties[
+        "texleaf.visualEditor.latexWorkshopCompatibility"
+      ].default,
+      true,
+    );
+    assert.deepEqual(
+      extension.packageJSON.contributes.customEditors,
+      [
+        {
+          viewType: "texleaf.visualEditor",
+          displayName: "TeXLeaf 可视化 LaTeX 编辑器",
+          selector: [{ filenamePattern: "*.tex" }],
+          priority: "default",
+        },
+      ],
+      "TeXLeaf must make its visual editor the default .tex custom editor",
+    );
+    assert.equal(
       configurationProperties["texleaf.mathPreview.presentation"].default,
       "cursor",
     );
     assert.equal(
       configurationProperties["texleaf.mathPreview.placement"].default,
-      "autoBelow",
+      "autoAbove",
     );
     assert.deepEqual(
       configurationProperties["texleaf.mathPreview.placement"].enum,
-      ["autoBelow", "autoAbove", "above", "below"],
+      ["autoAbove", "autoBelow", "above", "below"],
     );
     assert.equal(
       configurationProperties["texleaf.mathPreview.debounceMs"].default,
@@ -1763,13 +2107,38 @@ async function run() {
       1,
       "the first theorem tabstop must be in the environment body",
     );
-    await typeEach("The statement.");
+    await typeEach("(1");
+    await waitFor(
+      () => document.lineAt(1).text.trim() === "(1)",
+      "the theorem body parenthesis to auto-close",
+    );
+    const theoremBeforeLocalTabout = document.getText();
+    const theoremCloseOffset = document.offsetAt(
+      new vscode.Position(1, document.lineAt(1).text.indexOf(")")),
+    );
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      theoremCloseOffset,
+      "the theorem snippet caret must begin immediately before the local parenthesis closer",
+    );
+    await vscode.commands.executeCommand("texleaf.handleSnippetTab");
+    assert.equal(
+      document.getText(),
+      theoremBeforeLocalTabout,
+      "leaving a local theorem-body parenthesis must not change the environment",
+    );
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      theoremCloseOffset + 1,
+      "the first theorem-body Tab must leave the parenthesis before the snippet environment",
+    );
+    await typeEach(" The statement.");
     assert.equal(
       document.lineAt(1).text.trim(),
-      "The statement.",
+      "(1) The statement.",
       "typing at the first theorem tabstop must fill the body",
     );
-    await vscode.commands.executeCommand("jumpToNextSnippetPlaceholder");
+    await vscode.commands.executeCommand("texleaf.handleSnippetTab");
     assert.equal(
       editor.selection.active.isEqual(
         document.positionAt(document.getText().length),
@@ -1814,6 +2183,199 @@ async function run() {
       document.getText(),
       enlargedSumText,
       "Tabout after a plain enlarged snippet must not alter the formula",
+    );
+
+    const autoEnlargeBinomSource = "$()$";
+    const autoEnlargeBinomCursor = autoEnlargeBinomSource.indexOf(")");
+    await replaceDocument(
+      editor,
+      autoEnlargeBinomSource,
+      autoEnlargeBinomCursor,
+    );
+    await typeEach("bino", editor);
+    const autoEnlargeBinomExpected = "$\\left(\\binom{}{}\\right)$";
+    await waitForDocumentText(
+      document,
+      autoEnlargeBinomExpected,
+      "binomial automatic expansion with scalable parentheses",
+    );
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      autoEnlargeBinomExpected.indexOf("\\binom{") + "\\binom{".length,
+      "the enlarged binomial must keep the first caret in its numerator",
+    );
+
+    const cascadedFractionSource = "$(1-())$";
+    const cascadedFractionCursor = cascadedFractionSource.indexOf(")");
+    await replaceDocument(
+      editor,
+      cascadedFractionSource,
+      cascadedFractionCursor,
+    );
+    await typeEach("/", editor);
+    const cascadedFractionBeforeFinalKey = "$(1-(/))$";
+    assert.equal(
+      document.getText(),
+      cascadedFractionBeforeFinalKey,
+      "the first slash must remain literal before the built-in fraction trigger completes",
+    );
+    await typeEach("/", editor);
+    const cascadedFractionExpected =
+      "$\\left(1-\\left(\\frac{}{}\\right)\\right)$";
+    await waitForDocumentText(
+      document,
+      cascadedFractionExpected,
+      "one automatic fraction insertion to enlarge every enclosing parenthesis",
+    );
+    const cascadedFractionNumerator =
+      cascadedFractionExpected.indexOf("\\frac{") + "\\frac{".length;
+    assert.equal(
+      editor.selection.isEmpty,
+      true,
+      "the cascaded fraction numerator must be an empty caret tabstop",
+    );
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      cascadedFractionNumerator,
+      "cascading bracket edits must preserve the fraction numerator caret",
+    );
+    await vscode.commands.executeCommand("undo");
+    const cascadedSizedRawTrigger =
+      "$\\left(1-\\left(//\\right)\\right)$";
+    await waitForDocumentText(
+      document,
+      cascadedSizedRawTrigger,
+      "the first undo to restore the raw fraction trigger inside the sized pairs",
+    );
+    assert.equal(
+      document.getText().includes("\\frac"),
+      false,
+      "the first tabstop-snippet undo must remove the inserted fraction",
+    );
+    await vscode.commands.executeCommand("undo");
+    const cascadedRawTrigger = "$(1-(//))$";
+    await waitForDocumentText(
+      document,
+      cascadedRawTrigger,
+      "the second undo to remove every sizing modifier while preserving the typed trigger",
+    );
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      cascadedFractionCursor + 2,
+      "the two-stage tabstop-snippet undo must preserve the committed trigger text",
+    );
+
+    await replaceDocument(
+      editor,
+      cascadedFractionSource,
+      cascadedFractionCursor,
+    );
+    await typeEach("//", editor);
+    await waitForDocumentText(
+      document,
+      cascadedFractionExpected,
+      "standalone cascaded fraction used for tabstop navigation",
+    );
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      cascadedFractionNumerator,
+      "the standalone cascaded fraction must restart at its numerator",
+    );
+    await vscode.commands.executeCommand("texleaf.handleSnippetTab");
+    assert.equal(
+      document.getText(),
+      cascadedFractionExpected,
+      "snippet navigation must not expand the structural numerator brace as a manual snippet",
+    );
+    const cascadedFractionDenominator = cascadedFractionNumerator + 2;
+    await waitFor(
+      () =>
+        editor.selection.isEmpty &&
+        document.offsetAt(editor.selection.active) ===
+          cascadedFractionDenominator,
+      "the standalone cascaded fraction denominator tabstop",
+    );
+
+    const cascadedPlainSource = "$(())$";
+    const cascadedPlainCursor = cascadedPlainSource.indexOf(")");
+    await replaceDocument(editor, cascadedPlainSource, cascadedPlainCursor);
+    await typeEach("su", editor);
+    const cascadedPlainBeforeFinalKey = "$((su))$";
+    assert.equal(document.getText(), cascadedPlainBeforeFinalKey);
+    await typeEach("m", editor);
+    const cascadedPlainExpected =
+      "$\\left(\\left(\\sum\\right)\\right)$";
+    await waitForDocumentText(
+      document,
+      cascadedPlainExpected,
+      "one no-tabstop snippet edit to enlarge both enclosing parentheses",
+    );
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      cascadedPlainExpected.indexOf("\\right)"),
+      "the cascaded plain snippet caret must remain after \\sum",
+    );
+    await vscode.commands.executeCommand("undo");
+    await waitForDocumentText(
+      document,
+      cascadedPlainBeforeFinalKey,
+      "one undo to atomically revert a no-tabstop snippet and all sizing modifiers",
+    );
+
+    await replaceDocument(editor, "", 0);
+    await editor.insertSnippet(
+      new vscode.SnippetString("$(1-(${1}))$ ${2:after}"),
+    );
+    await typeEach("//", editor);
+    const cascadedNestedFractionExpected =
+      "$\\left(1-\\left(\\frac{}{}\\right)\\right)$ after";
+    await waitForDocumentText(
+      document,
+      cascadedNestedFractionExpected,
+      "cascaded fraction inside an outer VS Code snippet placeholder",
+    );
+    const nestedFractionStart =
+      cascadedNestedFractionExpected.indexOf("\\frac");
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      nestedFractionStart + "\\frac{".length,
+      "the nested cascaded fraction must begin at its numerator tabstop",
+    );
+    await vscode.commands.executeCommand("texleaf.handleSnippetTab");
+    const nestedFractionDenominator =
+      nestedFractionStart + "\\frac{}{".length;
+    try {
+      await waitFor(
+        () =>
+          editor.selection.isEmpty &&
+          document.offsetAt(editor.selection.active) ===
+            nestedFractionDenominator,
+        "the cascaded fraction denominator tabstop",
+      );
+    } catch {
+      assert.equal(
+        document.offsetAt(editor.selection.active),
+        nestedFractionDenominator,
+        `the cascaded fraction denominator tabstop; caret offset ${document.offsetAt(editor.selection.active)}`,
+      );
+    }
+    await vscode.commands.executeCommand("texleaf.handleSnippetTab");
+    await waitFor(
+      () =>
+        editor.selection.isEmpty &&
+        document.offsetAt(editor.selection.active) ===
+          nestedFractionStart + "\\frac{}{}".length,
+      "the cascaded fraction final inner tabstop",
+    );
+    await vscode.commands.executeCommand("texleaf.handleSnippetTab");
+    await waitFor(
+      () => document.getText(editor.selection) === "after",
+      "the outer snippet tabstop after completing a cascaded fraction",
+    );
+    assert.equal(
+      document.getText(),
+      cascadedNestedFractionExpected,
+      "nested fraction navigation must not alter the cascaded source",
     );
 
     await replaceDocument(editor, "", 0);
@@ -1957,7 +2519,7 @@ async function run() {
       "same-cell multi-line enlargement must keep the caret before the generated right delimiter",
     );
 
-    const taboutSuggestSource = "$+)$";
+    const taboutSuggestSource = "$(+)$";
     const taboutSuggestCursor = taboutSuggestSource.indexOf(")");
     await replaceDocument(
       editor,
@@ -2517,8 +3079,8 @@ async function run() {
     );
     assert.equal(
       citationConfiguration.get("mathPreview.placement"),
-      "autoBelow",
-      "the effective Math Preview placement must default to autoBelow",
+      "autoAbove",
+      "the effective Math Preview placement must default to autoAbove",
     );
     const citationSettingNames = [
       "autoShowCitationPicker",
@@ -2586,6 +3148,12 @@ async function run() {
       "  title = {Earlier Prefix Key Candidate},",
       "  author = {Prefix Author},",
       "  year = {2024}",
+      "}",
+      "",
+      "@article{ExistingSnapshotSurvey,",
+      "  title = {A Survey of Snapshot Identity Regression},",
+      "  author = {Collected Author},",
+      "  year = {2025}",
       "}",
       "",
       ...Array.from({ length: 105 }, (_, index) => [
@@ -2707,6 +3275,49 @@ async function run() {
         /<rect\s+data-texleaf-preview-card="true"[^>]*fill="#0b0f14"[^>]*fill-opacity="1"[^>]*stroke="#ffffff"[^>]*stroke-opacity="0\.32"/iu,
         "dark-theme previews must carry their rounded, fully opaque card inside the safe SVG",
       );
+
+      const twoLabelAlignPreviewSource = String.raw`\begin{align}
+C(\mathbf{d}) & =\sum_{j=1}^{n}\frac{2d_{j}+1}{\chi(\mathbf{d})-1}C(d_{1},\dots,d_{j}+d_{0},\dots,d_{n})+\sum_{\substack{a,b\geq0\\a+b=d_{0}-1}}\left(\frac{2}{\chi(\mathbf{d})-1}C(a,b,d_{1},\dots,d_{n})\right.\label{eq:bgw-recursion-linear}\\
+&\left.+\sum_{I\sqcup J=\{ 1,\dots n \}}\frac{(\chi(a,\mathbf{d}_{I})-1)!(\chi(b,\mathbf{d}_{J})-1)!}{(\chi(d)-1)!}C(a.\mathbf{d}_{I})C(b,\mathbf{d}_{J})\right).\label{eq:bgw-recursion-quadric}
+\end{align}`;
+      const twoLabelAlignPreviewCursor =
+        twoLabelAlignPreviewSource.indexOf("recursion-quadric") +
+        "recursion".length;
+      await replaceDocument(
+        editor,
+        twoLabelAlignPreviewSource,
+        twoLabelAlignPreviewCursor,
+      );
+      const twoLabelAlignHovers = await settlesWithin(
+        vscode.commands.executeCommand(
+          "vscode.executeHoverProvider",
+          document.uri,
+          document.positionAt(twoLabelAlignPreviewCursor),
+        ),
+        "two-label align Math Preview worker-backed hover",
+        8_000,
+      );
+      const twoLabelAlignMarkdown = (twoLabelAlignHovers ?? [])
+        .flatMap((hover) => hover.contents)
+        .map((content) =>
+          typeof content === "string" ? content : (content.value ?? ""),
+        )
+        .find((content) => content.includes("TeXLeaf Math Preview"));
+      assert.ok(
+        twoLabelAlignMarkdown,
+        "an align with one inline label on each row must keep its preview even when the cursor is inside the second label",
+      );
+      const twoLabelAlignUriMatch = /\]\(([^)]+\.svg)\)/u.exec(
+        twoLabelAlignMarkdown,
+      );
+      assert.ok(twoLabelAlignUriMatch);
+      const twoLabelAlignSvg = new TextDecoder().decode(
+        await vscode.workspace.fs.readFile(
+          vscode.Uri.parse(twoLabelAlignUriMatch[1]),
+        ),
+      );
+      assert.match(twoLabelAlignSvg, /^<svg\b/u);
+      assert.match(twoLabelAlignSvg, /#ffffff/iu);
 
       await workbenchConfiguration.update(
         "colorTheme",
@@ -3207,6 +3818,66 @@ async function run() {
           referenceBibUri.toString(),
           "a Zotero completion must bind the exact bibliography target resolved when it was created",
         );
+        assert.equal(
+          staleArgument.bibliographyPath,
+          "reference.bib",
+          "a Zotero completion must retain the relative bibliography path used by a visual custom editor",
+        );
+
+        const groupedCitationItems = await provideCompletions(
+          document,
+          snapshotCitationCursor,
+        );
+        const collectedSnapshot = findCitationCompletion(
+          groupedCitationItems,
+          "reference.bib",
+          "ExistingSnapshotSurvey",
+        );
+        const uncollectedSnapshot = findZoteroCitationCompletion(
+          groupedCitationItems,
+          "Snapshot2026",
+        );
+        assert.ok(collectedSnapshot && uncollectedSnapshot);
+        assert.equal(
+          groupedCitationItems.indexOf(collectedSnapshot) <
+            groupedCitationItems.indexOf(uncollectedSnapshot),
+          true,
+          "nonempty citation search must group collected .bib matches before uncollected Zotero matches",
+        );
+        assert.equal(
+          collectedSnapshot.sortText < uncollectedSnapshot.sortText,
+          true,
+          "citation sortText must preserve the collected-before-uncollected grouping in VS Code",
+        );
+
+        const cachedEmptyCitationSource = "\\cite{}";
+        const cachedEmptyCitationCursor = cachedEmptyCitationSource.indexOf("}");
+        await replaceDocument(
+          editor,
+          cachedEmptyCitationSource,
+          cachedEmptyCitationCursor,
+        );
+        const cachedEmptyCitationItems = await provideCompletions(
+          document,
+          cachedEmptyCitationCursor,
+        );
+        assert.ok(
+          findCitationCompletion(
+            cachedEmptyCitationItems,
+            "reference.bib",
+            "Lovelace1843",
+          ),
+          "empty citation completion must keep showing collected bibliography entries after Zotero has been cached",
+        );
+        assert.equal(
+          cachedEmptyCitationItems.some((item) =>
+            typeof item.label === "object" &&
+            item.label.description === "Zotero" &&
+            item.kind === vscode.CompletionItemKind.Reference
+          ),
+          false,
+          "empty citation completion must exclude every uncollected Zotero candidate",
+        );
 
         const duplicateCitationSource = "\\cite{Duplicate}";
         const duplicateCitationCursor = duplicateCitationSource.indexOf("}");
@@ -3387,7 +4058,7 @@ async function run() {
     );
     assert.equal(
       seededGlobalLibrary.snippets.length,
-      213,
+      224,
       "the publisher-migrated user snippet and all factory snippets must be editable",
     );
     assert.equal(
@@ -3511,7 +4182,7 @@ async function run() {
       ),
     );
     assert.equal(migratedGlobalLibrary.defaultsRevision, 3);
-    assert.equal(migratedGlobalLibrary.snippets.length, 213);
+    assert.equal(migratedGlobalLibrary.snippets.length, 224);
     assert.equal(
       migratedGlobalLibrary.snippets[0].id,
       "extension-host-pre-0.3-user",
@@ -3935,6 +4606,815 @@ async function run() {
     await assertImePunctuation(editor, "（", "replacePreviousChar");
     await assertImePunctuation(editor, "、", "compositionType");
 
+    const inputBatchGlobalLibrary = parseJsonc(globalSnippetText);
+    inputBatchGlobalLibrary.snippets.push(
+      {
+        id: "extension-host-residue-input-batch",
+        trigger: "res",
+        replacement: "\\operatorname{Res}",
+        options: "mA",
+        description: "Residue input-batch regression",
+        category: "Extension Host",
+      },
+      {
+        id: "extension-host-math-context-only",
+        trigger: "mctx",
+        replacement: "\\operatorname{MathContext}",
+        options: "mA",
+        description: "Math-context scanner regression",
+        category: "Extension Host",
+      },
+      {
+        id: "extension-host-text-context-only",
+        trigger: "tctx",
+        replacement: "\\textbf{TextContext}",
+        options: "tA",
+        description: "Text-context scanner regression",
+        category: "Extension Host",
+      },
+    );
+    const inputBatchGlobalText = `${JSON.stringify(
+      inputBatchGlobalLibrary,
+      null,
+      2,
+    )}\n`;
+    const inputBatchGlobalEditor = await vscode.window.showTextDocument(
+      globalEditor.document,
+    );
+    await replaceDocument(
+      inputBatchGlobalEditor,
+      inputBatchGlobalText,
+      inputBatchGlobalText.length,
+    );
+    assert.equal(
+      await inputBatchGlobalEditor.document.save(),
+      true,
+      "the automatic input-batch fixture must save",
+    );
+    await vscode.commands.executeCommand("texleaf.reloadSnippets");
+    editor = await vscode.window.showTextDocument(document);
+
+    try {
+      const replaceMarkedDocument = async (markedSource) => {
+        const cursorOffset = markedSource.indexOf("|");
+        assert.notEqual(cursorOffset, -1, "the marked source must contain a cursor");
+        assert.equal(
+          markedSource.lastIndexOf("|"),
+          cursorOffset,
+          "the marked source must contain exactly one cursor",
+        );
+        const source = `${markedSource.slice(0, cursorOffset)}${markedSource.slice(cursorOffset + 1)}`;
+        await replaceDocument(editor, source, cursorOffset);
+        return { source, cursorOffset };
+      };
+
+      await replaceDocument(editor, "\\(\\)", 2);
+      await typeEach("res", editor);
+      await waitForDocumentText(
+        document,
+        "\\(\\operatorname{Res}\\)",
+        "the temporary res automatic snippet fixture to load",
+      );
+
+      let markedContext = await replaceMarkedDocument(
+        String.raw`\[\text{|}\]`,
+      );
+      await typeEach("mctx", editor);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(
+        document.getText(),
+        `${markedContext.source.slice(0, markedContext.cursorOffset)}mctx${markedContext.source.slice(markedContext.cursorOffset)}`,
+        "a math-only automatic snippet must stay literal inside \\text{...}",
+      );
+
+      markedContext = await replaceMarkedDocument(String.raw`\[\text{|}\]`);
+      await typeEach("tctx", editor);
+      await waitForDocumentText(
+        document,
+        `${markedContext.source.slice(0, markedContext.cursorOffset)}\\textbf{TextContext}${markedContext.source.slice(markedContext.cursorOffset)}`,
+        "a text-only automatic snippet must expand inside \\text{...}",
+      );
+
+      markedContext = await replaceMarkedDocument(
+        String.raw`\[\text{outer {nested {|}}}\]`,
+      );
+      await typeEach("tctx", editor);
+      await waitForDocumentText(
+        document,
+        `${markedContext.source.slice(0, markedContext.cursorOffset)}\\textbf{TextContext}${markedContext.source.slice(markedContext.cursorOffset)}`,
+        "nested braces must remain in the enclosing \\text argument mode",
+      );
+
+      markedContext = await replaceMarkedDocument(
+        String.raw`\[\text{copy} |\]`,
+      );
+      await typeEach("mctx", editor);
+      await waitForDocumentText(
+        document,
+        `${markedContext.source.slice(0, markedContext.cursorOffset)}\\operatorname{MathContext}${markedContext.source.slice(markedContext.cursorOffset)}`,
+        "closing \\text{...} must restore the surrounding block-math mode",
+      );
+
+      markedContext = await replaceMarkedDocument(
+        String.raw`\[\text{copy \(|\) tail}\]`,
+      );
+      await typeEach("mctx", editor);
+      await waitForDocumentText(
+        document,
+        `${markedContext.source.slice(0, markedContext.cursorOffset)}\\operatorname{MathContext}${markedContext.source.slice(markedContext.cursorOffset)}`,
+        "an explicit math delimiter inside \\text must re-enter inline math mode",
+      );
+
+      markedContext = await replaceMarkedDocument(
+        String.raw`\[\text{copy \(x\) |tail}\]`,
+      );
+      await typeEach("tctx", editor);
+      await waitForDocumentText(
+        document,
+        `${markedContext.source.slice(0, markedContext.cursorOffset)}\\textbf{TextContext}${markedContext.source.slice(markedContext.cursorOffset)}`,
+        "closing inner math must restore the enclosing \\text argument mode",
+      );
+
+      markedContext = await replaceMarkedDocument(
+        String.raw`\begin{align*}
+  \text{|}
+\end{align*}`,
+      );
+      await vscode.commands.executeCommand("texleaf.handleTab");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(
+        document.getText().includes("&"),
+        false,
+        "Tab inside \\text{...} in align* must remain text indentation, not insert a matrix cell separator",
+      );
+
+      await replaceDocument(editor, "\\(\\)", 2);
+      await typeBatch("res", editor);
+      await waitForDocumentText(
+        document,
+        "\\(\\operatorname{Res}\\)",
+        "a multi-character type command ending in the literal res trigger",
+      );
+
+      await replaceDocument(editor, "\\(\\)", 2);
+      await typeBatch("t,.", editor);
+      await waitForDocumentText(
+        document,
+        "\\(\\mathbf{t}\\)",
+        "a multi-character type command ending in the regex t,. trigger",
+      );
+
+      for (const replacementCommand of ["replacePreviousChar", "compositionType"]) {
+        await replaceDocument(editor, "\\(\\)", 2);
+        await commitImeText(editor, "t", "t,.", replacementCommand);
+        await waitForDocumentText(
+          document,
+          "\\(\\mathbf{t}\\)",
+          `${replacementCommand} must re-check an automatic trigger after the IME commit`,
+        );
+      }
+
+      await replaceDocument(editor, "\\(\\)", 2);
+      await commitImeSequence(editor, [
+        ["type", { text: "s" }],
+        ["replacePreviousChar", { text: "su", replaceCharCnt: 1 }],
+        [
+          "compositionType",
+          {
+            text: "sum",
+            replacePrevCharCnt: 2,
+            replaceNextCharCnt: 0,
+            positionDelta: 0,
+          },
+        ],
+      ]);
+      await waitForDocumentText(
+        document,
+        "\\(\\sum\\)",
+        "compositionEnd must expand sum only after the full concurrent IME lifecycle",
+      );
+
+      await replaceDocument(editor, "\\(\\)", 2);
+      await commitImeSequence(editor, [
+        ["type", { text: "t" }],
+        [
+          "compositionType",
+          {
+            text: "t,",
+            replacePrevCharCnt: 1,
+            replaceNextCharCnt: 0,
+            positionDelta: 0,
+          },
+        ],
+        ["replacePreviousChar", { text: "t,.", replaceCharCnt: 2 }],
+      ]);
+      await waitForDocumentText(
+        document,
+        "\\(\\mathbf{t}\\)",
+        "compositionEnd must expand t,. only after the full concurrent IME lifecycle",
+      );
+
+      await replaceDocument(editor, "\\(old\\)", 5);
+      editor.selection = new vscode.Selection(
+        document.positionAt(2),
+        document.positionAt(5),
+      );
+      const selectedCompositionOperations = [
+        vscode.commands.executeCommand("compositionStart"),
+        vscode.commands.executeCommand("type", { text: "s" }),
+        vscode.commands.executeCommand("replacePreviousChar", {
+          text: "su",
+          replaceCharCnt: 1,
+        }),
+        vscode.commands.executeCommand("compositionType", {
+          text: "sum",
+          replacePrevCharCnt: 2,
+          replaceNextCharCnt: 0,
+          positionDelta: 0,
+        }),
+      ];
+      await Promise.all(selectedCompositionOperations);
+      await waitForDocumentText(
+        document,
+        "\\(sum\\)",
+        "a composition that starts over a selection must retain its provisional text",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(
+        document.getText(),
+        "\\(sum\\)",
+        "provisional composition text must not expand before compositionEnd",
+      );
+      await vscode.commands.executeCommand("compositionEnd");
+      await waitForDocumentText(
+        document,
+        "\\(\\sum\\)",
+        "compositionEnd must expand the final text after replacing a selection",
+      );
+
+      await replaceDocument(editor, "\\(t,\\)", 4);
+      const punctuationReplacementVersion = document.version;
+      await Promise.all([
+        vscode.commands.executeCommand("type", { text: "." }),
+        vscode.commands.executeCommand("replacePreviousChar", {
+          text: "。",
+          replaceCharCnt: 1,
+        }),
+      ]);
+      await waitFor(
+        () => document.version > punctuationReplacementVersion,
+        "the no-lifecycle punctuation replacement to change the document",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(
+        document.getText(),
+        "\\(t,。\\)",
+        "a later punctuation replacement must prevent a provisional t,. match from corrupting text",
+      );
+
+      await replaceDocument(editor, "\\(t,\\)", 4);
+      const delayedProvisionalType = vscode.commands.executeCommand("type", {
+        text: ".",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const delayedPunctuationReplacement = vscode.commands.executeCommand(
+        "replacePreviousChar",
+        {
+          text: "。",
+          replaceCharCnt: 1,
+        },
+      );
+      await Promise.all([
+        delayedProvisionalType,
+        delayedPunctuationReplacement,
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(
+        document.getText(),
+        "\\(t,。\\)",
+        "a next-turn IME replacement must supersede a provisional single-character automatic match",
+      );
+
+      await replaceDocument(editor, "\\(\\)", 2);
+      await Promise.all([
+        vscode.commands.executeCommand("type", { text: "res" }),
+        vscode.commands.executeCommand("type", { text: "+" }),
+      ]);
+      await waitForDocumentText(
+        document,
+        "\\(\\operatorname{Res}+\\)",
+        "a queued ordinary character must follow the preceding input-batch expansion",
+      );
+
+      await replaceDocument(editor, "\\(\\)", 2);
+      await Promise.all(
+        [..."res"].map((text) =>
+          vscode.commands.executeCommand("type", { text }),
+        ),
+      );
+      await waitForDocumentText(
+        document,
+        "\\(\\operatorname{Res}\\)",
+        "concurrent single-character commands must preserve and expand res in FIFO order",
+      );
+
+      await replaceDocument(editor, "\\(\\)", 2);
+      await Promise.all([
+        vscode.commands.executeCommand("compositionStart"),
+        vscode.commands.executeCommand("type", { text: "s" }),
+        vscode.commands.executeCommand("replacePreviousChar", {
+          text: "su",
+          replaceCharCnt: 1,
+        }),
+        vscode.commands.executeCommand("compositionType", {
+          text: "sum",
+          replacePrevCharCnt: 2,
+          replaceNextCharCnt: 0,
+          positionDelta: 0,
+        }),
+        vscode.commands.executeCommand("compositionEnd"),
+        vscode.commands.executeCommand("type", { text: "+" }),
+      ]);
+      await waitForDocumentText(
+        document,
+        "\\(\\sum+\\)",
+        "ordinary typing queued after compositionEnd must follow the final expansion",
+      );
+
+      await replaceDocument(editor, "\\(\\)", 2);
+      await Promise.all([
+        vscode.commands.executeCommand("compositionStart"),
+        vscode.commands.executeCommand("type", { text: "s" }),
+        vscode.commands.executeCommand("replacePreviousChar", {
+          text: "sum",
+          replaceCharCnt: 1,
+        }),
+        vscode.commands.executeCommand("compositionEnd"),
+        vscode.commands.executeCommand("compositionStart"),
+        vscode.commands.executeCommand("type", { text: "t" }),
+        vscode.commands.executeCommand("replacePreviousChar", {
+          text: "t,.",
+          replaceCharCnt: 1,
+        }),
+        vscode.commands.executeCommand("compositionEnd"),
+      ]);
+      await waitForDocumentText(
+        document,
+        "\\(\\sum\\mathbf{t}\\)",
+        "two rapid composition lifecycles must keep their provisional text isolated",
+      );
+
+      await replaceDocument(editor, "\\(\\)", 2);
+      await Promise.all([
+        vscode.commands.executeCommand("type", { text: "res" }),
+        vscode.commands.executeCommand("compositionStart"),
+        vscode.commands.executeCommand("type", { text: "s" }),
+        vscode.commands.executeCommand("replacePreviousChar", {
+          text: "sum",
+          replaceCharCnt: 1,
+        }),
+        vscode.commands.executeCommand("compositionEnd"),
+      ]);
+      await waitForDocumentText(
+        document,
+        "\\(\\operatorname{Res}\\sum\\)",
+        "a new composition must not suppress the preceding committed input segment",
+      );
+
+      const inputNewline =
+        document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n";
+      const displayBatchSource = ["\\[", "", "\\]"].join(inputNewline);
+      const displayBatchCursor = displayBatchSource.indexOf(inputNewline) +
+        inputNewline.length;
+      await replaceDocument(editor, displayBatchSource, displayBatchCursor);
+      await typeBatch("res", editor);
+      await waitForDocumentText(
+        document,
+        ["\\[", "\\operatorname{Res}", "\\]"].join(inputNewline),
+        "a multi-character literal trigger on a fresh display-math line",
+      );
+
+      await replaceDocument(editor, displayBatchSource, displayBatchCursor);
+      assert.equal(
+        await document.save(),
+        true,
+        "the display-math input-batch fixture must save before typing",
+      );
+      await typeBatch("res", editor);
+      await waitForDocumentText(
+        document,
+        ["\\[", "\\operatorname{Res}", "\\]"].join(inputNewline),
+        "a literal automatic trigger immediately after saving display math",
+      );
+
+      const alignBatchSource = [
+        "\\begin{align*}",
+        "  & ",
+        "\\end{align*}",
+      ].join(inputNewline);
+      const alignBatchCursor = alignBatchSource.indexOf("  & ") + 4;
+      await replaceDocument(editor, alignBatchSource, alignBatchCursor);
+      await typeBatch("t,.", editor);
+      await waitForDocumentText(
+        document,
+        ["\\begin{align*}", "  & \\mathbf{t}", "\\end{align*}"].join(
+          inputNewline,
+        ),
+        "a multi-character regex trigger on a fresh align-math line",
+      );
+
+      await replaceDocument(editor, alignBatchSource, alignBatchCursor);
+      assert.equal(
+        await document.save(),
+        true,
+        "the align input-batch fixture must save before typing",
+      );
+      await typeBatch("t,.", editor);
+      await waitForDocumentText(
+        document,
+        ["\\begin{align*}", "  & \\mathbf{t}", "\\end{align*}"].join(
+          inputNewline,
+        ),
+        "a regex automatic trigger immediately after saving align math",
+      );
+
+      await replaceDocument(editor, "\\(\\)", 2);
+      const versionBeforeProgrammaticBatch = document.version;
+      assert.equal(
+        await editor.edit(
+          (builder) => builder.insert(editor.selection.active, "res"),
+          { undoStopBefore: true, undoStopAfter: true },
+        ),
+        true,
+        "the paste-style programmatic batch insertion must succeed",
+      );
+      await waitFor(
+        () => document.version > versionBeforeProgrammaticBatch,
+        "the paste-style programmatic batch document change",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(
+        document.getText(),
+        "\\(res\\)",
+        "a generic programmatic multi-character edit must not run automatic snippets",
+      );
+
+      const clipboardBeforeInputBatchTest = await vscode.env.clipboard.readText();
+      try {
+        await replaceDocument(editor, "\\(\\)", 2);
+        await vscode.env.clipboard.writeText("res");
+        const versionBeforePaste = document.version;
+        await vscode.commands.executeCommand("editor.action.clipboardPasteAction");
+        await waitFor(
+          () => document.version > versionBeforePaste,
+          "the ordinary clipboard paste document change",
+        );
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        assert.equal(
+          document.getText(),
+          "\\(res\\)",
+          "an ordinary paste must not run automatic snippets",
+        );
+      } finally {
+        await vscode.env.clipboard.writeText(clipboardBeforeInputBatchTest);
+      }
+    } finally {
+      const restoredInputBatchGlobalEditor = await vscode.window.showTextDocument(
+        globalEditor.document,
+      );
+      await replaceDocument(
+        restoredInputBatchGlobalEditor,
+        globalSnippetText,
+        globalSnippetText.length,
+      );
+      assert.equal(
+        await restoredInputBatchGlobalEditor.document.save(),
+        true,
+        "the automatic input-batch fixture must restore the global library",
+      );
+      await vscode.commands.executeCommand("texleaf.reloadSnippets");
+      editor = await vscode.window.showTextDocument(document);
+    }
+
+    await replaceDocument(editor, "\\(\\)", 2);
+    await typeEach("tau", editor);
+    const plainTauText = "\\(\\tau\\)";
+    await waitForDocumentText(
+      document,
+      plainTauText,
+      "ordinary automatic tau expansion",
+    );
+    assert.equal(
+      editor.selection.isEmpty,
+      true,
+      "ordinary tau expansion must leave a caret rather than a selection",
+    );
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      plainTauText.indexOf("\\tau") + "\\tau".length,
+      "ordinary tau expansion must leave the caret immediately after \\tau",
+    );
+
+    // Reproduce the physical sequence `par -> Tab -> tau -> Tab`. The first
+    // Tab expands TeXLeaf's manual derivative snippet. Typing the automatic
+    // Greek command into its selected numerator must not replace the outer
+    // Snippet Session: the following native snippet Tab still selects x.
+    await replaceDocument(editor, "\\(par\\)", 5);
+    await vscode.commands.executeCommand("texleaf.handleTab");
+    const partialDerivativeWithY =
+      "\\(\\frac{ \\partial y }{ \\partial x } \\)";
+    await waitForDocumentText(
+      document,
+      partialDerivativeWithY,
+      "manual par partial-derivative expansion",
+    );
+    assert.equal(
+      document.getText(editor.selection),
+      "y",
+      "the par snippet must initially select its numerator placeholder",
+    );
+
+    await typeEach("tau", editor);
+    const partialDerivativeWithTau =
+      "\\(\\frac{ \\partial \\tau }{ \\partial x } \\)";
+    await waitForDocumentText(
+      document,
+      partialDerivativeWithTau,
+      "automatic tau expansion inside the par numerator placeholder",
+    );
+    await vscode.commands.executeCommand("jumpToNextSnippetPlaceholder");
+    try {
+      await waitFor(
+        () => document.getText(editor.selection) === "x",
+        "Tab after nested tau expansion to select the denominator x placeholder",
+      );
+    } catch {
+      assert.equal(
+        document.getText(editor.selection),
+        "x",
+        `Tab after nested tau expansion must select denominator x; caret offset ${document.offsetAt(editor.selection.active)}`,
+      );
+    }
+    assert.equal(
+      document.getText(),
+      partialDerivativeWithTau,
+      "advancing the par snippet after tau must not alter the derivative",
+    );
+
+    // Model a fast physical `u` then Tab without awaiting the contributed
+    // type command. Snippet navigation is independent of Tabout, and the
+    // wrapper must await the input queue before advancing the outer session.
+    const taboutConfiguration = vscode.workspace.getConfiguration(
+      "texleaf",
+      document.uri,
+    );
+    const taboutBeforeRapidSnippetTab = taboutConfiguration.inspect("tabout")
+      ?.workspaceFolderValue;
+    await taboutConfiguration.update(
+      "tabout",
+      false,
+      vscode.ConfigurationTarget.WorkspaceFolder,
+    );
+    try {
+      await waitFor(
+        () =>
+          vscode.workspace
+            .getConfiguration("texleaf", document.uri)
+            .get("tabout") === false,
+        "tabout=false before rapid snippet navigation",
+      );
+      await replaceDocument(editor, "\\(par\\)", 5);
+      await vscode.commands.executeCommand("texleaf.handleTab");
+      await waitForDocumentText(
+        document,
+        partialDerivativeWithY,
+        "outer partial derivative for the rapid tau-then-Tab race",
+      );
+      await typeEach("ta", editor);
+      const rapidTauFinalType = vscode.commands.executeCommand("type", {
+        text: "u",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const rapidTauTab = vscode.commands.executeCommand(
+        "texleaf.handleSnippetTab",
+      );
+      await Promise.all([rapidTauFinalType, rapidTauTab]);
+      await waitForDocumentText(
+        document,
+        partialDerivativeWithTau,
+        "rapid final-key tau expansion before outer Tab settles with Tabout disabled",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(
+        document.getText(editor.selection),
+        "x",
+        `rapid tau then Tab must reach outer x with Tabout disabled; caret offset ${document.offsetAt(editor.selection.active)}`,
+      );
+    } finally {
+      await taboutConfiguration.update(
+        "tabout",
+        taboutBeforeRapidSnippetTab,
+        vscode.ConfigurationTarget.WorkspaceFolder,
+      );
+      await waitFor(
+        () =>
+          vscode.workspace
+            .getConfiguration("texleaf", document.uri)
+            .get("tabout", true) ===
+          (taboutBeforeRapidSnippetTab ?? true),
+        "restored Tabout configuration after rapid snippet navigation",
+      );
+    }
+
+    await replaceDocument(editor, "\\(par\\)", 5);
+    await vscode.commands.executeCommand("texleaf.handleTab");
+    await waitForDocumentText(
+      document,
+      partialDerivativeWithY,
+      "outer partial derivative for a multiline plain nested snippet",
+    );
+    await typeEach("iden2", editor);
+    await waitFor(
+      () => {
+        const text = document.getText();
+        return (
+          text.includes("\\begin{pmatrix}") &&
+          text.includes("1 & 0 \\\\") &&
+          text.includes("0 & 1") &&
+          text.includes("\\end{pmatrix}") &&
+          !text.includes("iden2")
+        );
+      },
+      "multiline no-tabstop iden2 expansion inside the outer numerator",
+    );
+    const partialDerivativeWithIdentity = document.getText();
+    await vscode.commands.executeCommand("jumpToNextSnippetPlaceholder");
+    await waitFor(
+      () => document.getText(editor.selection) === "x",
+      "Tab after multiline iden2 expansion to restore the outer denominator placeholder",
+    );
+    assert.equal(
+      document.getText(),
+      partialDerivativeWithIdentity,
+      "resuming the outer snippet after iden2 must not alter the matrix",
+    );
+
+    await replaceDocument(editor, "\\(\\)", 2);
+    await typeEach("lim", editor);
+    const limitWithN = "\\(\\lim_{ n \\to \\infty } \\)";
+    await waitForDocumentText(
+      document,
+      limitWithN,
+      "automatic outer limit snippet",
+    );
+    assert.equal(
+      document.getText(editor.selection),
+      "n",
+      "the limit snippet must initially select n",
+    );
+    await typeEach("sum", editor);
+    const limitWithSum = "\\(\\lim_{ \\sum \\to \\infty } \\)";
+    await waitForDocumentText(
+      document,
+      limitWithSum,
+      "plain symbol expansion inside the first limit placeholder",
+    );
+    await vscode.commands.executeCommand("jumpToNextSnippetPlaceholder");
+    await waitFor(
+      () => document.getText(editor.selection) === "\\infty",
+      "Tab after nested sum expansion to select the next limit placeholder",
+    );
+    assert.equal(
+      document.getText(),
+      limitWithSum,
+      "advancing the limit snippet after sum must not alter its text",
+    );
+
+    await replaceDocument(editor, "\\(\\)", 2);
+    await typeEach("brk", editor);
+    const braketWithEmptyStops = "\\(\\braket{  |  } \\)";
+    await waitForDocumentText(
+      document,
+      braketWithEmptyStops,
+      "automatic outer braket with two empty placeholders",
+    );
+    const firstBraketStop = braketWithEmptyStops.indexOf("  |") + 1;
+    assert.equal(editor.selection.isEmpty, true);
+    assert.equal(
+      document.offsetAt(editor.selection.active),
+      firstBraketStop,
+      "the braket snippet must start at its first empty placeholder",
+    );
+    await typeEach("tau", editor);
+    const braketWithTau = "\\(\\braket{ \\tau |  } \\)";
+    await waitForDocumentText(
+      document,
+      braketWithTau,
+      "plain Greek expansion inside an empty delimited placeholder",
+    );
+    await vscode.commands.executeCommand("texleaf.handleSnippetTab");
+    const secondBraketStop = braketWithTau.indexOf("|  }") + 2;
+    await waitFor(
+      () =>
+        editor.selection.isEmpty &&
+        document.offsetAt(editor.selection.active) === secondBraketStop,
+      "Tab after nested tau expansion to reach the second empty braket placeholder",
+    );
+    assert.equal(
+      document.getText(),
+      braketWithTau,
+      "advancing the braket after tau must not alter its text",
+    );
+
+    await replaceDocument(editor, "\\(\\sum\\)", 6);
+    await vscode.commands.executeCommand("texleaf.handleTab");
+    const sumLimitsWithOne = "\\(\\sum_{i=1}^{N} \\)";
+    await waitForDocumentText(
+      document,
+      sumLimitsWithOne,
+      "manual outer summation-limits snippet",
+    );
+    assert.equal(
+      document.getText(editor.selection),
+      "i",
+      "the summation-limits snippet must initially select i",
+    );
+    await vscode.commands.executeCommand("jumpToNextSnippetPlaceholder");
+    await waitFor(
+      () => document.getText(editor.selection) === "1",
+      "the middle summation-limits placeholder",
+    );
+    await typeEach("Qhat", editor);
+    const sumLimitsWithAccent = "\\(\\sum_{i=\\hat{Q}}^{N} \\)";
+    await waitForDocumentText(
+      document,
+      sumLimitsWithAccent,
+      "plain accent expansion inside a middle summation placeholder",
+    );
+    await vscode.commands.executeCommand("jumpToNextSnippetPlaceholder");
+    await waitFor(
+      () => document.getText(editor.selection) === "N",
+      "Tab after nested accent expansion to select the next summation placeholder",
+    );
+    assert.equal(
+      document.getText(),
+      sumLimitsWithAccent,
+      "advancing summation limits after Qhat must not alter its text",
+    );
+
+    // A nested automatic snippet with its own tabstops should own navigation
+    // until its final stop, then resume the suspended outer Snippet Session.
+    await replaceDocument(editor, "\\(par\\)", 5);
+    await vscode.commands.executeCommand("texleaf.handleTab");
+    await waitForDocumentText(
+      document,
+      partialDerivativeWithY,
+      "outer partial derivative for nested-tabstop navigation",
+    );
+    await typeEach("li", editor);
+    const rapidLimitFinalType = vscode.commands.executeCommand("type", {
+      text: "m",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const rapidLimitFirstTab = vscode.commands.executeCommand(
+      "texleaf.handleSnippetTab",
+    );
+    await Promise.all([rapidLimitFinalType, rapidLimitFirstTab]);
+    const partialDerivativeWithLimit =
+      "\\(\\frac{ \\partial \\lim_{ n \\to \\infty }  }{ \\partial x } \\)";
+    await waitForDocumentText(
+      document,
+      partialDerivativeWithLimit,
+      "automatic limit with tabstops inside the outer numerator placeholder",
+    );
+    await waitFor(
+      () => document.getText(editor.selection) === "\\infty",
+      "queued rapid Tab from nested limit n to its infinity placeholder",
+    );
+    await vscode.commands.executeCommand("texleaf.handleSnippetTab");
+    const nestedLimitFinalOffset =
+      partialDerivativeWithLimit.indexOf("\\lim_") +
+      "\\lim_{ n \\to \\infty } ".length;
+    await waitFor(
+      () =>
+        editor.selection.isEmpty &&
+        document.offsetAt(editor.selection.active) === nestedLimitFinalOffset,
+      "the nested limit final tabstop",
+    );
+    await vscode.commands.executeCommand("texleaf.handleSnippetTab");
+    try {
+      await waitFor(
+        () => document.getText(editor.selection) === "x",
+        "return from nested limit tabstops to the outer denominator placeholder",
+      );
+    } catch {
+      assert.equal(
+        document.getText(editor.selection),
+        "x",
+        `nested tabstops must resume the outer x placeholder; caret offset ${document.offsetAt(editor.selection.active)}`,
+      );
+    }
+
   await replaceDocument(editor, "", 0);
   await typeEach("lm");
 
@@ -3978,6 +5458,97 @@ async function run() {
     true,
     "the extension-host fraction test requires texleaf.autoFraction=true",
   );
+
+  await replaceDocument(editor, "\\(\\leq\\)", "\\(\\leq".length);
+  await typeEach("0", editor);
+  await waitForDocumentText(
+    document,
+    "\\(\\leq0\\)",
+    "a digit after \\leq must not become a suffix subscript",
+  );
+
+  await replaceDocument(editor, "\\(\\cdots\\)", "\\(\\cdots".length);
+  await typeEach("0", editor);
+  await waitForDocumentText(
+    document,
+    "\\(\\cdots0\\)",
+    "a digit after \\cdots must not become a suffix subscript",
+  );
+
+  const lessThanFractionSource = "\\(<1/\\)";
+  await replaceDocument(
+    editor,
+    lessThanFractionSource,
+    lessThanFractionSource.indexOf("/") + 1,
+  );
+  await typeEach("2", editor);
+  await waitForDocumentText(
+    document,
+    "\\(<\\frac{1}{2}\\)",
+    "a leading less-than sign must remain outside the automatic numerator",
+  );
+
+  await replaceDocument(editor, "\\(1/\\)", 4);
+  await typeEach("2", editor);
+  await waitForDocumentText(
+    document,
+    "\\(\\frac{1}{2}\\)",
+    "type-command automatic fraction from an existing numerator and slash",
+  );
+  await waitFor(
+    () => document.offsetAt(editor.selection.active) === 12,
+    "type-command fraction tabstop",
+  );
+
+  await replaceDocument(editor, "\\(\\)", 2);
+  await typeEach("1/", editor);
+  assert.equal(
+    document.getText(),
+    "\\(1/\\)",
+    "typing the numerator and slash must retain the literal slash until a denominator",
+  );
+  assert.equal(
+    await document.save(),
+    true,
+    "the pending denominator fixture must save before its first character",
+  );
+  await typeEach("2", editor);
+  await waitForDocumentText(
+    document,
+    "\\(\\frac{1}{2}\\)",
+    "saving after 1/ must not lose automatic fraction recognition",
+  );
+
+  await replaceDocument(editor, "\\(1/\\)", 4);
+  const provisionalFractionText = "\\(1/2\\)";
+  const provisionalFractionObserved = observeDocumentText(
+    document,
+    provisionalFractionText,
+    "the provisional denominator before a next-turn IME replacement",
+  );
+  const provisionalDenominatorType = vscode.commands.executeCommand("type", {
+    text: "2",
+  });
+  await provisionalFractionObserved;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const provisionalDenominatorReplacement = vscode.commands.executeCommand(
+    "replacePreviousChar",
+    {
+      text: "。",
+      replaceCharCnt: 1,
+    },
+  );
+  await Promise.all([
+    provisionalDenominatorType,
+    provisionalDenominatorReplacement,
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(
+    document.getText(),
+    "\\(1/。\\)",
+    "a next-turn replacement must supersede a provisional automatic-fraction seed",
+  );
+
   await replaceDocument(editor, "\\(\\)", 2);
   await editEach(editor, "1/");
   assert.equal(document.getText(), "\\(1/\\)");
@@ -4059,6 +5630,63 @@ async function run() {
     document.offsetAt(editor.selection.active),
     handwrittenCloserCursor + 1,
     "Tabout must cross the handwritten denominator closer",
+  );
+
+  const nestedCloserSource = [
+    String.raw`\begin{align*}`,
+    String.raw`  & ([x])`,
+    String.raw`\end{align*}`,
+  ].join("\n");
+  const nestedCloserCursor = nestedCloserSource.indexOf("x") + 1;
+  await replaceDocument(editor, nestedCloserSource, nestedCloserCursor);
+  await vscode.commands.executeCommand("texleaf.handleTab");
+  assert.equal(
+    document.offsetAt(editor.selection.active),
+    nestedCloserCursor + 1,
+    "nested Tabout must leave the innermost bracket first",
+  );
+  await vscode.commands.executeCommand("texleaf.handleTab");
+  assert.equal(
+    document.offsetAt(editor.selection.active),
+    nestedCloserCursor + 2,
+    "the following Tabout may then leave the enclosing parenthesis",
+  );
+
+  const explicitMathExitSource = String.raw`\(x   \)`;
+  const explicitMathExitCursor = explicitMathExitSource.indexOf("x") + 1;
+  await replaceDocument(
+    editor,
+    explicitMathExitSource,
+    explicitMathExitCursor,
+  );
+  await vscode.commands.executeCommand("texleaf.handleTab");
+  assert.equal(
+    document.offsetAt(editor.selection.active),
+    explicitMathExitSource.length,
+    "Tabout must leave an explicit math delimiter when only whitespace remains",
+  );
+
+  const alignRowPrefixSource = [
+    String.raw`\begin{align*}`,
+    String.raw`  & \frac{1}{16}\left(\frac{z_1}{z_2}+\frac{z_2}{z_1}\right) \\`,
+    String.raw`  &-2z(\Phi_{1,2}(z_{1}; \mathbf{s})-1)(\Phi_{1,2}(z_{2}; \mathbf{s})-1)`,
+    String.raw`\end{align*}`,
+  ].join("\n");
+  const alignRowPrefixCursor = alignRowPrefixSource.indexOf("&-2z") + 1;
+  await replaceDocument(editor, alignRowPrefixSource, alignRowPrefixCursor);
+  await vscode.commands.executeCommand("texleaf.handleTab");
+  const alignRowPrefixExpected =
+    `${alignRowPrefixSource.slice(0, alignRowPrefixCursor)} & ` +
+    alignRowPrefixSource.slice(alignRowPrefixCursor);
+  await waitForDocumentText(
+    document,
+    alignRowPrefixExpected,
+    "matrix column insertion after an existing align boundary before brace-heavy source",
+  );
+  assert.equal(
+    document.offsetAt(editor.selection.active),
+    alignRowPrefixCursor + " & ".length,
+    "align cell-prefix Tab must stay at the inserted alignment marker",
   );
 
   const blankCellSource = [
@@ -4553,15 +6181,21 @@ async function run() {
       true,
       "a restored issue must provide the same safe Quick Fix as a live issue",
     );
-    assertNoAiDiagnostics(
+    assertSingleAiDiagnostic(
       reopenedPersistenceDocument,
-      "restored AI issues must remain decorations rather than duplicate diagnostics",
+      badStart,
+      badStart + 3,
+      "restored AI issues must be published to the native Problems panel",
     );
 
     await vscode.commands.executeCommand("texleaf.aiWriting.clearDiagnostics");
     await waitFor(
       async () => !(await hasTexLeafAiHover(reopenedPersistenceDocument, badStart)),
       "cleared persisted AI hover",
+    );
+    await waitFor(
+      () => texLeafAiDiagnostics(reopenedPersistenceDocument).length === 0,
+      "cleared native AI diagnostic",
     );
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     const clearedRecord = JSON.parse(new TextDecoder().decode(
@@ -4653,9 +6287,11 @@ async function run() {
         `a collapsed cursor at the ${description} must not expose TeXLeaf actions`,
       );
     }
-    assertNoAiDiagnostics(
+    assertSingleAiDiagnostic(
       hoverApplyDocument,
-      "collapsed-cursor Quick Fixes must not require duplicate AI diagnostics",
+      hoverApplyStart,
+      hoverApplyEnd,
+      "collapsed-cursor Quick Fixes must share the native Problems diagnostic",
     );
 
     const quickFixCursor = hoverApplyDocument.positionAt(hoverApplyStart + 1);
@@ -4691,14 +6327,30 @@ async function run() {
     );
     assert.deepEqual(
       hoverMarkdown.isTrusted,
-      { enabledCommands: ["texleaf.aiWriting.applyIssue"] },
-      "the Hover must trust only the internal apply command, never arbitrary commands",
+      {
+        enabledCommands: [
+          "texleaf.aiWriting.applyIssue",
+          "texleaf.aiWriting.ignoreIssue",
+        ],
+      },
+      "the Hover must trust only its internal Apply and Ignore commands",
     );
+    assert.equal(
+      hoverMarkdown.supportThemeIcons,
+      true,
+      "the Hover action labels must render VS Code theme icons",
+    );
+    assert.match(hoverMarkdown.value, /应用修改/u);
+    assert.match(hoverMarkdown.value, /忽略建议/u);
     const hoverCommandLink = markdownCommandLink(
       hoverMarkdown,
       "texleaf.aiWriting.applyIssue",
     );
     const hoverCommand = commandArgumentsFromLink(hoverCommandLink);
+    const hoverIgnoreCommand = commandArgumentsFromLink(markdownCommandLink(
+      hoverMarkdown,
+      "texleaf.aiWriting.ignoreIssue",
+    ));
     const hoverQuickFix = await texLeafAiQuickFix(
       hoverApplyDocument,
       hoverApplyStart,
@@ -4716,6 +6368,14 @@ async function run() {
       },
       "the Hover link must encode only the current document and opaque issue ID",
     );
+    assert.deepEqual(
+      hoverIgnoreCommand,
+      {
+        command: "texleaf.aiWriting.ignoreIssue",
+        arguments: hoverCommand.arguments,
+      },
+      "the Ignore link must target the same opaque issue without exposing source text",
+    );
 
     await vscode.commands.executeCommand(
       hoverCommand.command,
@@ -4730,6 +6390,10 @@ async function run() {
         await hasTexLeafAiHover(hoverApplyDocument, hoverApplyStart)
       ),
       "the accepted Hover issue to disappear",
+    );
+    await waitFor(
+      () => texLeafAiDiagnostics(hoverApplyDocument).length === 0,
+      "the accepted native Problems diagnostic to disappear",
     );
     assert.equal(
       await hasTexLeafAiQuickFix(
@@ -5100,11 +6764,323 @@ async function run() {
       false,
       "a global AI setting change must clear cached issues for closed documents too",
     );
+
+    const nativeProblemVisualFixture = "This visual problem is bad.";
+    const nativeProblemVisualUri = vscode.Uri.joinPath(
+      texProjectRoot,
+      "ai-native-problems-visual-route.tex",
+    );
+    await vscode.workspace.fs.writeFile(
+      nativeProblemVisualUri,
+      new TextEncoder().encode(nativeProblemVisualFixture),
+    );
+    await writeAiIssueSnapshotForSource(
+      globalSnippetUri,
+      nativeProblemVisualUri,
+      nativeProblemVisualFixture,
+      "bad",
+    );
+    let nativeProblemVisualDocument = await vscode.workspace.openTextDocument(
+      nativeProblemVisualUri,
+    );
+    if (nativeProblemVisualDocument.languageId !== "latex") {
+      nativeProblemVisualDocument = await vscode.languages.setTextDocumentLanguage(
+        nativeProblemVisualDocument,
+        "latex",
+      );
+    }
+    const nativeProblemBadStart = nativeProblemVisualDocument.getText().indexOf("bad");
+    await waitFor(
+      () => texLeafAiDiagnostics(nativeProblemVisualDocument).length === 1,
+      "native Problems diagnostic for visual navigation",
+    );
+    const nativeProblemEntry = texLeafAiDiagnosticEntries(nativeProblemVisualDocument)[0];
+    assert.ok(nativeProblemEntry, "the native Problems navigation diagnostic must exist");
+    assert.equal(
+      nativeProblemEntry.uri.scheme,
+      "texleaf-ai-problem",
+      "AI Problems navigation must publish on the selectable read-only mirror",
+    );
+    assert.equal(
+      nativeProblemVisualDocument.offsetAt(nativeProblemEntry.diagnostic.range.start),
+      nativeProblemBadStart,
+      "the Problems diagnostic must preserve the exact source offset",
+    );
+    await vscode.commands.executeCommand(
+      "vscode.openWith",
+      nativeProblemVisualUri,
+      "texleaf.visualEditor",
+      { preview: false, viewColumn: vscode.ViewColumn.One },
+    );
+    await waitFor(
+      () =>
+        vscode.window.tabGroups.activeTabGroup.activeTab?.input?.viewType ===
+        "texleaf.visualEditor",
+      "the visual editor before simulating a native Problems click",
+    );
+    const nativeProblemMirrorDocument = await vscode.workspace.openTextDocument(
+      nativeProblemEntry.uri,
+    );
+    const nativeProblemSourceEditor = await vscode.window.showTextDocument(
+      nativeProblemMirrorDocument,
+      {
+        viewColumn: vscode.ViewColumn.Two,
+        preview: false,
+        preserveFocus: false,
+      },
+    );
+    const nativeProblemPosition = nativeProblemEntry.diagnostic.range.start;
+    nativeProblemSourceEditor.selection = new vscode.Selection(
+      nativeProblemPosition,
+      nativeProblemPosition,
+    );
+    await waitFor(
+      () =>
+        vscode.window.tabGroups.activeTabGroup.activeTab?.input?.viewType ===
+        "texleaf.visualEditor",
+      "a native Problems selection to return to the existing visual editor",
+    );
+    assert.notEqual(
+      vscode.window.activeTextEditor?.document.uri.toString(),
+      nativeProblemEntry.uri.toString(),
+      "the read-only Problems mirror must not remain active",
+    );
+    assert.equal(
+      vscode.window.tabGroups.all.some((group) => group.tabs.some((tab) => {
+        const input = tab.input;
+        return input instanceof vscode.TabInputText &&
+          input.uri.toString() === nativeProblemEntry.uri.toString();
+      })),
+      false,
+      "the transient Problems mirror tab must close after the visual redirect",
+    );
+
+    // The explicit source-mode toolbar/command must remain an escape hatch and
+    // must not be mistaken for another Problems navigation on the same issue.
+    await vscode.commands.executeCommand("texleaf.visualEditor.openSource");
+    await waitFor(
+      () => vscode.window.activeTextEditor?.document.uri.toString() ===
+        nativeProblemVisualUri.toString(),
+      "explicit source mode after a native Problems visual redirect",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(
+      vscode.window.activeTextEditor?.document.uri.toString(),
+      nativeProblemVisualUri.toString(),
+      "explicit source mode must not be redirected back to the visual editor",
+    );
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    await vscode.commands.executeCommand("texleaf.aiWriting.clearDiagnostics");
+
     await persistenceConfiguration.update(
       "aiWriting.enabled",
       false,
       vscode.ConfigurationTarget.Global,
     );
+
+    const defaultModeConfiguration = vscode.workspace.getConfiguration("texleaf");
+    const previousDefaultMode = defaultModeConfiguration.inspect(
+      "visualEditor.defaultMode",
+    )?.globalValue;
+    const visualModeWorkbenchConfiguration = vscode.workspace.getConfiguration("workbench");
+    const previousEditorAssociations = visualModeWorkbenchConfiguration.inspect(
+      "editorAssociations",
+    )?.globalValue;
+    await defaultModeConfiguration.update(
+      "visualEditor.defaultMode",
+      "source",
+      vscode.ConfigurationTarget.Global,
+    );
+    await waitFor(
+      () => vscode.workspace.getConfiguration("workbench").get(
+        "editorAssociations",
+      )?.["*.tex"] === "default",
+      "the default source-editor association setting",
+    );
+    await defaultModeConfiguration.update(
+      "visualEditor.defaultMode",
+      "visual",
+      vscode.ConfigurationTarget.Global,
+    );
+    await waitFor(
+      () => vscode.workspace.getConfiguration("workbench").get(
+        "editorAssociations",
+      )?.["*.tex"] === "texleaf.visualEditor",
+      "the default visual-editor association setting",
+    );
+    await defaultModeConfiguration.update(
+      "visualEditor.defaultMode",
+      previousDefaultMode,
+      vscode.ConfigurationTarget.Global,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await visualModeWorkbenchConfiguration.update(
+      "editorAssociations",
+      previousEditorAssociations,
+      vscode.ConfigurationTarget.Global,
+    );
+
+    const visualEditorUri = vscode.Uri.joinPath(
+      testRoot,
+      "visual-editor-smoke.tex",
+    );
+    const visualEditorSource = [
+      "\\documentclass{article}",
+      "\\begin{document}",
+      "A visual formula $x^2+y^2=z^2$ remains in the same document.",
+      "\\[\\frac{1}{2}\\]",
+      "\\end{document}",
+      "",
+    ].join("\n");
+    await vscode.workspace.fs.writeFile(
+      visualEditorUri,
+      new TextEncoder().encode(visualEditorSource),
+    );
+    const visualEditorDocument = await vscode.workspace.openTextDocument(
+      visualEditorUri,
+    );
+    await vscode.commands.executeCommand(
+      "vscode.openWith",
+      visualEditorUri,
+      "texleaf.visualEditor",
+      { preview: false, viewColumn: vscode.ViewColumn.One },
+    );
+    await waitFor(
+      () =>
+        vscode.window.tabGroups.activeTabGroup.activeTab?.input?.viewType ===
+        "texleaf.visualEditor",
+      "the registered TeXLeaf visual custom editor",
+    );
+    const sourceEditor = await vscode.window.showTextDocument(
+      visualEditorDocument,
+      {
+        viewColumn: vscode.ViewColumn.Two,
+        preview: false,
+        preserveFocus: false,
+      },
+    );
+    assert.strictEqual(
+      sourceEditor.document,
+      visualEditorDocument,
+      "source and visual views must share the canonical TextDocument object",
+    );
+    await waitFor(
+      () => {
+        const matchingTabs = vscode.window.tabGroups.all
+          .flatMap((group) => group.tabs)
+          .filter(
+            (tab) => tab.input?.uri?.toString() === visualEditorUri.toString(),
+          );
+        return matchingTabs.some(
+          (tab) => tab.input?.viewType === "texleaf.visualEditor",
+        ) && matchingTabs.some(
+          (tab) => tab.input?.viewType === undefined,
+        );
+      },
+      "simultaneously open visual and native source views for one URI",
+    );
+
+    const sourceWordOffset = visualEditorDocument.getText().indexOf("visual");
+    const versionBeforeSourceEdit = visualEditorDocument.version;
+    assert.equal(
+      await sourceEditor.edit(
+        (builder) => {
+          builder.insert(
+            visualEditorDocument.positionAt(sourceWordOffset),
+            "synchronized ",
+          );
+        },
+        { undoStopBefore: true, undoStopAfter: true },
+      ),
+      true,
+      "the native source view must edit the shared visual-editor document",
+    );
+    await waitFor(
+      () =>
+        visualEditorDocument.version > versionBeforeSourceEdit &&
+        visualEditorDocument.getText().includes(
+          "A synchronized visual formula",
+        ),
+      "a source-view edit to reach the shared visual-editor TextDocument",
+    );
+    assert.equal(
+      visualEditorDocument.isDirty,
+      true,
+      "source edits must expose one shared dirty state",
+    );
+
+    await vscode.commands.executeCommand("undo");
+    await waitFor(
+      () =>
+        visualEditorDocument.getText().includes("A visual formula") &&
+        !visualEditorDocument.getText().includes("synchronized visual"),
+      "native undo to update the shared visual-editor document",
+    );
+    await vscode.commands.executeCommand("redo");
+    await waitFor(
+      () =>
+        visualEditorDocument.getText().includes(
+          "A synchronized visual formula",
+        ),
+      "native redo to update the shared visual-editor document",
+    );
+
+    // The visual editor uses the same WorkspaceEdit primitive after validating
+    // each versioned CodeMirror message. This also exercises a non-editor
+    // external change while both views remain open.
+    const sharedEdit = new vscode.WorkspaceEdit();
+    sharedEdit.insert(
+      visualEditorUri,
+      visualEditorDocument.positionAt(
+        visualEditorDocument.getText().indexOf("visual"),
+      ),
+      "live ",
+    );
+    assert.equal(await vscode.workspace.applyEdit(sharedEdit), true);
+    await waitFor(
+      () =>
+        visualEditorDocument.getText().includes(
+          "A synchronized live visual formula",
+        ),
+      "an external TextDocument edit shared with the visual editor",
+    );
+    assert.equal(
+      await visualEditorDocument.save(),
+      true,
+      "saving either view must save the canonical visual-editor document",
+    );
+    await waitFor(
+      () => !visualEditorDocument.isDirty,
+      "the shared dirty state to clear after save",
+    );
+    assert.equal(
+      new TextDecoder().decode(
+        await vscode.workspace.fs.readFile(visualEditorUri),
+      ),
+      visualEditorDocument.getText(),
+      "disk, source view, and visual view must converge on one saved text",
+    );
+
+    await vscode.commands.executeCommand(
+      "vscode.openWith",
+      visualEditorUri,
+      "texleaf.visualEditor",
+      { preview: false, viewColumn: vscode.ViewColumn.One },
+    );
+    await waitFor(
+      () =>
+        vscode.window.tabGroups.activeTabGroup.activeTab?.input?.viewType ===
+        "texleaf.visualEditor",
+      "the existing visual editor tab before testing its source bridge",
+    );
+    await vscode.commands.executeCommand("texleaf.visualEditor.openSource");
+    await waitFor(
+      () => vscode.window.activeTextEditor?.document.uri.toString() ===
+        visualEditorUri.toString(),
+      "the visual editor source-mode bridge",
+    );
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
 
     assert.deepEqual(
       await vscode.workspace.fs.readFile(legacyWorkspaceSnippetUri),
@@ -5113,7 +7089,7 @@ async function run() {
     );
 
     console.log(
-      "Extension-host smoke test passed: grouped native settings, default-off and persisted AI writing gates/clear/reopen, collapsed-cursor Quick Fix and safe Hover apply, worker-backed Math Preview/toggle/safe SVG, ranked/capped native citation completion with stale-snapshot and duplicate-key guards, complete global factory seeding, one-time migration/backup, no hidden built-ins, watcher reload/LKG, dirty import/export/restore guards, Qhat/IME, per-root extras, .tex/.bib scope, fractions, LF/CRLF align shortcuts, and safe left/right Enter splitting work.",
+      "Extension-host smoke test passed: simultaneous visual/source TextDocument identity, bidirectional document synchronization contract, shared dirty/save/undo/redo state and source bridge, grouped native settings, default-off and persisted AI writing gates/clear/reopen, collapsed-cursor Quick Fix and safe Hover apply, worker-backed Math Preview/toggle/safe SVG, ranked/capped native citation completion with stale-snapshot and duplicate-key guards, complete global factory seeding, one-time migration/backup, no hidden built-ins, watcher reload/LKG, dirty import/export/restore guards, Qhat/IME, per-root extras, .tex/.bib scope, fractions, LF/CRLF align shortcuts, and safe left/right Enter splitting work.",
     );
   } finally {
     if (rootAConfiguration !== undefined) {

@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import * as vscode from "vscode";
 import {
   compileSnippetFile,
@@ -104,7 +111,16 @@ export class SnippetRuntime implements vscode.Disposable {
     );
     cache.version = event.document.version;
     if (Number.isFinite(earliestLine)) {
-      cache.states.length = Math.max(1, earliestLine + 1);
+      // A change can arrive on a line whose predecessor state has not been
+      // materialized yet (notably just after save, when VS Code emits an empty
+      // change and the cache is reset to line zero). Array.length must only
+      // truncate here: extending it would create sparse state entries, causing
+      // ensureLineState() to skip the missing predecessor and scan the edited
+      // line as ordinary text instead of its actual LaTeX context.
+      cache.states.length = Math.min(
+        cache.states.length,
+        Math.max(1, earliestLine + 1),
+      );
     } else {
       cache.states.length = 1;
     }

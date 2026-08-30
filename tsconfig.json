@@ -26,6 +26,7 @@
   "exclude": [
     "node_modules",
     "dist",
-    ".test-dist"
+    ".test-dist",
+    "src/visualEditorWebview.ts"
   ]
 }

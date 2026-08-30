@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import {
   CompileResult,
   CompiledSnippet,
@@ -117,6 +124,9 @@ function matchesActivation(snippet: CompiledSnippet, request: SnippetMatchReques
   if (activation === 'auto') {
     return snippet.options.automatic && !snippet.options.visual;
   }
+  if (activation === 'manual-only') {
+    return !snippet.options.automatic && !snippet.options.visual;
+  }
   if (activation === 'visual') {
     return snippet.options.visual;
   }
@@ -189,6 +199,47 @@ function matchRegex(
   };
 }
 
+/**
+ * Reject ambiguous alphanumeric suffixes that begin in a TeX control word.
+ * For example, the default `([A-Za-z])(\d)` rule may match the final `q0` in
+ * `\leq0`; replacing it would corrupt the command into `\leq_{0}`.
+ *
+ * An explicit punctuation-only terminator remains intentional: after `sum`
+ * expands to `\sum`, immediately typing the postfix trigger `t,.` must still
+ * be able to replace that suffix and produce `\sum\mathbf{t}`. Whole-command
+ * regexes also remain valid because their match starts at the backslash.
+ */
+function isUnsafeTexControlWordSuffix(
+  text: string,
+  match: TriggerMatch,
+): boolean {
+  const { startOffset, endOffset } = match;
+  if (
+    startOffset <= 0 ||
+    startOffset >= text.length ||
+    !/[A-Za-z@]/u.test(text[startOffset] ?? "")
+  ) {
+    return false;
+  }
+  let cursor = startOffset - 1;
+  while (cursor >= 0 && /[A-Za-z@]/u.test(text[cursor] ?? "")) {
+    cursor -= 1;
+  }
+  if (cursor < 0 || text[cursor] !== "\\") {
+    return false;
+  }
+
+  let controlWordEnd = startOffset;
+  while (controlWordEnd < text.length && /[A-Za-z@]/u.test(text[controlWordEnd] ?? "")) {
+    controlWordEnd += 1;
+  }
+  const explicitTerminator = text.slice(controlWordEnd, endOffset);
+  return (
+    explicitTerminator.length === 0 ||
+    !/^[^A-Za-z@0-9\s]+$/u.test(explicitTerminator)
+  );
+}
+
 export class SnippetMatcher {
   private readonly snippets: readonly CompiledSnippet[];
   private readonly literalsByLastCharacter = new Map<string, readonly CompiledSnippet[]>();
@@ -251,6 +302,7 @@ export class SnippetMatcher {
           : matchRegex(snippet, request.textBefore, this.maxRegexInputLength);
       if (
         triggerMatch === undefined ||
+        isUnsafeTexControlWordSuffix(request.textBefore, triggerMatch) ||
         !hasRequiredWordBoundary(snippet, request, triggerMatch.startOffset, this.wordDelimiters)
       ) {
         continue;

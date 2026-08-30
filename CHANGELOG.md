@@ -2,22 +2,63 @@
 
 TeXLeaf 的所有重要变更都会记录在此文件中。版本格式遵循语义化版本。
 
-## [1.0.0] - 2026-08-17
+## [1.0.0] - 2026-08-30
+
+### Added
+
+- AI 语言问题通过独立 `DiagnosticCollection` 发布到 VS Code 原生 Problems，保留既有检查队列、顺序、安全缓存、应用/忽略和批量操作；点击条目会打开正确的物理文档并定位准确范围，可视化编辑器同步显示紧凑、主题跟随的建议卡与范围高亮。TeXLeaf 不再注册独立“文档问题”视图，也不复制、解释或维护编译诊断；LaTeX 编译问题完全由 LaTeX Workshop 发布到同一个 Problems 面板。
+- 新增默认用于 `*.tex` 的 `texleaf.visualEditor` Custom Text Editor。它以 CodeMirror 6 编辑同一个 VS Code `TextDocument`，把选择区之外的完整行内/行间公式和数学环境按需替换为现有 MathJax Worker 生成的安全 SVG；点击公式或键盘激活后会原位恢复 LaTeX 源码，光标移出后重新排版。工具栏“源码模式”在同一个标签页内切换完整源码，保留主题跟随的 LaTeX 高亮和活动 Math Preview；“↗ 原生”才打开 Monaco 编辑器。工具栏还可关闭公式替换、编译、查看 PDF 和从当前光标执行正向 SyncTeX。
+- 可视化编辑器新增独立的文档结构扫描与可编辑部件：导言区可通过“显示/隐藏文档导言区”展开完整高亮源码；`\maketitle` 会预览标题、作者与日期；part/chapter/section 各级标题、内置及 `\newtheorem` 定理、definition/proof、itemize/enumerate/description、citation、`\ref` / `\eqref`、`\label`、BibTeX/BibLaTeX 和 `thebibliography` 会显示对应结构。独立 table/tabular 家族会生成语义表格，工作区或文档目录内的安全本地栅格图片会生成图片/caption 预览。所有部件都保留真实 UTF-16 源码范围，点击可回到命令或正文编辑。
+- 新增 `texleaf.visualEditor.defaultMode`，可在默认可视化与默认源码之间选择；`texleaf.visualEditor.renderFormulas` 与 `texleaf.visualEditor.latexWorkshopCompatibility` 均默认开启。新增打开可视化/源码、编译、PDF 与 SyncTeX 命令。可视化与源码视图可以同时打开并围绕同一个 `TextDocument` 近实时双向同步；可视化改动、源码改动、外部文件变化、保存、dirty 状态和 Undo/Redo 都通过 VS Code 文档 API 收敛，不创建第二份 TeX 文件。
+- 可视化编辑器接入当前完整片段库和模板，支持自动/手动/Visual 展开、片段搜索、真实 Tab 占位符、自动分数与多层括号放大、Tabout、成对括号、空数学定界符删除及 matrix/align 键位；工具栏还可搜索 bibliography/Zotero 引用，运行 AI 检查/改写/全文/续写，并在正文中应用或忽略 AI 建议。
+- 新增默认开启的 `texleaf.visualEditor.providerCompletions`：可视化和同标签页源码模式通过 VS Code 官方 `vscode.executeCompletionItemProvider` 查询 TeXLeaf、LaTeX Workshop 等 Provider，并在主题跟随的 CodeMirror 补全框中显示安全普通候选与常见 `SnippetString`；支持自动触发、`Ctrl+Space`、Tab/Enter 接受和占位符导航。候选应用前后均校验同一文档 revision、范围和原文，只向同一个 `TextDocument` 提交一次编辑。
+- LaTeX Workshop 兼容层只调用其公开的 `latex-workshop.build`、`latex-workshop.view` 和 `latex-workshop.synctex` 命令。由于这些命令及自动构建依赖原生 `activeTextEditor`，TeXLeaf 在保存或工具栏操作时短暂建立当前文件/选择上下文，再返回可视化面板；右侧 PDF viewer、recipe、root detection 与 SyncTeX 仍由 LaTeX Workshop 提供。
+- 新增有界多文件 TeX 项目上下文：支持显式 `texleaf.project.rootFile`、magic root、`subfiles` 的字面主文件声明、当前 `documentclass` 与唯一反向 include 等根证据，优先读取打开且未保存的缓冲区；正文 fragment 会继承根语言、结构层级和按源顺序展开的安全导言宏。官方 ThuThesis v7.7.1 的根文件、`thusetup.tex` 与 `data/*.tex` 分文件组织作为首个兼容目标。
+- 可视化编辑器的 `\ref` / `\eqref` 新增项目级 label 补全、目标结构/公式悬停预览和跨物理文件跳转/返回。重复 label、重复 include occurrence、动态或不完整依赖图会 fail closed；项目 context token 会同时使旧补全、虚拟数学预览及异步导航结果失效。
+- Math Preview 新增 standalone/body/preamble 三类 fragment 语义和位置敏感宏环境。正文子文件继承模板适配、用户设置与根导言的安全静态宏，当前文件中的顶层定义再按公式/结构所在位置生效；光标、原位公式、结构数学和虚拟结构编辑使用同一环境，局部分组、条件区及未知命令保守降级。
 
 ### Changed
 
+- TeXLeaf 1.0.0 起的项目主体改用 `GPL-3.0-only`，并通过 GPLv3 第 7(b) 节允许的 `NOTICE` 要求再分发版或修改版在随附文档、About、Credits 或 Legal Notices 中保留 TeXLeaf、原作者 `zhangxh-math` 与原项目链接；历史上已经按 MIT License 获得的版本继续适用原条款，CodeMirror、MathJax 等第三方组件仍保留各自许可证和版权声明。
 - 原生 Suggest 进一步按**全局最长非零前缀组**收紧：TeXLeaf 会先收集当前上下文中全部适用片段，保留与光标前输入匹配长度最长的一组，并额外保留所有已经完整输入的 literal trigger，避免 regex shadow 或重复 ID 使完整字面量候选消失。只有 runtime 唯一选中的 exact literal 会获得 Keyword 类型、preselect 与 exact sort 优先级；其他被保留的完整 literal 仍按普通 Snippet 候选排序。比如输入 `ss` 时，不再把仅凭最后一个 `s` 匹配到的 `sum`、`sim`、`sub`、`sup` 等候选混在 `SS2`、`SSE`、`SSP`、`SSS` 旁边；单字符输入和完整 trigger 仍保持原有行为。
-- Math Preview 的两个自动位置采用对称命名：默认 `placement=autoBelow`（设置页显示为“自动（优先下方）”）先尝试下方，新增 `placement=autoAbove`（“自动（优先上方）”）先尝试上方；`above` / `below` 继续固定方向。旧设置值 `auto` 仅作为 `autoBelow` 的运行时兼容别名保留，不再出现在设置选项中。
+- Math Preview 的两个自动位置采用对称命名并由源码/可视化编辑器共用：默认改为 `placement=autoAbove`（设置页显示为“自动（优先上方）”），普通卡片按完整公式环境边界优先放在 `\begin` 上方，空间不足才翻到 `\end` 下方，并保留原有约 `0.75em`/12px 间距；只有环境上下都放不下的超长卡片才进入环境内部、跟随活动源码行，并使用固定 `50px` 纵向间距。`autoBelow` 可显式选择下方优先，`above` / `below` 继续固定方向；旧设置值 `auto` 仅作为 `autoBelow` 的运行时兼容别名保留。行内公式在起始行对齐 `$`/`\(`，进入后续行对齐该行首个非空白字符；超高公式内部模式的左边框固定到最外层 `\begin`/起始定界符列，不再横向追随光标。超宽或超高浮动预览保持正常字号和双向滚动条，并把高饱和光标标记自动滚入可见区域。
 - Zotero/citation 搜索改为先对 bibliography 与 Zotero 全库候选做本地匹配和相关度排序，再统一截取最多 100 条给原生 Suggest。可搜索 citation key、标题、作者、年份、DOI 和 ISBN；多词查询去重后按 AND 组合且可跨字段命中。排序优先考虑精确原始 key（保留标点）、紧凑 key/前缀、精确 DOI/ISBN、全词/词首和普通子串，相关度相同时才偏好已收录的 bibliography 条目。继续输入会重算全库结果，因此先前未进入前 100 条的文献仍能被找到；每键过滤不会重新请求 Zotero。
 - 中文、英文 article 模板的出厂 trigger 分别改为 `article-cn` 和 `article-en`；`beamer-cn` / `beamer-en` 不变。1.0.0 只考虑一次 factory trigger 迁移：当前值仍等于旧出厂值 `tmpa-cn` / `tmpa-en` 时分别尝试改为新值，当前已经是其他值时不改。迁移 marker 会先写入；新 trigger 被占用、存在前缀冲突或提交失败时保留旧值并在 TeXLeaf 输出通道记录原因，之后激活不会重试，用户日后主动改回旧 trigger 也不会再次迁移。
+- 工厂片段库由 212 条扩展为 223 条，纳入当前用户库中有实际用途的 `bino`、`res`、字母后缀 `cal`、`dd`、`part`、四种省略号、`nsor` 与 `sst`；临时测试条目 `new-trigger` 不进入工厂库。默认导数与积分结构改用 `\dd`，四个 article/Beamer 模板同步定义 `\newcommand{\dd}{\mathop{}\!\mathrm{d}}`。
+- AI 行内补全上下文扩大到相邻遮罩正文，默认合计最多 16,384 个 UTF-16 单元并优先保留最多 6,144 个单元的光标后文；Provider prompt 把 suffix 明确视为不可重复的既有文字，本地再裁掉精确重叠或拒绝以既有后文开头的重复建议。
+- AI 专用 Hover 的操作改为带主题图标的“应用修改”和“忽略建议”。行间公式末尾标点会参与整句判断：逗号/分号后的正文不再误判为新句，缺少标点时只允许在公式正文末端的受控零宽边界插入单个标点，公式源码和占位符仍不可编辑。
+- 可视化编辑器的正文、标题、行号和结构块统一继承 VS Code 编辑器字体、字号与行高；Webview 背景改为透明，允许用户已有的编辑器/工作台背景效果继续显示。可见公式与结构块由浏览器实际布局和 `ResizeObserver` 精确测量，不再按固定 16px 估算。源码令牌颜色使用 VS Code 动态主题变量，切换主题时随之更新。
+
+### Fixed
+
+- 修复长文档快速滚动停止后，可视区内部分公式仍停留在原始 LaTeX、直到再次滚动才渲染的问题。可视区上报改为动画帧对齐的 32ms 节流并直接监听编辑器滚动；宿主端改为单一“最新请求优先”渲染泵，滚动期间会替换旧视口、重置远距离视口的有界预算，并且不会把已经离开的区域排在最终停靠位置之前。隔离 Extension Host 回归会连续跨越四个长文档位置，逐处断言可见公式组件存在且原始公式残留为零。
+- 可视化编辑器在等待 VS Code TextMate 令牌补丁时，会先同步保留旧令牌并为刚输入的 LaTeX 片段应用主题派生的乐观着色；权威令牌到达后再原位替换，不再出现一帧白字。光标离开公式时新增独立的高优先级静态渲染通道，复用已预热的 MathJax Worker 和静态缓存，并以精确公式源码校验结果，避免排在整页视口渲染队列之后或短暂显示旧 SVG。
+- 修复可视化公式 SVG 固定前景色在部分主题中不可见、Worker 几何未参与布局导致大段空白，以及 SVG 实际位置与 CodeMirror 鼠标命中框错开的组合问题。公式现在使用主题跟随色、Worker 的固有几何和渲染后实测布局；取消正常块公式旧有的 `36em` 预缩放，正文中的纵向多行公式以原字号和完整固有高度直接撑开，不设置 `max-height`、不建立公式内部滚动框，仅对异常 Worker 几何保留很高的绘制安全上限。直接点击公式本体即可展开源码，源码态使用与原生编辑器相同方向设置、保留横纵滚动条的稳定浮动 Math Preview，并把初始零宽光标放到公式正文首个可见字符；深色主题使用亮洋红光标、浅色主题使用高亮蓝光标并带静态描边。公式源码提示改为低干扰底边标记，不再伪装成整段蓝色选区；定理正文边线逐行重叠 1px，公式由 SVG 切回源码后也保持连续。
+- 修复公式、cases、定理和列表等块部件的替换范围与视觉盒不一致，导致点击位置映射到上方约两行的问题；命中现在取真实 DOM 坐标和精确源码范围。proposition/lemma 标题不再与前后正文重叠，corollary 等定理正文可直接编辑，错误泄漏的短文本不再出现在标题前，label 以紧凑预览显示，定理左侧边线也会跨过块公式边界保持连续。
+- 修复折叠环境的 `\begin{...}` / `\end{...}` 逻辑行只能靠键盘展开、鼠标点击行号或空白处仍显示空行的问题。点击现在按实际逻辑行命中 theorem/lemma/proof/list 与 equation/align 两类替换层并成对显示边界；光标保持在被点击的 begin/end 行，不再跳到上一个环境，结束命令后的下一行也不会被错误吸附回 begin。
+- 修复可视化 citation 光标移出后仍保留源码、或 citation 已恢复而文献详情卡继续悬空的问题。citation 源码展开和详情卡现在共享精确范围生命周期；跨到结束花括号之外会同时恢复 chip 并关闭详情。
+- 修复引用跳转箭头位于 chip 左侧、跨文件跳转或 Problems 点击未打开准确物理文档/范围，以及多行公式引用预览无法区分当前标签行的问题。所有带箭头的引用统一把箭头放在右侧；项目引用和 AI Diagnostic 按 URI、版本与真实范围导航；align/gather 等预览显示整组公式并只高亮当前 label 对应行。
+- 修复中文 IME 在数学环境中输入单个临时拼音字符或退格时扩大 replacement 范围、吞掉既有 `+y^2`、花括号或相邻结构，以及最终全角标点被重复提交的问题。组合开始位置、稳定光标、DOM replacement、候选删除与最终 commit 现在使用有界范围和完整 composition 生命周期；失真的宽选区 fail closed 为公式边界内的无损光标。
+- 修复 enumerate 等列表在创建并删除空 `\item` 后残留编辑状态、导致下一次中文分号重复的问题。空项清理保持单次可撤销事务和列表内安全空白行；普通 Enter 与 Tab 均不跳出块环境，只有 `Shift+Enter` 跳出最近环境并保留 closing line 的外层缩进，行内公式的安全 Tab 越界继续作为唯一例外。
+- 修复字母数字正则片段从 TeX 控制词内部截取后缀的问题，`\leq0`、`\cdots0`、`\alpha2` 不再被改成下标；仍保留 `x0 → x_{0}`，并允许 `t,.` 这类带纯标点终结标记的明确后缀紧接已展开命令工作，例如得到 `\sum\mathbf{t}`。显式从反斜杠开始的整命令正则也可继续使用。
+- 修复环境片段中的 `Tab` 直接跳出环境、`align` 新行行首 Tab 造成缩进逐行累加、`\binom` 不触发外层括号放大，以及 `<1/2` 把 `<` 错收进分子的边界行为；自动分式现在把 `<`、`>`、`\le` / `\leq`、`\ge` / `\geq` 与 `=` 一样视为关系运算边界。
+- 修复 Snippet/模板管理器点击“删除”没有反应的问题。删除、模板恢复和批量替换不再依赖 Webview 中不可靠的浏览器 `confirm()`，统一使用面板内确认卡片；删除先作用于草稿并保留撤销与保存流程。
 
 ### Reliability and limits
 
+- 可视化编辑器使用正式 Custom Editor/Webview 边界而不是注入 Monaco 私有 DOM；Webview CSP、消息范围/大小校验、串行文档版本同步、视口渲染上限、Worker 超时与过时代次检查共同限制错误和资源消耗。Overleaf Visual Editor 只作为公开交互参考，当前实现没有复制其 AGPL 源码；发行组件 CodeMirror 6 及传递依赖按 MIT 许可记录在第三方声明中。
+- Custom Editor 不是 VS Code 原生 `TextEditor`。TeXLeaf 自身的片段、数学输入、引用和 AI 操作已用专用版本化桥接迁入；普通 Completion Provider 结果也可经官方执行命令安全重建，但带命令回调、`additionalTextEdits`、复杂 Snippet transform、多行替换范围或依赖 Monaco 私有状态的候选会 fail closed 跳过。同标签页“源码模式”仍属于 CodeMirror；完整 Suggest UI、Hover、Code Action、Inline Suggest 和扩展专属键位需点击“↗ 原生”。这一边界在 README 和配置说明中明确列出，没有把文件/编译兼容夸大为全部编辑器 API 兼容。
+- Math Preview 在独立渲染器中把 `\label{...}` 固定视为无视觉输出的引用元数据；同一个 `align` 的多行分别带有标签时，不再因 MathJax 的独立标签状态报错而整张预览消失。光标位于标签参数内部时会安全吸附到完整标签命令之外，MathJax 返回的结构化错误也会在 TeXLeaf 输出通道保留实际消息，而不是退化为 `[object Object]`。
+- 多文件依赖扫描跳过常见宏/环境定义体、`verbatim` / `comment` / `filecontents` 等不执行正文的区域、无法证明的普通与函数式条件分支、`\endinput` 及 `\end{document}` 后的非执行内容；普通 `\input` / `\include` 使用语义主文件构建目录，`\import` / `\subimport` / `\subfile` 携带 occurrence-specific 搜索状态。`subfiles` 子文件按正文执行时跳过独立编译导言，完整 document wrapper 使用共享阶段终止后续 sibling；反向找根复用相同的顺序、路径和阶段语义。`\input@path`、TEXINPUTS/kpathsea、`\includeonly`、动态宏路径和 symlink/junction realpath 边界仍明确不在静态模型的承诺内。
+- 正文 fragment 缺少可靠项目 counter seed 时不再显示从 1 开始的伪精确章节/定理编号；源码目标范围仍保持可导航，最终编号与页码留给真实 TeX 构建证据。
+- 数学公式中的 `\\text{...}`、`\\textrm{...}`、`\\textbf{...}`、`\\hbox{...}` 等已知文本命令参数现在使用局部文本上下文：数学专用片段不会在其中误展开，文本片段可以正常工作；参数内显式嵌套的 `$...$`、`\\(...\\)` 或 `\\[...\\]` 会临时恢复对应数学模式，离开内层公式后回到文本，离开参数后再恢复外层公式。该判定采用精确命令白名单，不猜测自定义宏或 `\\mathrm`、`\\operatorname` 等仍属数学语义的命令；在 `align` / matrix 的文本参数内也不会误触列与换行快捷键。
+- 修复保存/自动编译后，在尚未扫描的后续公式行继续输入时，增量 LaTeX 状态缓存被稀疏扩展、从而把 `\[...\]` 或 `align` 内的数学 trigger 暂时误判为普通文本的问题；缓存现在只会截断已计算状态，缺失的前驱行必须按顺序重建。输入命令队列也会完整跟踪 `compositionStart` / `compositionEnd`、`replacePreviousChar` 与 `compositionType`，只在 IME 最终提交后匹配一次，因此批量输入、快速逐字输入和中文输入法 replacement 不再漏展开或提前改写临时文本；普通粘贴与程序化批量编辑仍不会触发自动片段。
 - 两种自动位置在首选侧不足时只会切到能够完整容纳预览的另一侧；上下都不足时都强制选择上方，并共用超高、多行公式的末尾保留策略。固定 `above` / `below` 不会被可见空间自动改写。
 - 位置选择只依赖用户设置、公式边界和可见空间，不根据原生 Suggest 的候选数猜测小组件方向；VS Code 稳定扩展 API 不公开 Suggest 的真实几何，必要时可显式选择 `above` 或 `below`。
 - Citation 查询仍使用 Zotero 内存快照；只有首次加载、缓存过期、设置变化或手动刷新才会触发本机 Zotero 请求。搜索不扩展到期刊/出版物、摘要、标签或笔记，也不做拼写纠错；原始 citation key 的标点精确命中与去标点后的紧凑 key 匹配保持不同等级。
 - 文献身份与冲突判断改为 fail closed：双方有效 DOI 相同才是可跨 key 复用的强身份，双方有效 DOI 不同则明确冲突；ISBN 不再单独判同，只有规范化标题一致且双方提供的第一作者 family name 与年份不矛盾时才作为辅助身份。Zotero 当前库中重复 citation key 的每个成员都会从补全中隐藏，接受阶段也会拒绝旧候选，避免任意导入错误文献。
-- 自动放大括号与 Tabout 现在尊重 `align` / matrix 的数学列表边界：未转义的 `&`、`\\`、`\cr`、`\crcr`、`\tabularnewline` 不再把不同单元格或不同行的普通括号误配成一组 `\left...\right`。同一单元格内仅跨物理换行的合法括号仍可放大，并逐字保留原换行与缩进。在当前单元格确有右侧闭合符时，`Tab` 先执行局部 Tabout；只有当前位置没有可跳目标时，Matrix 快捷键才插入下一列的 ` & `。例如在分母中用 `nsr` 得到 `n^{2}|}` 后，第一次 `Tab` 跳出分母，下一次没有局部闭合符时才插列；Tabout 本身也不会跨到下一单元格或下一行寻找括号。
+- 自动放大括号与 Tabout 现在尊重 `align` / matrix 的数学列表边界：未转义的 `&`、`\\`、`\cr`、`\crcr`、`\tabularnewline` 不再把不同单元格或不同行的普通括号误配成一组 `\left...\right`。同一单元格内仅跨物理换行的合法括号仍可放大，并逐字保留原换行与缩进。一次片段插入若同时被多层尚未加尺寸的括号包围，会在同一数学范围、TeX 花括号作用域和对齐单元内级联处理全部合格祖先；例如 `(1-(//))` 一步得到 `\left(1-\left(\frac{}{}\right)\right)`，已有尺寸修饰的中间层保持原样且不会阻断继续向外检查。无 tabstop 的路径保持单次原子 Undo；带 tabstop 的路径优先保留内层到外层的原生 Snippet Session 导航，受 VS Code 稳定 API 固定 undo stop 的限制，片段与外部尺寸修饰分两步撤销。Tabout 会从当前数学范围左侧建立严格的定界符栈，只有光标确实位于尚未闭合的 `{...}`、`(...)`、`[...]`、命名定界符或 `\left...\right` 内时，才跳到与最内层 opener 配对的完整 closer；不会再把光标右侧未来命令参数中的第一个 `}` 误当目标。因而在 `align` 单元格开头且当前没有未闭合括号时，`Tab` 会落回 Matrix 快捷键并插入下一列的 ` & `；在分母中用 `nsr` 得到 `n^{2}|}` 时，第一次 `Tab` 仍跳出分母，下一次没有局部目标时才插列。注释、`\verb`、转义定界符和文本命令内显式嵌套的局部数学范围也按各自边界处理。
+- 在已有多占位符 Snippet Session 中继续输入自动片段时，不再丢失外层后续跳转点：无占位符的单行替换改用普通文本编辑，并裁掉 regex replacement 原样带回的共同前缀；带自身占位符或多行内容的内层片段改用 VS Code 原生嵌套合并。Snippet 模式下的 `Tab` 还会先等待当前 TeXLeaf 输入队列完成，避免最后一个字符与快速 `Tab` 跨进程乱序。例如 `par` + `Tab` 选中分子 `y` 后输入 `tau`，下一次 `Tab` 会选中分母 `x`；在该位置输入 `lim` 时，则先走完 `lim` 的内层跳转点，再恢复到外层 `x`。该处理按占位符结构生效，并非针对 `par` 或 `tau` 的特例；自动放大括号所需的跨定界符改写仍沿用独立路径。
 
 ## [0.8.11] - 2026-08-17
 

@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 /**
  * Core data types for Snippet Leaf.
  *
@@ -7,7 +14,12 @@
 
 export type SnippetSyntaxVersion = 1 | 2;
 
-export type SnippetActivation = 'auto' | 'manual' | 'completion' | 'visual';
+export type SnippetActivation =
+  | 'auto'
+  | 'manual'
+  | 'manual-only'
+  | 'completion'
+  | 'visual';
 
 export type LatexMathMode = 'text' | 'inline' | 'block';
 
@@ -19,6 +31,41 @@ export interface LatexEnvironmentFrame {
 export interface LatexDelimiterFrame {
   readonly kind: 'dollar-inline' | 'dollar-block' | 'paren' | 'bracket';
   readonly startOffset: number;
+}
+
+/**
+ * A text-producing command whose mandatory argument locally leaves math mode.
+ * The list is deliberately closed: unknown/custom commands keep the ambient
+ * mode because their argument semantics cannot be inferred safely.
+ */
+export type LatexTextArgumentCommand =
+  | 'text'
+  | 'textrm'
+  | 'textsf'
+  | 'texttt'
+  | 'textnormal'
+  | 'textbf'
+  | 'textmd'
+  | 'textit'
+  | 'textsl'
+  | 'textsc'
+  | 'textup'
+  | 'emph'
+  | 'mbox'
+  | 'hbox'
+  | 'intertext'
+  | 'shortintertext';
+
+export interface LatexPendingTextArgument {
+  readonly command: LatexTextArgumentCommand;
+}
+
+export interface LatexTextArgumentFrame {
+  readonly command: LatexTextArgumentCommand;
+  /** Brace depth including this command's outer mandatory argument. */
+  readonly braceDepth: number;
+  /** Explicit math opened locally inside the text argument, if any. */
+  readonly delimiter: LatexDelimiterFrame | undefined;
 }
 
 /**
@@ -51,12 +98,18 @@ export interface LatexScanState {
   readonly pendingSnippetSuppression: LatexPendingSnippetSuppression | undefined;
   /** The currently open `\\label{...}`/`\\tag{...}` argument, if any. */
   readonly snippetSuppression: LatexSnippetSuppressionFrame | undefined;
+  /** A recognized text command seen before its mandatory argument. */
+  readonly pendingTextArgument: LatexPendingTextArgument | undefined;
+  /** Text-mode arguments nested inside an ambient math context. */
+  readonly textArguments: readonly LatexTextArgumentFrame[];
 }
 
 export interface LatexContext {
   readonly mathMode: LatexMathMode;
   readonly inComment: boolean;
   readonly inVerbatim: boolean;
+  /** True anywhere inside a recognized text-command argument, even in nested math. */
+  readonly inTextCommandArgument: boolean;
   /** True inside the mandatory argument of `\\label` or `\\tag`/`\\tag*`. */
   readonly inSnippetSuppressedArgument: boolean;
   readonly snippetSuppressionCommand: LatexSnippetSuppressionCommand | undefined;
@@ -294,6 +347,8 @@ export interface TaboutPlan {
 }
 
 export interface TaboutOptions {
+  /** Explicit math-content start. Inferred from scanLatexRegions when omitted. */
+  readonly innerStart?: number;
   /** Explicit math-content end. Inferred from scanLatexRegions when omitted. */
   readonly innerEnd?: number;
   /** Explicit end after closing math syntax. */

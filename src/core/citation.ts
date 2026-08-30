@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import { OffsetRange } from './types';
 
 /** Common citation commands used when an adapter does not provide its own list. */
@@ -10,6 +17,10 @@ export const DEFAULT_CITATION_COMMANDS: readonly string[] = Object.freeze([
   'Citet',
   'citealp',
   'citealt',
+  'citeauthor',
+  'Citeauthor',
+  'citeyear',
+  'citeyearpar',
   'autocite',
   'Autocite',
   'parencite',
@@ -19,8 +30,25 @@ export const DEFAULT_CITATION_COMMANDS: readonly string[] = Object.freeze([
   'footcite',
   'footcitetext',
   'smartcite',
+  'Smartcite',
   'supercite',
+  'fullcite',
+  'footfullcite',
+  'citetitle',
+  'citedate',
   'nocite',
+  'cites',
+  'Cites',
+  'autocites',
+  'Autocites',
+  'parencites',
+  'Parencites',
+  'textcites',
+  'Textcites',
+  'footcites',
+  'footcitetexts',
+  'smartcites',
+  'Smartcites',
 ]);
 
 /**

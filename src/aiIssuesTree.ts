@@ -1,15 +1,26 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import * as vscode from "vscode";
+import { VISUAL_EDITOR_REVEAL_RANGE_COMMAND } from "./visualEditorProtocol";
 
 export const AI_ISSUES_TREE_VIEW_ID = "texleaf.aiIssues";
 export const AI_ISSUES_TREE_REVEAL_COMMAND = "texleaf.aiIssues.reveal";
 export const AI_ISSUES_TREE_APPLY_COMMAND = "texleaf.aiIssues.apply";
 export const AI_ISSUES_TREE_IGNORE_COMMAND = "texleaf.aiIssues.ignore";
+export const DOCUMENT_PROBLEMS_REVEAL_DIAGNOSTIC_COMMAND =
+  "texleaf.documentProblems.revealDiagnostic";
 
 const DEFAULT_REVEAL_ISSUE_COMMAND = "texleaf.aiWriting.revealIssue";
 const DEFAULT_APPLY_ISSUE_COMMAND = "texleaf.aiWriting.applyIssue";
 const DEFAULT_IGNORE_ISSUE_COMMAND = "texleaf.aiWriting.ignoreIssue";
 export const AI_ISSUE_TREE_ITEM_CONTEXT = "texleafAiIssue";
 export const AI_REJECTED_TREE_ITEM_CONTEXT = "texleafAiRejectedSummary";
+export const DOCUMENT_DIAGNOSTIC_TREE_ITEM_CONTEXT = "texleafDocumentDiagnostic";
 
 /**
  * An already validated issue that is safe to show for the active document.
@@ -25,6 +36,15 @@ export interface AiIssueListEntry {
   readonly explanation: string;
   readonly category: string;
   readonly severity: vscode.DiagnosticSeverity;
+}
+
+export interface DocumentDiagnosticListEntry {
+  readonly id: string;
+  readonly range: vscode.Range;
+  readonly message: string;
+  readonly severity: vscode.DiagnosticSeverity;
+  readonly source?: string;
+  readonly code?: string;
 }
 
 /**
@@ -44,6 +64,7 @@ export interface AiIssuesTreeSnapshot {
   /** Changed sentences retained locally but not yet successfully rechecked. */
   readonly pendingReviewCount: number;
   readonly issues: readonly AiIssueListEntry[];
+  readonly diagnostics: readonly DocumentDiagnosticListEntry[];
   readonly rejectedIssueCount: number;
   readonly rejectedIssueCodes: readonly string[];
   readonly documentLabel: string;
@@ -105,7 +126,18 @@ interface IssueNode {
   readonly issue: AiIssueListEntry;
 }
 
-export type AiIssuesTreeNode = StatusNode | RejectedSummaryNode | IssueNode;
+interface DiagnosticNode {
+  readonly kind: "diagnostic";
+  readonly id: string;
+  readonly uriText: string;
+  readonly diagnostic: DocumentDiagnosticListEntry;
+}
+
+export type AiIssuesTreeNode =
+  | StatusNode
+  | RejectedSummaryNode
+  | IssueNode
+  | DiagnosticNode;
 
 /**
  * Registers the tree, its safe forwarding commands, and its subscriptions.
@@ -153,6 +185,10 @@ export function registerAiIssuesTree(
           issueId,
         ),
     ),
+    vscode.commands.registerCommand(
+      DOCUMENT_PROBLEMS_REVEAL_DIAGNOSTIC_COMMAND,
+      (target: unknown) => revealDocumentDiagnostic(target),
+    ),
     provider.onDidChangeSnapshot((snapshot) => updateView(view, snapshot)),
   ];
 
@@ -172,6 +208,49 @@ export function registerAiIssuesTree(
       }
     },
   };
+  context.subscriptions.push(registration);
+  return registration;
+}
+
+/**
+ * Keep the legacy opaque issue commands available for old keybindings and
+ * command URIs after the dedicated Tree view has been removed.  These aliases
+ * do not create a view and cannot duplicate compiler diagnostics.
+ */
+export function registerAiIssueForwardingCommands(
+  context: vscode.ExtensionContext,
+  options: AiIssuesTreeOptions = {},
+): vscode.Disposable {
+  const resolved = resolveOptions(options);
+  const registration = vscode.Disposable.from(
+    vscode.commands.registerCommand(
+      resolved.revealTreeCommand,
+      (targetOrUri: unknown, issueId?: unknown) =>
+        forwardIssueCommand(
+          resolved.revealIssueCommand,
+          targetOrUri,
+          issueId,
+        ),
+    ),
+    vscode.commands.registerCommand(
+      resolved.applyTreeCommand,
+      (targetOrUri: unknown, issueId?: unknown) =>
+        forwardIssueCommand(
+          resolved.applyIssueCommand,
+          targetOrUri,
+          issueId,
+        ),
+    ),
+    vscode.commands.registerCommand(
+      resolved.ignoreTreeCommand,
+      (targetOrUri: unknown, issueId?: unknown) =>
+        forwardIssueCommand(
+          resolved.ignoreIssueCommand,
+          targetOrUri,
+          issueId,
+        ),
+    ),
+  );
   context.subscriptions.push(registration);
   return registration;
 }
@@ -210,6 +289,8 @@ export class AiIssuesTreeProvider
         return rejectedTreeItem(element);
       case "issue":
         return issueTreeItem(element, this.revealCommand);
+      case "diagnostic":
+        return diagnosticTreeItem(element);
     }
   }
 
@@ -247,12 +328,8 @@ function nodesForSnapshot(snapshot: AiIssuesTreeSnapshot): AiIssuesTreeNode[] {
   if (!snapshot.supported || uriText === null) {
     return [];
   }
-  if (!snapshot.enabled) {
-    return [];
-  }
-
   const nodes: AiIssuesTreeNode[] = [];
-  if (snapshot.checking) {
+  if (snapshot.enabled && snapshot.checking) {
     nodes.push({
       kind: "status",
       id: `texleaf-ai-status-checking:${uriText}`,
@@ -260,7 +337,7 @@ function nodesForSnapshot(snapshot: AiIssuesTreeSnapshot): AiIssuesTreeNode[] {
       description: snapshot.documentLabel,
       icon: "loading~spin",
     });
-  } else if (snapshot.scheduled) {
+  } else if (snapshot.enabled && snapshot.scheduled) {
     nodes.push({
       kind: "status",
       id: `texleaf-ai-status-scheduled:${uriText}`,
@@ -268,7 +345,7 @@ function nodesForSnapshot(snapshot: AiIssuesTreeSnapshot): AiIssuesTreeNode[] {
       description: snapshot.documentLabel,
       icon: "watch",
     });
-  } else if (snapshot.pendingReviewCount > 0) {
+  } else if (snapshot.enabled && snapshot.pendingReviewCount > 0) {
     nodes.push({
       kind: "status",
       id: `texleaf-ai-status-pending:${uriText}:${snapshot.version ?? "unknown"}`,
@@ -278,7 +355,7 @@ function nodesForSnapshot(snapshot: AiIssuesTreeSnapshot): AiIssuesTreeNode[] {
     });
   }
 
-  if (snapshot.rejectedIssueCount > 0) {
+  if (snapshot.enabled && snapshot.rejectedIssueCount > 0) {
     nodes.push({
       kind: "rejected",
       id: `texleaf-ai-rejected:${uriText}:${snapshot.version ?? "unknown"}`,
@@ -287,15 +364,30 @@ function nodesForSnapshot(snapshot: AiIssuesTreeSnapshot): AiIssuesTreeNode[] {
     });
   }
 
-  nodes.push(...snapshot.issues.map((issue): IssueNode => ({
+  const problemNodes: Array<IssueNode | DiagnosticNode> = snapshot.issues.map(
+    (issue): IssueNode => ({
     kind: "issue",
     id: `texleaf-ai-issue:${uriText}:${issue.id}`,
     uriText,
     issue,
+  }));
+  problemNodes.push(...snapshot.diagnostics.map((diagnostic): DiagnosticNode => ({
+    kind: "diagnostic",
+    id: `texleaf-document-diagnostic:${uriText}:${diagnostic.id}`,
+    uriText,
+    diagnostic,
   })));
+  problemNodes.sort((left, right) => {
+    const leftProblem = left.kind === "issue" ? left.issue : left.diagnostic;
+    const rightProblem = right.kind === "issue" ? right.issue : right.diagnostic;
+    return leftProblem.range.start.compareTo(rightProblem.range.start) ||
+      leftProblem.severity - rightProblem.severity ||
+      left.kind.localeCompare(right.kind);
+  });
+  nodes.push(...problemNodes);
 
   if (
-    snapshot.issues.length === 0 &&
+    snapshot.issues.length + snapshot.diagnostics.length === 0 &&
     !snapshot.checking &&
     !snapshot.scheduled &&
     snapshot.pendingReviewCount === 0
@@ -305,7 +397,7 @@ function nodesForSnapshot(snapshot: AiIssuesTreeSnapshot): AiIssuesTreeNode[] {
       id: `texleaf-ai-status-empty:${uriText}:${snapshot.version ?? "unknown"}`,
       label: snapshot.rejectedIssueCount > 0
         ? "没有可安全定位的问题"
-        : "暂未发现写作问题",
+        : "暂未发现文档问题",
       description: snapshot.documentLabel,
       icon: "pass-filled",
     });
@@ -373,6 +465,40 @@ function issueTreeItem(
   return item;
 }
 
+function diagnosticTreeItem(node: DiagnosticNode): vscode.TreeItem {
+  const { diagnostic } = node;
+  const severity = severityPresentation(diagnostic.severity);
+  const line = diagnostic.range.start.line + 1;
+  const source = oneLine(diagnostic.source ?? "VS Code", 28);
+  const item = new vscode.TreeItem(
+    `[第 ${line} 行 · ${source}] ${oneLine(diagnostic.message, 96)}`,
+  );
+  item.id = node.id;
+  item.description = diagnostic.code === undefined
+    ? severity.label
+    : `${severity.label} · ${diagnostic.code}`;
+  item.contextValue = DOCUMENT_DIAGNOSTIC_TREE_ITEM_CONTEXT;
+  item.iconPath = new vscode.ThemeIcon(severity.icon, severity.color);
+  item.command = {
+    command: DOCUMENT_PROBLEMS_REVEAL_DIAGNOSTIC_COMMAND,
+    title: "定位文档问题",
+    arguments: [node],
+  };
+  const tooltip = new vscode.MarkdownString(undefined, true);
+  tooltip.appendMarkdown(
+    `**第 ${line} 行 · ${escapeMarkdown(source)} · ${escapeMarkdown(severity.label)}**\n\n`,
+  );
+  tooltip.appendText(diagnostic.message);
+  if (diagnostic.code !== undefined) {
+    tooltip.appendMarkdown("\n\n错误码：");
+    tooltip.appendCodeblock(diagnostic.code, "text");
+  }
+  tooltip.appendMarkdown("\n单击可在源码中定位这条诊断。");
+  tooltip.isTrusted = false;
+  item.tooltip = tooltip;
+  return item;
+}
+
 function issueTooltip(
   issue: AiIssueListEntry,
   category: string,
@@ -406,11 +532,7 @@ function updateView(
     view.badge = undefined;
     return;
   }
-  if (!snapshot.enabled) {
-    view.description = "已关闭";
-    view.badge = undefined;
-    return;
-  }
+  const issueCount = snapshot.issues.length + snapshot.diagnostics.length;
   const phase = snapshot.checking
     ? "检查中"
     : snapshot.scheduled
@@ -419,14 +541,48 @@ function updateView(
     ? `待复检 ${snapshot.pendingReviewCount} 句`
     : undefined;
   view.description = phase === undefined
-    ? `${snapshot.issues.length} 个问题`
-    : `${phase} · ${snapshot.issues.length} 个问题`;
-  view.badge = snapshot.issues.length === 0
+    ? `${issueCount} 个问题`
+    : `${phase} · ${issueCount} 个问题`;
+  view.badge = issueCount === 0
     ? undefined
     : {
-      value: snapshot.issues.length,
-      tooltip: `${snapshot.documentLabel} 中有 ${snapshot.issues.length} 个可审阅问题`,
+      value: issueCount,
+      tooltip: `${snapshot.documentLabel} 中有 ${issueCount} 个文档问题`,
     };
+}
+
+async function revealDocumentDiagnostic(target: unknown): Promise<void> {
+  if (!isRecord(target) || target.kind !== "diagnostic") {
+    return;
+  }
+  const uriText = target.uriText;
+  const diagnostic = target.diagnostic;
+  if (
+    typeof uriText !== "string" ||
+    !isRecord(diagnostic) ||
+    !(diagnostic.range instanceof vscode.Range)
+  ) {
+    return;
+  }
+  const document = await vscode.workspace.openTextDocument(vscode.Uri.parse(uriText));
+  const visualHandled = await vscode.commands.executeCommand<boolean>(
+    VISUAL_EDITOR_REVEAL_RANGE_COMMAND,
+    document.uri,
+    document.offsetAt(diagnostic.range.start),
+    document.offsetAt(diagnostic.range.end),
+  );
+  if (visualHandled === true) {
+    return;
+  }
+  const editor = await vscode.window.showTextDocument(document, {
+    preview: false,
+    preserveFocus: false,
+  });
+  editor.selection = new vscode.Selection(
+    diagnostic.range.start,
+    diagnostic.range.end,
+  );
+  editor.revealRange(diagnostic.range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 }
 
 async function forwardIssueCommand(

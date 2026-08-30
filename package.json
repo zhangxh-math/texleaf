@@ -1,14 +1,14 @@
 {
   "name": "texleaf",
   "displayName": "TeXLeaf — Fast LaTeX Snippets",
-  "description": "安全、可定制的 LaTeX 自动片段、AI 写作检查、Math Preview 与 Zotero 引用管理。",
+  "description": "安全、可定制的 LaTeX 可视化公式编辑、自动片段、AI 写作检查、Math Preview 与 Zotero 引用管理。",
   "version": "1.0.0",
   "publisher": "zhangxh-math",
   "author": {
     "name": "zhangxh-math",
     "url": "https://github.com/zhangxh-math"
   },
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "https://github.com/zhangxh-math/texleaf.git"
@@ -16,6 +16,9 @@
   "homepage": "https://github.com/zhangxh-math/texleaf#readme",
   "bugs": {
     "url": "https://github.com/zhangxh-math/texleaf/issues"
+  },
+  "sponsor": {
+    "url": "https://github.com/zhangxh-math/texleaf/blob/main/SPONSOR.md"
   },
   "icon": "media/icon.png",
   "galleryBanner": {
@@ -60,6 +63,7 @@
       "restrictedConfigurations": [
         "texleaf.snippetFiles",
         "texleaf.bibliographyFile",
+        "texleaf.project.rootFile",
         "texleaf.zoteroPort",
         "texleaf.zoteroLibrary",
         "texleaf.mathPreview.macros",
@@ -92,16 +96,16 @@
     "onCommand:texleaf.refreshZotero",
     "onCommand:texleaf.toggleMathPreview",
     "onCommand:texleaf.refreshMathPreview",
+    "onCustomEditor:texleaf.visualEditor",
     "onStartupFinished",
-    "onView:texleaf.snippets",
-    "onView:texleaf.aiIssues"
+    "onView:texleaf.snippets"
   ],
   "scripts": {
     "compile": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "check": "tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.webview.json --noEmit",
     "test:compile": "tsc -p tsconfig.test.json",
-    "test": "pnpm run test:compile && node --test .test-dist/test/core.test.js .test-dist/test/aiProse.test.js .test-dist/test/aiIssuePersistence.test.js .test-dist/test/deepseekClient.test.js .test-dist/test/openaiClient.test.js .test-dist/test/issueLocation.test.js .test-dist/test/providerIdentity.test.js .test-dist/test/defaultSnippets.test.js .test-dist/test/defaultTemplates.test.js .test-dist/test/snippetManagerWebview.test.js .test-dist/test/citation.test.js .test-dist/test/mathPreview.test.js .test-dist/test/mathPreviewAppearance.test.js .test-dist/test/mathPreviewLayout.test.js .test-dist/test/referenceMatcher.test.js .test-dist/test/zoteroClient.test.js",
+    "test": "pnpm run test:compile && node --test .test-dist/test/core.test.js .test-dist/test/latexProject.test.js .test-dist/test/latexProjectContext.test.js .test-dist/test/latexCapabilities.test.js .test-dist/test/aiProse.test.js .test-dist/test/aiIssuePersistence.test.js .test-dist/test/deepseekClient.test.js .test-dist/test/openaiClient.test.js .test-dist/test/issueLocation.test.js .test-dist/test/providerIdentity.test.js .test-dist/test/defaultSnippets.test.js .test-dist/test/defaultTemplates.test.js .test-dist/test/snippetManagerWebview.test.js .test-dist/test/citation.test.js .test-dist/test/mathPreview.test.js .test-dist/test/mathPreviewAppearance.test.js .test-dist/test/mathPreviewLayout.test.js .test-dist/test/referenceMatcher.test.js .test-dist/test/visualEditorSyntaxToken.test.js .test-dist/test/zoteroClient.test.js",
     "test:extension-host:run": "node test/run-extension-host.cjs",
     "test:extension-host": "pnpm run compile && pnpm run test:extension-host:run",
     "test:bundle": "node test/bundle-smoke.cjs && node test/math-preview-worker.cjs",
@@ -110,9 +114,19 @@
     "package": "pnpm run release:verify && vsce package --no-dependencies --githubBranch main"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "6.20.0",
+    "@codemirror/commands": "^6.11.0",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/legacy-modes": "^6.5.3",
+    "@codemirror/search": "^6.7.1",
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.9",
+    "@lezer/highlight": "1.2.3",
     "@mathjax/mathjax-newcm-font": "4.1.3",
     "@mathjax/src": "4.1.3",
-    "jsonc-parser": "^3.3.1"
+    "jsonc-parser": "^3.3.1",
+    "vscode-oniguruma": "2.0.1",
+    "vscode-textmate": "9.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -122,6 +136,18 @@
     "typescript": "^5.8.0"
   },
   "contributes": {
+    "customEditors": [
+      {
+        "viewType": "texleaf.visualEditor",
+        "displayName": "TeXLeaf 可视化 LaTeX 编辑器",
+        "selector": [
+          {
+            "filenamePattern": "*.tex"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
     "configurationDefaults": {
       "[latex]": {
         "editor.wordBasedSuggestions": "off"
@@ -221,6 +247,36 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "texleaf.visualEditor.open",
+        "title": "TeXLeaf: 使用可视化编辑器打开",
+        "icon": "$(preview)"
+      },
+      {
+        "command": "texleaf.visualEditor.openSource",
+        "title": "TeXLeaf: 切换到 LaTeX 源码编辑器",
+        "icon": "$(code)"
+      },
+      {
+        "command": "texleaf.visualEditor.build",
+        "title": "TeXLeaf: 使用 LaTeX Workshop 编译",
+        "icon": "$(play)"
+      },
+      {
+        "command": "texleaf.visualEditor.viewPdf",
+        "title": "TeXLeaf: 使用 LaTeX Workshop 查看 PDF",
+        "icon": "$(file-pdf)"
+      },
+      {
+        "command": "texleaf.visualEditor.synctex",
+        "title": "TeXLeaf: 从可视化光标定位到 PDF",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "texleaf.visualEditor.navigateBack",
+        "title": "TeXLeaf: 返回引用跳转前的位置",
+        "icon": "$(arrow-left)"
+      },
+      {
         "command": "texleaf.dismissMathPreview",
         "title": "TeXLeaf: 关闭当前 Math Preview"
       },
@@ -261,7 +317,7 @@
       },
       {
         "command": "texleaf.aiWriting.showIssues",
-        "title": "TeXLeaf: 显示 AI 写作问题列表",
+        "title": "TeXLeaf: 在“问题”面板显示 AI 写作问题",
         "icon": "$(list-tree)"
       },
       {
@@ -287,9 +343,20 @@
     ],
     "keybindings": [
       {
+        "command": "texleaf.visualEditor.navigateBack",
+        "key": "ctrl+[",
+        "mac": "cmd+[",
+        "when": "texleaf.visualNavigationAvailable"
+      },
+      {
         "command": "texleaf.handleSuggestSnippetTab",
         "key": "tab",
-        "when": "texleaf.enabled && texleaf.mathTabContext && editorTextFocus && !editorReadonly && !editorTabMovesFocus && inSnippetMode && hasNextTabstop && suggestWidgetVisible && !inSnippetChoice && !texleaf.snippetTabActionAvailable && !renameInputVisible && !inlineSuggestionVisible"
+        "when": "texleaf.enabled && editorTextFocus && !editorReadonly && !editorTabMovesFocus && inSnippetMode && hasNextTabstop && suggestWidgetVisible && !inSnippetChoice && !renameInputVisible && !inlineSuggestionVisible"
+      },
+      {
+        "command": "texleaf.handleSnippetTab",
+        "key": "tab",
+        "when": "texleaf.enabled && editorTextFocus && !editorReadonly && !editorTabMovesFocus && inSnippetMode && hasNextTabstop && !suggestWidgetVisible && !inSnippetChoice && !renameInputVisible && !inlineSuggestionVisible"
       },
       {
         "command": "texleaf.handleSuggestTabout",
@@ -299,7 +366,7 @@
       {
         "command": "texleaf.handleTab",
         "key": "tab",
-        "when": "texleaf.snippetTabActionAvailable && editorTextFocus && !editorReadonly && !editorTabMovesFocus && !editorHasMultipleSelections && !renameInputVisible"
+        "when": "texleaf.snippetTabActionAvailable && editorTextFocus && !editorReadonly && !editorTabMovesFocus && !editorHasMultipleSelections && !renameInputVisible && !inSnippetMode"
       },
       {
         "command": "texleaf.handleTab",
@@ -342,534 +409,610 @@
       {
         "title": "TeXLeaf · 片段",
         "properties": {
-        "texleaf.enabled": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "启用 TeXLeaf。"
-        },
-        "texleaf.autoSnippets": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "键入带 A 选项的触发器后立即展开。"
-        },
-        "texleaf.manualTrigger": {
-          "scope": "resource",
-          "type": "string",
-          "enum": [
-            "tab",
-            "space"
-          ],
-          "enumDescriptions": [
-            "按 Tab 展开非自动片段。",
-            "按空格展开非自动片段。"
-          ],
-          "default": "tab",
-          "description": "非自动片段的触发按键。"
-        },
-        "texleaf.autoFraction": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "在数学环境中键入 / 时把左侧表达式转换为分式。"
-        },
-        "texleaf.autoFractionCommand": {
-          "scope": "resource",
-          "type": "string",
-          "default": "\\frac",
-          "description": "自动分式使用的 LaTeX 命令，例如 \\frac、\\dfrac 或 \\tfrac。"
-        },
-        "texleaf.autoEnlargeBrackets": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "片段生成分式、求和或积分后，将包围它的括号转换为 \\left/\\right。"
-        },
-        "texleaf.visualSnippets": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "允许单字符 visual 片段包裹选区。"
-        },
-        "texleaf.matrixShortcuts": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "启用矩阵/align 的 Tab（当前单元格有闭合符时先 Tabout，无目标时插列）、Enter 插行、Shift+Enter 跳出，以及可换行数学环境中匹配 \\left…\\right… 的安全跨行 Enter。"
-        },
-        "texleaf.tabout": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "数学环境中用 Tab 跳到下一个闭括号或环境外；在 matrix/align 中不会跨单元格或行边界。"
-        },
-        "texleaf.skipPairedClosingCharacters": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "光标位于现有 )、] 或 } 前时，键入相同字符只跳过它。"
-        },
-        "texleaf.autoDeleteMathDelimiters": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "在空的 $…$、\\(…\\) 或 \\[...\\] 中按 Backspace 时删除整对定界符。"
-        },
-        "texleaf.colorizeBrackets": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "在数学环境中按嵌套深度给配对括号着色。"
-        },
-        "texleaf.highlightActiveBracketPair": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "突出显示光标附近或包围光标的括号对。"
-        },
-        "texleaf.enableCompletions": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "在 VS Code 原生 Suggest 中显示所有适用片段里与光标前输入匹配长度最长、且长度非零的 trigger 组，并额外保留所有已完整输入的字面量 trigger；只有运行时唯一选中的 exact literal 获得精确候选优先级。完整片段库可通过 TeXLeaf 的搜索并插入命令浏览。"
-        },
-        "texleaf.languageIds": {
-          "scope": "resource",
-          "type": "array",
-          "items": {
-            "type": "string"
+          "texleaf.enabled": {
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "启用 TeXLeaf。"
           },
-          "default": [
-            "latex",
-            "tex",
-            "bibtex"
-          ],
-          "description": "启用 TeXLeaf 的 VS Code 语言 ID；编辑功能仍只在已保存的 .tex 或 .bib 文件中生效。"
-        },
-        "texleaf.snippetFiles": {
-          "scope": "resource",
-          "type": "array",
-          "items": {
-            "type": "string"
+          "texleaf.autoSnippets": {
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "键入带 A 选项的触发器后立即展开。"
           },
-          "default": [],
-          "description": "可选：相对每个工作区目录额外加载的安全 JSON/JSONC 片段文件。全局片段始终从扩展的全局存储加载，不需要在这里配置；未信任工作区会忽略此项目级设置。"
-        },
-        "texleaf.excludedEnvironments": {
-          "scope": "resource",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [
-            "verbatim",
-            "lstlisting",
-            "minted"
-          ],
-          "description": "不运行自动片段和自动分式的 LaTeX 环境。"
-        },
-        "texleaf.matrixEnvironments": {
-          "scope": "resource",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [
-            "matrix",
-            "pmatrix",
-            "bmatrix",
-            "Bmatrix",
-            "vmatrix",
-            "Vmatrix",
-            "array",
-            "cases",
-            "align",
-            "align*",
-            "aligned"
-          ],
-          "description": "启用矩阵快捷键的环境名称。"
-        },
-        "texleaf.autoFractionBreakingCharacters": {
-          "scope": "resource",
-          "type": "string",
-          "default": "+-=,;:&",
-          "description": "自动分式向左扫描时用于终止分子的字符。"
-        },
-        "texleaf.autoEnlargeTriggers": {
-          "scope": "resource",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [
-            "\\frac",
-            "\\sum",
-            "\\prod",
-            "\\int",
-            "\\lim"
-          ],
-          "description": "括号内出现这些 LaTeX 命令时自动添加 \\left/\\right。"
-        },
-        "texleaf.maxRegexScanLength": {
-          "scope": "resource",
-          "type": "integer",
-          "default": 512,
-          "minimum": 64,
-          "maximum": 8192,
-          "description": "正则触发器最多检查光标前多少个字符。"
-        },
-        "texleaf.wordDelimiters": {
-          "scope": "resource",
-          "type": "string",
-          "default": "., +-\\n\\t:;!?\\/{}[]()=~$",
-          "description": "带 w 选项的片段可接受的词边界字符；\\n 与 \\t 会转换为换行和制表符。"
-        }
-      }
-    },
-    {
-      "title": "TeXLeaf · 文献",
-      "properties": {
-        "texleaf.zoteroCitations": {
-          "order": 1,
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Zotero 引用功能总开关：启用项目 bibliography 与 Zotero 联动的原生引用补全，并在本地按 citation key、标题、作者、年份、DOI 和 ISBN 搜索。未信任工作区中始终停用。"
-        },
-        "texleaf.autoShowCitationPicker": {
-          "order": 4,
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "光标进入配置的 \\cite{…} 类命令参数时自动打开 VS Code 原生引用补全；关闭后仍可运行“TeXLeaf: 显示参考文献补全”。"
-        },
-        "texleaf.bibliographyFile": {
-          "order": 2,
-          "scope": "resource",
-          "type": "string",
-          "default": "reference.bib",
-          "description": "可自定义的项目内相对 .bib 路径，默认 reference.bib。简单文件名会优先使用从当前 TeX 文件向工作区根查找到的最近同名文件；不存在时在工作区根创建。"
-        },
-        "texleaf.citationCommands": {
-          "order": 5,
-          "scope": "resource",
-          "type": "array",
-          "items": {
+          "texleaf.manualTrigger": {
+            "scope": "resource",
             "type": "string",
-            "pattern": "^\\\\?[A-Za-z@]+\\*?$"
+            "enum": [
+              "tab",
+              "space"
+            ],
+            "enumDescriptions": [
+              "按 Tab 展开非自动片段。",
+              "按空格展开非自动片段。"
+            ],
+            "default": "tab",
+            "description": "非自动片段的触发按键。"
           },
-          "default": [
-            "cite",
-            "citep",
-            "citet",
-            "Cite",
-            "Citet",
-            "autocite",
-            "parencite",
-            "textcite",
-            "footcite",
-            "supercite"
-          ],
-          "description": "触发原生引用补全的 LaTeX 命令名；可带或不带开头反斜杠，星号变体会自动兼容。"
-        },
-        "texleaf.zoteroPort": {
-          "order": 7,
-          "scope": "resource",
-          "type": "integer",
-          "default": 23119,
-          "minimum": 1,
-          "maximum": 65535,
-          "description": "Zotero/Better BibTeX 本机端口。连接固定限制为 127.0.0.1；Juris-M 通常使用 24119。"
-        },
-        "texleaf.zoteroLibrary": {
-          "order": 6,
-          "scope": "resource",
-          "type": "string",
-          "default": "My Library",
-          "description": "Zotero 库名称或内部数字 ID；默认读取 My Library，也可指定群组库。"
-        },
-        "texleaf.zoteroRequestTimeoutMs": {
-          "order": 8,
-          "scope": "resource",
-          "type": "integer",
-          "default": 10000,
-          "minimum": 500,
-          "maximum": 60000,
-          "description": "Zotero/Better BibTeX 本机请求的超时时间（毫秒）。"
-        },
-        "texleaf.zoteroCacheSeconds": {
-          "order": 9,
-          "scope": "resource",
-          "type": "integer",
-          "default": 30,
-          "minimum": 0,
-          "maximum": 3600,
-          "description": "Zotero 完整参考文献快照在内存中的缓存秒数；键入查询只筛选本地快照，不逐键请求 Zotero，可随时运行刷新命令清除。"
-        },
-        "texleaf.bibliographyFormat": {
-          "order": 3,
-          "scope": "resource",
-          "type": "string",
-          "enum": [
-            "bibtex",
-            "biblatex"
-          ],
-          "enumDescriptions": [
-            "把 Zotero 新条目以 BibTeX 格式追加到 bibliography。",
-            "把 Zotero 新条目以 BibLaTeX 格式追加到 bibliography。"
-          ],
-          "default": "bibtex",
-          "description": "从 Zotero 导入新条目时使用的 bibliography 格式；默认 BibTeX，已有条目不会被重新格式化。"
-        }
-      }
-    },
-    {
-      "title": "TeXLeaf · AI 写作",
-      "properties": {
-        "texleaf.aiWriting.enabled": {
-          "order": 1,
-          "scope": "application",
-          "type": "boolean",
-          "default": false,
-          "description": "AI 写作助手总开关。默认关闭；首次使用还必须确认会发送已命名 .tex 的当前编辑器正文（可能含尚未保存的编辑），并在 VS Code SecretStorage 中保存当前服务商的 API Key。未信任工作区中始终停用。"
-        },
-        "texleaf.aiWriting.automaticReview": {
-          "order": 2,
-          "scope": "application",
-          "type": "boolean",
-          "default": true,
-          "description": "启用总开关后，停止键入时自动检查当前改动的 LaTeX 正文句子。完整句子只作为检查上下文；与局部编辑不相交且仍精确有效的同句及其他问题会继续保留。"
-        },
-        "texleaf.aiWriting.inlineCompletions": {
-          "order": 3,
-          "scope": "application",
-          "type": "boolean",
-          "default": true,
-          "description": "启用总开关后，为正文提供 AI 词语和句子行内补全。每次实际请求都可能产生 API 用量。"
-        },
-        "texleaf.aiWriting.provider": {
-          "order": 4,
-          "scope": "application",
-          "type": "string",
-          "enum": [
-            "deepseek",
-            "openai"
-          ],
-          "enumDescriptions": [
-            "使用 DeepSeek Chat Completions API；可单独配置官方或兼容服务的 Base URL。",
-            "使用 OpenAI Responses API；可配置完整兼容 Responses 与 Structured Outputs 的 Base URL。"
-          ],
-          "default": "deepseek",
-          "description": "AI 写作请求使用的协议。切换服务商或任一 Base URL 后，都需要为规范化后的目标单独确认正文传输并设置对应 API Key。"
-        },
-        "texleaf.aiWriting.deepseekModel": {
-          "order": 5,
-          "scope": "application",
-          "type": "string",
-          "enum": [
-            "deepseek-v4-flash",
-            "deepseek-v4-pro"
-          ],
-          "enumDescriptions": [
-            "低延迟、低成本，适合实时语法检查和行内补全。",
-            "质量优先，延迟和费用更高，适合精细改写。"
-          ],
-          "default": "deepseek-v4-flash",
-          "description": "DeepSeek Chat Completions 模型；请求固定使用非思考模式和低随机性结构化输出。兼容服务必须接受所选模型 ID。"
-        },
-        "texleaf.aiWriting.deepseekBaseUrl": {
-          "order": 6,
-          "scope": "application",
-          "type": "string",
-          "default": "https://api.deepseek.com",
-          "description": "DeepSeek Chat Completions API 的 Base URL；TeXLeaf 只请求 {Base URL}/chat/completions。禁止用户名、密码、查询参数、片段和重定向；远程地址必须使用 HTTPS，仅 localhost/127.0.0.1/::1 可使用 HTTP。每个规范化地址都要单独确认并设置 Key；自定义服务的计费、存储和数据政策由其运营方负责。"
-        },
-        "texleaf.aiWriting.openaiModel": {
-          "order": 7,
-          "scope": "application",
-          "type": "string",
-          "default": "gpt-5.6-luna",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
-          "patternErrorMessage": "模型 ID 只能包含字母、数字、点、下划线、冒号、斜杠和连字符，长度为 1–128。",
-          "description": "OpenAI Responses 模型 ID。默认 gpt-5.6-luna；也可填写当前 OpenAI Responses 模型或自定义兼容服务的模型 ID。"
-        },
-        "texleaf.aiWriting.openaiBaseUrl": {
-          "order": 8,
-          "scope": "application",
-          "type": "string",
-          "default": "https://api.openai.com/v1",
-          "description": "OpenAI Responses API 的 Base URL；TeXLeaf 只请求 {Base URL}/responses，不兼容仅提供 /chat/completions 的代理。禁止用户名、密码、查询参数、片段和重定向；远程地址必须使用 HTTPS，仅 localhost/127.0.0.1/::1 可使用 HTTP。每个规范化地址都要单独确认并设置 Key；自定义服务的计费、存储和数据政策由其运营方负责。"
-        },
-        "texleaf.aiWriting.language": {
-          "order": 9,
-          "scope": "application",
-          "type": "string",
-          "enum": [
-            "auto",
-            "english",
-            "chinese"
-          ],
-          "enumDescriptions": [
-            "由模型按当前待检查正文自动识别语言。",
-            "按英语论文检查，并用中文解释问题。",
-            "按中文学术写作检查。"
-          ],
-          "default": "auto",
-          "description": "写作检查语言。"
-        },
-        "texleaf.aiWriting.style": {
-          "order": 10,
-          "scope": "application",
-          "type": "string",
-          "enum": [
-            "academic",
-            "general",
-            "concise"
-          ],
-          "enumDescriptions": [
-            "学术论文：正式、准确并保留专业术语。",
-            "通用写作：自然、清晰。",
-            "简洁表达：优先删去冗余和含混措辞。"
-          ],
-          "default": "academic",
-          "description": "检查、改写和补全采用的写作风格。"
-        },
-        "texleaf.aiWriting.reviewDelayMs": {
-          "order": 11,
-          "scope": "application",
-          "type": "integer",
-          "default": 900,
-          "minimum": 500,
-          "maximum": 10000,
-          "description": "停止键入后等待多少毫秒再自动检查改动句子。继续输入会取消旧请求，相同句子内容不会在同一文档版本中重复请求。"
-        },
-        "texleaf.aiWriting.completionDelayMs": {
-          "order": 12,
-          "scope": "application",
-          "type": "integer",
-          "default": 500,
-          "minimum": 100,
-          "maximum": 5000,
-          "description": "自动行内补全发出请求前的额外等待时间。"
-        },
-        "texleaf.aiWriting.maxParagraphLength": {
-          "order": 13,
-          "scope": "application",
-          "type": "integer",
-          "default": 6000,
-          "minimum": 500,
-          "maximum": 20000,
-          "description": "单个自动检查句子或手动正文段最多发送的 UTF-16 字符数。设置名 maxParagraphLength 为兼容旧配置而保留；超出时要求缩小选区。"
-        },
-        "texleaf.aiWriting.maxDocumentLength": {
-          "order": 14,
-          "scope": "application",
-          "type": "integer",
-          "default": 30000,
-          "minimum": 1000,
-          "maximum": 100000,
-          "description": "手动检查整篇文档时，本次最多发送的正文 UTF-16 字符数。"
-        }
-      }
-    },
-    {
-      "title": "TeXLeaf · 预览",
-      "properties": {
-        "texleaf.mathPreview.enabled": {
-          "order": 1,
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "启用 TeXLeaf 内置的实时数学公式预览。渲染资源随扩展提供；灵感来源与致谢见项目 README 和 Wiki。"
-        },
-        "texleaf.mathPreview.presentation": {
-          "order": 2,
-          "scope": "resource",
-          "type": "string",
-          "enum": [
-            "cursor",
-            "hover",
-            "both"
-          ],
-          "enumDescriptions": [
-            "光标进入公式时，在公式旁显示 SVG 预览。",
-            "只在鼠标悬停时使用 VS Code 原生 Hover 显示预览。",
-            "同时启用光标预览与 Hover；若 LaTeX Workshop 也提供 Hover，可能出现两份内容。"
-          ],
-          "default": "cursor",
-          "description": "选择 Math Preview 的显示方式；默认只跟随活动光标，避免与其他 LaTeX 扩展的 Hover 重复。"
-        },
-        "texleaf.mathPreview.placement": {
-          "order": 3,
-          "scope": "resource",
-          "type": "string",
-          "enum": [
-            "autoBelow",
-            "autoAbove",
-            "above",
-            "below"
-          ],
-          "enumItemLabels": [
-            "自动（优先下方）",
-            "自动（优先上方）",
-            "始终上方",
-            "始终下方"
-          ],
-          "enumDescriptions": [
-            "自动（优先下方）：下方空间足够时放在下方，否则改到上方；上下都不足时强制放在上方并尽量保留预览底部与公式末尾。",
-            "自动（优先上方）：上方空间足够时放在上方，否则改到下方；上下都不足时强制放在上方并采用相同的末尾保留策略。",
-            "始终把光标预览放在公式上方。",
-            "始终把光标预览放在公式下方。"
-          ],
-          "default": "autoBelow",
-          "description": "选择光标公式预览的浮动方向。autoBelow（默认）优先下方，autoAbove 优先上方；首选侧空间不足时尝试另一侧，上下都不足时两者都强制使用上方，超高、多行公式还会保留公式尾部。above/below 始终固定方向。旧值 auto 仅作为 autoBelow 的运行时兼容别名保留，不再显示在设置选项中。卡片不参与正文换行；VS Code 没有公开横向视口尺寸或行间占位 API，因此超宽卡片和紧邻正文仍可能裁切或遮挡。"
-        },
-        "texleaf.mathPreview.debounceMs": {
-          "order": 4,
-          "scope": "resource",
-          "type": "integer",
-          "default": 120,
-          "minimum": 50,
-          "maximum": 2000,
-          "description": "停止键入或移动光标后等待多少毫秒再更新预览。较大的值更省电；大文档会自动至少使用 300 毫秒。"
-        },
-        "texleaf.mathPreview.scale": {
-          "order": 5,
-          "scope": "resource",
-          "type": "number",
-          "default": 1,
-          "minimum": 0.5,
-          "maximum": 3,
-          "description": "公式 SVG 的显示缩放倍数；光标预览超过 40em 宽度时会等比缩放，256em 高度仅作为异常 TeX 几何的绘制安全上限。"
-        },
-        "texleaf.mathPreview.maxSourceLength": {
-          "order": 6,
-          "scope": "resource",
-          "type": "integer",
-          "default": 8192,
-          "minimum": 256,
-          "maximum": 32768,
-          "description": "单条公式允许送入后台 MathJax 渲染器的最大 UTF-16 字符数，用于限制性能与宏展开风险。"
-        },
-        "texleaf.mathPreview.macros": {
-          "order": 7,
-          "scope": "resource",
-          "type": "object",
-          "default": {},
-          "maxProperties": 128,
-          "propertyNames": {
-            "pattern": "^[A-Za-z@]+$"
+          "texleaf.autoFraction": {
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "在数学环境中键入 / 时把左侧表达式转换为分式。"
           },
-          "additionalProperties": {
+          "texleaf.autoFractionCommand": {
+            "scope": "resource",
             "type": "string",
-            "maxLength": 2048
+            "default": "\\frac",
+            "description": "自动分式使用的 LaTeX 命令，例如 \\frac、\\dfrac 或 \\tfrac。"
           },
-          "description": "可选的 MathJax 宏表：最多 128 项，键是不带反斜杠的命令名，值是替换文本；会自动从替换文本中的 #1…#9 推断参数个数。为匹配后台渲染器的安全边界，序列化后总长度超过 16384 个 UTF-16 字符时会按键名顺序忽略超出的定义。文档前言中的 newcommand、renewcommand、providecommand 和 DeclareMathOperator 会覆盖同名设置。"
+          "texleaf.autoEnlargeBrackets": {
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "片段生成分式、求和或积分后，将同一数学范围和对齐单元内所有合格的包围括号级联转换为 \\left/\\right。"
+          },
+          "texleaf.visualSnippets": {
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "允许单字符 visual 片段包裹选区。"
+          },
+          "texleaf.matrixShortcuts": {
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "启用矩阵/align 的 Tab（当前单元格有闭合符时先 Tabout，无目标时插列）、Enter 插行、Shift+Enter 跳出，以及可换行数学环境中匹配 \\left…\\right… 的安全跨行 Enter。"
+          },
+          "texleaf.tabout": {
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "数学环境中用 Tab 跳到下一个闭括号或环境外；在 matrix/align 中不会跨单元格或行边界。"
+          },
+          "texleaf.skipPairedClosingCharacters": {
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "光标位于现有 )、] 或 } 前时，键入相同字符只跳过它。"
+          },
+          "texleaf.autoDeleteMathDelimiters": {
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "在空的 $…$、\\(…\\) 或 \\[...\\] 中按 Backspace 时删除整对定界符。"
+          },
+          "texleaf.colorizeBrackets": {
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "在数学环境中按嵌套深度给配对括号着色。"
+          },
+          "texleaf.highlightActiveBracketPair": {
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "突出显示光标附近或包围光标的括号对。"
+          },
+          "texleaf.enableCompletions": {
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "在 VS Code 原生 Suggest 中显示所有适用片段里与光标前输入匹配长度最长、且长度非零的 trigger 组，并额外保留所有已完整输入的字面量 trigger；只有运行时唯一选中的 exact literal 获得精确候选优先级。完整片段库可通过 TeXLeaf 的搜索并插入命令浏览。"
+          },
+          "texleaf.languageIds": {
+            "scope": "resource",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              "latex",
+              "tex",
+              "bibtex"
+            ],
+            "description": "启用 TeXLeaf 的 VS Code 语言 ID；编辑功能仍只在已保存的 .tex 或 .bib 文件中生效。"
+          },
+          "texleaf.snippetFiles": {
+            "scope": "resource",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "description": "可选：相对每个工作区目录额外加载的安全 JSON/JSONC 片段文件。全局片段始终从扩展的全局存储加载，不需要在这里配置；未信任工作区会忽略此项目级设置。"
+          },
+          "texleaf.excludedEnvironments": {
+            "scope": "resource",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              "verbatim",
+              "lstlisting",
+              "minted"
+            ],
+            "description": "不运行自动片段和自动分式的 LaTeX 环境。"
+          },
+          "texleaf.matrixEnvironments": {
+            "scope": "resource",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              "matrix",
+              "pmatrix",
+              "bmatrix",
+              "Bmatrix",
+              "vmatrix",
+              "Vmatrix",
+              "array",
+              "cases",
+              "align",
+              "align*",
+              "aligned"
+            ],
+            "description": "启用矩阵快捷键的环境名称。"
+          },
+          "texleaf.autoFractionBreakingCharacters": {
+            "scope": "resource",
+            "type": "string",
+            "default": "+-=,;:&<>≤≥",
+            "description": "自动分式向左扫描时用于终止分子的字符；<、>、≤、≥ 以及 \\le/\\leq/\\ge/\\geq 默认都会留在分式外。"
+          },
+          "texleaf.autoEnlargeTriggers": {
+            "scope": "resource",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              "\\frac",
+              "\\binom",
+              "\\sum",
+              "\\prod",
+              "\\int",
+              "\\lim"
+            ],
+            "description": "括号内出现这些 LaTeX 命令时自动添加 \\left/\\right。"
+          },
+          "texleaf.maxRegexScanLength": {
+            "scope": "resource",
+            "type": "integer",
+            "default": 512,
+            "minimum": 64,
+            "maximum": 8192,
+            "description": "正则触发器最多检查光标前多少个字符。"
+          },
+          "texleaf.wordDelimiters": {
+            "scope": "resource",
+            "type": "string",
+            "default": "., +-\\n\\t:;!?\\/{}[]()=~$",
+            "description": "带 w 选项的片段可接受的词边界字符；\\n 与 \\t 会转换为换行和制表符。"
+          }
+        }
+      },
+      {
+        "title": "TeXLeaf · 文献",
+        "properties": {
+          "texleaf.zoteroCitations": {
+            "order": 1,
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "Zotero 引用功能总开关：启用项目 bibliography 与 Zotero 联动的原生引用补全，并在本地按 citation key、标题、作者、年份、DOI 和 ISBN 搜索。未信任工作区中始终停用。"
+          },
+          "texleaf.autoShowCitationPicker": {
+            "order": 4,
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "光标进入配置的 \\cite{…} 类命令参数时自动打开 VS Code 原生引用补全；关闭后仍可运行“TeXLeaf: 显示参考文献补全”。"
+          },
+          "texleaf.bibliographyFile": {
+            "order": 2,
+            "scope": "resource",
+            "type": "string",
+            "default": "reference.bib",
+            "description": "可自定义的项目内相对 .bib 路径，默认 reference.bib。简单文件名会优先使用从当前 TeX 文件向工作区根查找到的最近同名文件；不存在时在工作区根创建。"
+          },
+          "texleaf.citationCommands": {
+            "order": 5,
+            "scope": "resource",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^\\\\?[A-Za-z@]+\\*?$"
+            },
+            "default": [
+              "cite",
+              "Cite",
+              "citep",
+              "Citep",
+              "citet",
+              "Citet",
+              "citealp",
+              "citealt",
+              "citeauthor",
+              "Citeauthor",
+              "citeyear",
+              "citeyearpar",
+              "autocite",
+              "Autocite",
+              "parencite",
+              "Parencite",
+              "textcite",
+              "Textcite",
+              "footcite",
+              "footcitetext",
+              "smartcite",
+              "Smartcite",
+              "supercite",
+              "fullcite",
+              "footfullcite",
+              "citetitle",
+              "citedate",
+              "nocite",
+              "cites",
+              "Cites",
+              "autocites",
+              "Autocites",
+              "parencites",
+              "Parencites",
+              "textcites",
+              "Textcites",
+              "footcites",
+              "footcitetexts",
+              "smartcites",
+              "Smartcites"
+            ],
+            "description": "触发源码与可视化引用筛选的 LaTeX 命令名；默认覆盖标准 LaTeX、natbib 与 biblatex 常见单条/多条引用命令，可带或不带开头反斜杠，星号变体会自动兼容；LaTeX Workshop 针对当前宏包额外提供的命令仍会通过 Provider 桥接。"
+          },
+          "texleaf.zoteroPort": {
+            "order": 7,
+            "scope": "resource",
+            "type": "integer",
+            "default": 23119,
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Zotero/Better BibTeX 本机端口。连接固定限制为 127.0.0.1；Juris-M 通常使用 24119。"
+          },
+          "texleaf.zoteroLibrary": {
+            "order": 6,
+            "scope": "resource",
+            "type": "string",
+            "default": "My Library",
+            "description": "Zotero 库名称或内部数字 ID；默认读取 My Library，也可指定群组库。"
+          },
+          "texleaf.zoteroRequestTimeoutMs": {
+            "order": 8,
+            "scope": "resource",
+            "type": "integer",
+            "default": 10000,
+            "minimum": 500,
+            "maximum": 60000,
+            "description": "Zotero/Better BibTeX 本机请求的超时时间（毫秒）。"
+          },
+          "texleaf.zoteroCacheSeconds": {
+            "order": 9,
+            "scope": "resource",
+            "type": "integer",
+            "default": 30,
+            "minimum": 0,
+            "maximum": 3600,
+            "description": "Zotero 完整参考文献快照在内存中的缓存秒数；键入查询只筛选本地快照，不逐键请求 Zotero，可随时运行刷新命令清除。"
+          },
+          "texleaf.bibliographyFormat": {
+            "order": 3,
+            "scope": "resource",
+            "type": "string",
+            "enum": [
+              "bibtex",
+              "biblatex"
+            ],
+            "enumDescriptions": [
+              "把 Zotero 新条目以 BibTeX 格式追加到 bibliography。",
+              "把 Zotero 新条目以 BibLaTeX 格式追加到 bibliography。"
+            ],
+            "default": "bibtex",
+            "description": "从 Zotero 导入新条目时使用的 bibliography 格式；默认 BibTeX，已有条目不会被重新格式化。"
+          }
+        }
+      },
+      {
+        "title": "TeXLeaf · AI 写作",
+        "properties": {
+          "texleaf.aiWriting.enabled": {
+            "order": 1,
+            "scope": "application",
+            "type": "boolean",
+            "default": false,
+            "description": "AI 写作助手总开关。默认关闭；首次使用还必须确认会发送已命名 .tex 的当前编辑器正文（可能含尚未保存的编辑），并在 VS Code SecretStorage 中保存当前服务商的 API Key。未信任工作区中始终停用。"
+          },
+          "texleaf.aiWriting.automaticReview": {
+            "order": 2,
+            "scope": "application",
+            "type": "boolean",
+            "default": true,
+            "description": "启用总开关后，停止键入时自动检查当前改动的 LaTeX 正文句子。完整句子只作为检查上下文；与局部编辑不相交且仍精确有效的同句及其他问题会继续保留。"
+          },
+          "texleaf.aiWriting.inlineCompletions": {
+            "order": 3,
+            "scope": "application",
+            "type": "boolean",
+            "default": true,
+            "description": "启用总开关后，为正文提供 AI 词语和句子行内补全。每次实际请求都可能产生 API 用量。"
+          },
+          "texleaf.aiWriting.provider": {
+            "order": 4,
+            "scope": "application",
+            "type": "string",
+            "enum": [
+              "deepseek",
+              "openai"
+            ],
+            "enumDescriptions": [
+              "使用 DeepSeek Chat Completions API；可单独配置官方或兼容服务的 Base URL。",
+              "使用 OpenAI Responses API；可配置完整兼容 Responses 与 Structured Outputs 的 Base URL。"
+            ],
+            "default": "deepseek",
+            "description": "AI 写作请求使用的协议。切换服务商或任一 Base URL 后，都需要为规范化后的目标单独确认正文传输并设置对应 API Key。"
+          },
+          "texleaf.aiWriting.deepseekModel": {
+            "order": 5,
+            "scope": "application",
+            "type": "string",
+            "enum": [
+              "deepseek-v4-flash",
+              "deepseek-v4-pro"
+            ],
+            "enumDescriptions": [
+              "低延迟、低成本，适合实时语法检查和行内补全。",
+              "质量优先，延迟和费用更高，适合精细改写。"
+            ],
+            "default": "deepseek-v4-flash",
+            "description": "DeepSeek Chat Completions 模型；请求固定使用非思考模式和低随机性结构化输出。兼容服务必须接受所选模型 ID。"
+          },
+          "texleaf.aiWriting.deepseekBaseUrl": {
+            "order": 6,
+            "scope": "application",
+            "type": "string",
+            "default": "https://api.deepseek.com",
+            "description": "DeepSeek Chat Completions API 的 Base URL；TeXLeaf 只请求 {Base URL}/chat/completions。禁止用户名、密码、查询参数、片段和重定向；远程地址必须使用 HTTPS，仅 localhost/127.0.0.1/::1 可使用 HTTP。每个规范化地址都要单独确认并设置 Key；自定义服务的计费、存储和数据政策由其运营方负责。"
+          },
+          "texleaf.aiWriting.openaiModel": {
+            "order": 7,
+            "scope": "application",
+            "type": "string",
+            "default": "gpt-5.6-luna",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+            "patternErrorMessage": "模型 ID 只能包含字母、数字、点、下划线、冒号、斜杠和连字符，长度为 1–128。",
+            "description": "OpenAI Responses 模型 ID。默认 gpt-5.6-luna；也可填写当前 OpenAI Responses 模型或自定义兼容服务的模型 ID。"
+          },
+          "texleaf.aiWriting.openaiBaseUrl": {
+            "order": 8,
+            "scope": "application",
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "description": "OpenAI Responses API 的 Base URL；TeXLeaf 只请求 {Base URL}/responses，不兼容仅提供 /chat/completions 的代理。禁止用户名、密码、查询参数、片段和重定向；远程地址必须使用 HTTPS，仅 localhost/127.0.0.1/::1 可使用 HTTP。每个规范化地址都要单独确认并设置 Key；自定义服务的计费、存储和数据政策由其运营方负责。"
+          },
+          "texleaf.aiWriting.language": {
+            "order": 9,
+            "scope": "application",
+            "type": "string",
+            "enum": [
+              "auto",
+              "english",
+              "chinese"
+            ],
+            "enumDescriptions": [
+              "由模型按当前待检查正文自动识别语言。",
+              "按英语论文检查，并用中文解释问题。",
+              "按中文学术写作检查。"
+            ],
+            "default": "auto",
+            "description": "写作检查语言。"
+          },
+          "texleaf.aiWriting.style": {
+            "order": 10,
+            "scope": "application",
+            "type": "string",
+            "enum": [
+              "academic",
+              "general",
+              "concise"
+            ],
+            "enumDescriptions": [
+              "学术论文：正式、准确并保留专业术语。",
+              "通用写作：自然、清晰。",
+              "简洁表达：优先删去冗余和含混措辞。"
+            ],
+            "default": "academic",
+            "description": "检查、改写和补全采用的写作风格。"
+          },
+          "texleaf.aiWriting.reviewDelayMs": {
+            "order": 11,
+            "scope": "application",
+            "type": "integer",
+            "default": 900,
+            "minimum": 500,
+            "maximum": 10000,
+            "description": "停止键入后等待多少毫秒再自动检查改动句子。继续输入会取消旧请求，相同句子内容不会在同一文档版本中重复请求。"
+          },
+          "texleaf.aiWriting.completionDelayMs": {
+            "order": 12,
+            "scope": "application",
+            "type": "integer",
+            "default": 500,
+            "minimum": 100,
+            "maximum": 5000,
+            "description": "自动行内补全发出请求前的额外等待时间。"
+          },
+          "texleaf.aiWriting.maxParagraphLength": {
+            "order": 13,
+            "scope": "application",
+            "type": "integer",
+            "default": 6000,
+            "minimum": 500,
+            "maximum": 20000,
+            "description": "单个自动检查句子或手动正文段最多发送的 UTF-16 字符数。设置名 maxParagraphLength 为兼容旧配置而保留；超出时要求缩小选区。"
+          },
+          "texleaf.aiWriting.maxDocumentLength": {
+            "order": 14,
+            "scope": "application",
+            "type": "integer",
+            "default": 30000,
+            "minimum": 1000,
+            "maximum": 100000,
+            "description": "手动检查整篇文档时，本次最多发送的正文 UTF-16 字符数。"
+          }
+        }
+      },
+      {
+        "title": "TeXLeaf · 可视化编辑器",
+        "properties": {
+          "texleaf.project.rootFile": {
+            "order": 0,
+            "scope": "resource",
+            "type": "string",
+            "default": "",
+            "description": "可选的工作区文件夹相对主 TeX 文件（例如 thesis/main.tex）。留空时按当前文件的 % !TEX root、documentclass 和唯一反向 include 自动识别；绝对路径、URI、动态 TeX 路径、越出工作区或不存在的文件会被拒绝，显式值无效时不会继续猜测其他根。"
+          },
+          "texleaf.visualEditor.defaultMode": {
+            "order": 1,
+            "scope": "application",
+            "type": "string",
+            "enum": [
+              "visual",
+              "source"
+            ],
+            "enumItemLabels": [
+              "可视化编辑器",
+              "LaTeX 源码编辑器"
+            ],
+            "enumDescriptions": [
+              "双击或普通打开 .tex 时使用 TeXLeaf 可视化编辑器；可在同一标签页切换源码模式，也可用“↗ 原生”打开 VS Code 编辑器。",
+              "普通打开 .tex 时使用 VS Code 原生源码编辑器；可通过“使用可视化编辑器打开”进入可视化模式。"
+            ],
+            "default": "visual",
+            "description": "选择 .tex 文件默认使用源码还是可视化编辑。该设置只修改用户/Profile 层的 *.tex 编辑器关联，不覆盖其他文件类型。"
+          },
+          "texleaf.visualEditor.providerCompletions": {
+            "order": 2,
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "在可视化与同标签页源码模式中，通过 VS Code 官方补全提供器命令显示 TeXLeaf、LaTeX Workshop 等扩展返回的安全普通候选与常见 Snippet。带命令回调或额外编辑的复杂候选会被跳过，可用“↗ 原生”获得完整原生行为。"
+          },
+          "texleaf.visualEditor.latexWorkshopCompatibility": {
+            "order": 3,
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "保存、编译、查看 PDF 或执行 SyncTeX 时，在后台复用 LaTeX Workshop 的配方、PDF 查看器与定位功能，不切换到原生源码编辑器。关闭后仍可手动切换到源码模式再运行 LaTeX Workshop 命令。"
+          }
+        }
+      },
+      {
+        "title": "TeXLeaf · 预览",
+        "properties": {
+          "texleaf.mathPreview.enabled": {
+            "order": 1,
+            "scope": "resource",
+            "type": "boolean",
+            "default": true,
+            "description": "启用 TeXLeaf 内置的实时数学公式预览。渲染资源随扩展提供；灵感来源与致谢见项目 README 和 Wiki。"
+          },
+          "texleaf.mathPreview.presentation": {
+            "order": 2,
+            "scope": "resource",
+            "type": "string",
+            "enum": [
+              "cursor",
+              "hover",
+              "both"
+            ],
+            "enumDescriptions": [
+              "光标进入公式时，在公式旁显示 SVG 预览。",
+              "只在鼠标悬停时使用 VS Code 原生 Hover 显示预览。",
+              "同时启用光标预览与 Hover；若 LaTeX Workshop 也提供 Hover，可能出现两份内容。"
+            ],
+            "default": "cursor",
+            "description": "选择 Math Preview 的显示方式；默认只跟随活动光标，避免与其他 LaTeX 扩展的 Hover 重复。"
+          },
+          "texleaf.mathPreview.placement": {
+            "order": 3,
+            "scope": "resource",
+            "type": "string",
+            "enum": [
+              "autoAbove",
+              "autoBelow",
+              "above",
+              "below"
+            ],
+            "enumItemLabels": [
+              "自动（优先上方）",
+              "自动（优先下方）",
+              "始终上方",
+              "始终下方"
+            ],
+            "enumDescriptions": [
+              "自动（优先上方）：上方空间足够时放在上方，否则改到下方；上下都不足时强制放在上方并采用相同的末尾保留策略。",
+              "自动（优先下方）：下方空间足够时放在下方，否则改到上方；上下都不足时强制放在上方并尽量保留预览底部与公式末尾。",
+              "始终把光标预览放在公式上方。",
+              "始终把光标预览放在公式下方。"
+            ],
+            "default": "autoAbove",
+            "description": "选择源码与可视化编辑器中光标公式预览的共同浮动方向。autoAbove（默认）优先上方，空间不足时改到下方；autoBelow 优先下方。上下都不足时两者都强制使用上方，above/below 始终固定方向。旧值 auto 仅作为 autoBelow 的运行时兼容别名保留。卡片与源码保留清晰间距；行内公式在起始行对齐 $/\\(，后续行对齐首个非空白字符；超高公式上下都不足时左边框固定到最外层起始定界符列。正文公式保持原字号完整展开且无内部滚动框，浮动 Math Preview 保持正常字号、双向滚动条和自动光标跟随。"
+          },
+          "texleaf.mathPreview.debounceMs": {
+            "order": 4,
+            "scope": "resource",
+            "type": "integer",
+            "default": 120,
+            "minimum": 50,
+            "maximum": 2000,
+            "description": "停止键入或移动光标后等待多少毫秒再更新预览。较大的值更省电；大文档会自动至少使用 300 毫秒。"
+          },
+          "texleaf.mathPreview.scale": {
+            "order": 5,
+            "scope": "resource",
+            "type": "number",
+            "default": 1,
+            "minimum": 0.5,
+            "maximum": 3,
+            "description": "公式 SVG 的显示缩放倍数；光标预览超过 40em 宽度时会等比缩放，256em 高度仅作为异常 TeX 几何的绘制安全上限。"
+          },
+          "texleaf.mathPreview.maxSourceLength": {
+            "order": 6,
+            "scope": "resource",
+            "type": "integer",
+            "default": 8192,
+            "minimum": 256,
+            "maximum": 32768,
+            "description": "单条公式允许送入后台 MathJax 渲染器的最大 UTF-16 字符数，用于限制性能与宏展开风险。"
+          },
+          "texleaf.mathPreview.macros": {
+            "order": 7,
+            "scope": "resource",
+            "type": "object",
+            "default": {},
+            "maxProperties": 128,
+            "propertyNames": {
+              "pattern": "^[A-Za-z@]+$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 2048
+            },
+            "description": "可选的 MathJax 宏表：最多 128 项，键是不带反斜杠的命令名，值是替换文本；会自动从替换文本中的 #1…#9 推断参数个数。为匹配后台渲染器的安全边界，序列化后总长度超过 16384 个 UTF-16 字符时会按键名顺序忽略超出的定义。显式设置会覆盖模板能力层的近似兜底；根文档前言中的 newcommand、renewcommand、providecommand 和 DeclareMathOperator 再覆盖同名设置。"
+          }
         }
       }
-    }
-  ],
+    ],
     "viewsContainers": {
       "activitybar": [
         {
@@ -884,10 +1027,6 @@
         {
           "id": "texleaf.snippets",
           "name": "片段库"
-        },
-        {
-          "id": "texleaf.aiIssues",
-          "name": "AI 写作问题"
         }
       ]
     },
@@ -895,10 +1034,6 @@
       {
         "view": "texleaf.snippets",
         "contents": "没有可显示的片段。\n[管理 Snippet 与模板](command:texleaf.openSnippetEditor)\n[管理 TeX 模板](command:texleaf.openTemplateFile)\n[打开高级 JSONC](command:texleaf.openSnippetFile)\n[恢复默认片段](command:texleaf.restoreDefaultSnippets)\n[重新加载](command:texleaf.reloadSnippets)"
-      },
-      {
-        "view": "texleaf.aiIssues",
-        "contents": "AI 写作问题会在这里按当前 .tex 文档列出。\n[开启或关闭 AI 写作助手](command:texleaf.aiWriting.toggle)\n[检查当前段落或选区](command:texleaf.aiWriting.reviewParagraph)\n[检查当前文档](command:texleaf.aiWriting.reviewDocument)"
       }
     ],
     "menus": {
@@ -995,26 +1130,6 @@
           "command": "texleaf.restoreDefaultSnippets",
           "when": "view == texleaf.snippets",
           "group": "navigation@8"
-        },
-        {
-          "command": "texleaf.aiWriting.reviewDocument",
-          "when": "view == texleaf.aiIssues",
-          "group": "navigation@1"
-        },
-        {
-          "command": "texleaf.aiWriting.applyAll",
-          "when": "view == texleaf.aiIssues",
-          "group": "navigation@2"
-        },
-        {
-          "command": "texleaf.aiWriting.clearDiagnostics",
-          "when": "view == texleaf.aiIssues",
-          "group": "navigation@3"
-        },
-        {
-          "command": "texleaf.aiWriting.toggle",
-          "when": "view == texleaf.aiIssues",
-          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -1022,21 +1137,33 @@
           "command": "texleaf.insertSnippet",
           "when": "view == texleaf.snippets && viewItem == texleafSnippet",
           "group": "inline"
-        },
+        }
+      ],
+      "editor/title": [
         {
-          "command": "texleaf.aiIssues.apply",
-          "when": "view == texleaf.aiIssues && viewItem == texleafAiIssue",
-          "group": "inline@1"
-        },
-        {
-          "command": "texleaf.aiIssues.ignore",
-          "when": "view == texleaf.aiIssues && viewItem == texleafAiIssue",
-          "group": "inline@2"
-        },
-        {
-          "command": "texleaf.aiIssues.reveal",
-          "when": "view == texleaf.aiIssues && viewItem == texleafAiIssue",
+          "command": "texleaf.visualEditor.openSource",
+          "when": "activeCustomEditorId == texleaf.visualEditor",
           "group": "navigation@1"
+        },
+        {
+          "command": "texleaf.visualEditor.build",
+          "when": "activeCustomEditorId == texleaf.visualEditor",
+          "group": "navigation@2"
+        },
+        {
+          "command": "texleaf.visualEditor.viewPdf",
+          "when": "activeCustomEditorId == texleaf.visualEditor",
+          "group": "navigation@3"
+        },
+        {
+          "command": "texleaf.visualEditor.synctex",
+          "when": "activeCustomEditorId == texleaf.visualEditor",
+          "group": "navigation@4"
+        },
+        {
+          "command": "texleaf.visualEditor.open",
+          "when": "editorLangId == latex || editorLangId == tex",
+          "group": "navigation@5"
         }
       ]
     },

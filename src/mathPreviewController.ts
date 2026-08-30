@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import { randomUUID } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import * as vscode from "vscode";
@@ -21,6 +28,8 @@ import {
   resolveMathPreviewAppearance,
 } from "./mathPreviewAppearance";
 import {
+  createMathPreviewErrorCard,
+  createMathPreviewCursorViewport,
   fitMathPreviewSvgForCursor,
   frameMathPreviewSvg,
 } from "./mathPreviewCard";
@@ -44,6 +53,7 @@ const ERROR_RETRY_CACHE_SIZE = 128;
 const FAILED_RENDER_GRACE_MS = 750;
 const STALE_LEGACY_ASSET_SESSION_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_PREVIEW_WIDTH_EM = 40;
+const MAX_PREVIEW_HEIGHT_EM = 18;
 const SAFETY_MAX_PREVIEW_HEIGHT_EM = 256;
 const CURSOR_MARKER_COMMANDS = ["color", "rule", "mathord"] as const;
 
@@ -238,8 +248,46 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
           document.positionAt(formula.outerRange.end),
         ),
       );
-    } catch {
-      return undefined;
+    } catch (error: unknown) {
+      if (
+        token.isCancellationRequested ||
+        document.version !== snapshot.version
+      ) {
+        return undefined;
+      }
+      const source = snapshot.text.slice(
+        formula.outerRange.start,
+        formula.outerRange.end,
+      );
+      const asset = this.createRenderErrorAsset(
+        error,
+        source,
+        formula.mode === "inline" ? 28 : MAX_PREVIEW_WIDTH_EM,
+      );
+      try {
+        const hoverUri = await asset.hoverUri();
+        if (
+          token.isCancellationRequested ||
+          document.version !== snapshot.version
+        ) {
+          return undefined;
+        }
+        const markdown = new vscode.MarkdownString();
+        markdown.isTrusted = false;
+        markdown.supportHtml = false;
+        markdown.appendMarkdown(
+          `![TeXLeaf Math Preview render error](${hoverUri.toString()})`,
+        );
+        return new vscode.Hover(
+          markdown,
+          new vscode.Range(
+            document.positionAt(formula.outerRange.start),
+            document.positionAt(formula.outerRange.end),
+          ),
+        );
+      } catch {
+        return undefined;
+      }
     }
   }
 
@@ -359,7 +407,11 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
     try {
       let asset: RenderedAsset;
       try {
-        asset = await this.render(cursorInput ?? input, config);
+        asset = await this.render(
+          cursorInput ?? input,
+          config,
+          cursorInput === undefined ? undefined : appearance.cursor,
+        );
       } catch (cursorError: unknown) {
         if (
           cursorInput === undefined ||
@@ -392,11 +444,19 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
         // A partially typed command can be temporarily invalid. Keep the last
         // complete frame during a short editing grace period instead of
         // flashing blank, but clear it if the user stops on that invalid state.
-        this.scheduleFailedRenderClear(
+        this.scheduleFailedRenderError(
           editor,
           document,
           snapshot.version,
           requestGeneration,
+          formula,
+          cursorOffset,
+          snapshot.text.slice(
+            formula.outerRange.start,
+            formula.outerRange.end,
+          ),
+          error,
+          config,
         );
       }
       this.output.debug(
@@ -408,6 +468,7 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
   private async render(
     input: NonNullable<ReturnType<typeof createMathPreviewRenderInput>>,
     config: TeXLeafConfig,
+    cursorMarkerColor?: string,
   ): Promise<RenderedAsset> {
     const appearance = resolveMathPreviewAppearance(
       isDarkPreviewTheme(vscode.window.activeColorTheme.kind),
@@ -415,12 +476,13 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
     const foreground = appearance.foreground;
     const macroOptions = toMathJaxMacroOptions(input.macros);
     const key = JSON.stringify([
-      "mathjax-4.1.3-floating-card-caret-v4",
+      "mathjax-4.1.3-floating-card-caret-scroll-v5",
       input.tex,
       input.display,
       input.macroFingerprint,
       appearance,
       config.mathPreviewScale,
+      cursorMarkerColor,
     ]);
     const cached = this.renderCache.get(key);
     if (cached !== undefined) {
@@ -445,14 +507,22 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
         macroFingerprint: input.macroFingerprint,
         foreground,
         scale: config.mathPreviewScale,
+        ...(cursorMarkerColor === undefined ? {} : { cursorMarkerColor }),
       })
       .then(async (result) => {
         const framed = frameMathPreviewSvg(result, appearance);
-        const decoration = fitMathPreviewSvgForCursor(
-          framed,
-          MAX_PREVIEW_WIDTH_EM,
-          SAFETY_MAX_PREVIEW_HEIGHT_EM,
-        );
+        const decoration = result.cursor === undefined
+          ? fitMathPreviewSvgForCursor(
+              framed,
+              MAX_PREVIEW_WIDTH_EM,
+              SAFETY_MAX_PREVIEW_HEIGHT_EM,
+            )
+          : createMathPreviewCursorViewport(
+              framed,
+              MAX_PREVIEW_WIDTH_EM,
+              MAX_PREVIEW_HEIGHT_EM,
+              appearance,
+            );
         const asset = {
           // Cursor previews use an in-memory data URI. Persist the larger
           // hover SVG only if a Hover is actually requested, rather than
@@ -553,6 +623,7 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
           textDecoration: createMathPreviewAttachmentTextDecoration(
             plan.side,
             horizontalStrategy,
+            plan.gapPx,
           ),
         },
       },
@@ -568,6 +639,39 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
     }
     this.cancelFailedRenderClear();
     this.setPreviewVisible(true);
+  }
+
+  private createRenderErrorAsset(
+    error: unknown,
+    source: string,
+    maximumWidthEm: number,
+  ): RenderedAsset {
+    const message = error instanceof Error ? error.message : String(error);
+    const appearance = resolveMathPreviewAppearance(
+      isDarkPreviewTheme(vscode.window.activeColorTheme.kind),
+    );
+    const card = createMathPreviewErrorCard(
+      message,
+      source,
+      appearance,
+      maximumWidthEm,
+    );
+    const key = JSON.stringify([
+      "math-preview-render-error-v1",
+      message,
+      source,
+      appearance,
+      maximumWidthEm,
+    ]);
+    return {
+      hoverUri: this.assets.deferredWrite(key, card.svg),
+      decorationUri: vscode.Uri.parse(
+        createMathPreviewSvgDataUri(card.svg),
+        true,
+      ),
+      widthEm: card.widthEm,
+      heightEm: card.heightEm,
+    };
   }
 
   private snapshotFor(
@@ -685,11 +789,16 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
     }
   }
 
-  private scheduleFailedRenderClear(
+  private scheduleFailedRenderError(
     editor: vscode.TextEditor,
     document: vscode.TextDocument,
     documentVersion: number,
     requestGeneration: number,
+    formula: MathPreviewFormula,
+    cursorOffset: number,
+    source: string,
+    error: unknown,
+    config: TeXLeafConfig,
   ): void {
     this.cancelFailedRenderClear();
     this.failedRenderClearTimer = setTimeout(() => {
@@ -703,7 +812,12 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
       ) {
         return;
       }
-      this.clearDecoration();
+      const asset = this.createRenderErrorAsset(
+        error,
+        source,
+        formula.mode === "inline" ? 28 : MAX_PREVIEW_WIDTH_EM,
+      );
+      this.applyDecoration(editor, formula, cursorOffset, asset, config);
     }, FAILED_RENDER_GRACE_MS);
   }
 
@@ -730,7 +844,7 @@ export class MathPreviewController implements vscode.Disposable, vscode.HoverPro
   }
 }
 
-class MathPreviewWorkerClient implements vscode.Disposable {
+export class MathPreviewWorkerClient implements vscode.Disposable {
   private worker: Worker | undefined;
   private nextId = 1;
   private readonly pending = new Map<number, PendingRender>();
@@ -738,16 +852,46 @@ class MathPreviewWorkerClient implements vscode.Disposable {
   private activeId: number | undefined;
   private disposed = false;
 
-  public constructor(private readonly workerPath: string) {}
+  public constructor(
+    private readonly workerPath: string,
+    private readonly engineCacheLimit = 12,
+  ) {}
 
   public render(
     request: Omit<MathPreviewWorkerRequest, "type" | "id">,
+  ): Promise<MathPreviewWorkerSuccess> {
+    return this.enqueue(request, false);
+  }
+
+  /**
+   * Queue an interactive frame while discarding older frames that have not
+   * entered MathJax yet.  The worker itself is deliberately left alive: killing
+   * an active request would pay the expensive module warm-up cost again, but
+   * letting every obsolete caret position remain queued makes a long formula
+   * trail several seconds behind continuous typing.
+   */
+  public renderLatest(
+    request: Omit<MathPreviewWorkerRequest, "type" | "id">,
+  ): Promise<MathPreviewWorkerSuccess> {
+    return this.enqueue(request, true);
+  }
+
+  private enqueue(
+    request: Omit<MathPreviewWorkerRequest, "type" | "id">,
+    replaceQueued: boolean,
   ): Promise<MathPreviewWorkerSuccess> {
     if (this.disposed) {
       return Promise.reject(new Error("Math Preview renderer is disposed."));
     }
     const id = this.nextId++;
     return new Promise<MathPreviewWorkerSuccess>((resolve, reject) => {
+      if (replaceQueued) {
+        for (const obsolete of this.queued.splice(0)) {
+          obsolete.reject(
+            new Error("Math Preview dropped an obsolete interactive render."),
+          );
+        }
+      }
       this.queued.push({
         id,
         request: { type: "render", id, ...request },
@@ -817,7 +961,15 @@ class MathPreviewWorkerClient implements vscode.Disposable {
     if (this.worker !== undefined) {
       return this.worker;
     }
-    const worker = new Worker(this.workerPath, { name: "TeXLeaf Math Preview" });
+    const worker = new Worker(this.workerPath, {
+      name: "TeXLeaf Math Preview",
+      workerData: {
+        engineCacheLimit: Math.max(
+          1,
+          Math.min(16, Math.trunc(this.engineCacheLimit) || 12),
+        ),
+      },
+    });
     worker.unref();
     worker.on("message", (value: unknown) => this.handleMessage(value));
     worker.on("error", (error) => {

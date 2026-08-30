@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 export interface AiIssueOffsetRange {
   readonly start: number;
   readonly end: number;
@@ -13,6 +20,8 @@ export interface AiIssueEditableSegment {
   readonly sourceStart: number;
   readonly sourceEnd: number;
   readonly editableRanges: readonly AiIssueOffsetRange[];
+  /** Segment-relative protected boundaries approved for punctuation insertion. */
+  readonly editableInsertionOffsets?: readonly number[];
 }
 
 export interface AiAutomaticReviewTarget {
@@ -75,6 +84,9 @@ export function isAiIssueOffsetRangeEditable(
   const relativeStart = range.start - segment.sourceStart;
   const relativeEnd = range.end - segment.sourceStart;
   if (relativeStart === relativeEnd) {
+    if (segment.editableInsertionOffsets?.includes(relativeStart) === true) {
+      return true;
+    }
     const leftEditable = relativeStart > 0 && segment.editableRanges.some(
       (editable) =>
         relativeStart - 1 >= editable.start &&

@@ -1,8 +1,16 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
   AiProseIssue,
+  aiProseCompletionContextAtOffset,
   aiProseSentenceSegments,
   aiProseOffsetToSourceOffset,
   extractAiProseDocument,
@@ -12,6 +20,7 @@ import {
   findAiProseSentenceAtOffset,
   isAiIssueOffsetRangeEditable,
   planAiProseIssues,
+  removeAiCompletionSuffixOverlap,
   selectAiProseSegmentsForDocumentReview,
 } from '../src/core';
 
@@ -278,7 +287,10 @@ test('AI prose extraction preserves math as protected grammatical context', () =
   assert.ok(segment);
   assert.equal(segment.text.length, segment.sourceEnd - segment.sourceStart);
   assert.equal(segment.text.includes(displaySecret), false);
-  assert.match(segment.text, /^Take\n⟦DISPLAYED_FORMULA⟧\s+\nas the starting point\.$/u);
+  assert.equal(
+    segment.text.replace(/\s+/gu, ' ').trim(),
+    'Take ⟦DISPLAYED_FORMULA⟧ as the starting point.',
+  );
   assert.deepEqual(
     aiProseSentenceSegments(document).map((sentence) => sentence.text),
     [segment.text],
@@ -305,6 +317,139 @@ test('AI prose extraction preserves math as protected grammatical context', () =
   ]);
   assert.deepEqual(plan.edits.map((edit) => edit.original), ['Take']);
   assert.deepEqual(plan.rejected, [{ issueIndex: 1, reason: 'protected-source' }]);
+});
+
+test('display-formula punctuation stays in whole-sentence AI context and remains safely editable', () => {
+  const source = String.raw`\begin{equation}\label{eq:S-gamma}
+  \mathcal{S}(t)=\mathcal{R}'(t),
+\end{equation}
+Compare \eqref{eq:S-beta} and \eqref{eq:S-gamma}, we have`;
+  const document = extractAiProseDocument(source);
+  assert.equal(document.segments.length, 1);
+  const segment = document.segments[0];
+  assert.ok(segment);
+  assert.match(
+    segment.text.replace(/\s+/gu, ' ').trim(),
+    /^⟦DISPLAYED_FORMULA⟧, Compare\s+and\s+, we have$/u,
+  );
+  assert.deepEqual(
+    aiProseSentenceSegments(document).map((sentence) =>
+      sentence.text.replace(/\s+/gu, ' ').trim()
+    ),
+    [segment.text.replace(/\s+/gu, ' ').trim()],
+    'a formula-ending comma must keep following prose in the same review sentence',
+  );
+
+  const comma = segment.text.indexOf(',', segment.text.indexOf('⟦DISPLAYED_FORMULA⟧'));
+  const plan = planAiProseIssues(source, segment, [{
+    start: comma,
+    end: comma + 1,
+    original: ',',
+    replacement: '.',
+    category: 'punctuation',
+  }]);
+  assert.equal(plan.rejected.length, 0);
+  assert.equal(plan.edits[0]?.sourceStart, source.indexOf(',', source.indexOf("\\mathcal{S}")));
+});
+
+test('missing display-formula punctuation exposes only one validated insertion boundary', () => {
+  const source = String.raw`\begin{equation}
+  f(x)=x^2
+\end{equation}
+Therefore, the claim follows.`;
+  const document = extractAiProseDocument(source);
+  const segment = document.segments[0];
+  assert.ok(segment);
+  assert.deepEqual(segment.editableInsertionOffsets?.length, 1);
+  const insertion = segment.editableInsertionOffsets?.[0];
+  assert.notEqual(insertion, undefined);
+  const plan = planAiProseIssues(source, segment, [{
+    start: insertion!,
+    end: insertion!,
+    original: '',
+    replacement: ',',
+    category: 'punctuation',
+  }]);
+  assert.equal(plan.rejected.length, 0);
+  assert.equal(
+    plan.edits[0]?.sourceStart,
+    source.indexOf('\n', source.indexOf('f(x)=x^2')),
+    'the punctuation is inserted after the formula body but before \\end',
+  );
+  assert.equal(
+    isAiIssueOffsetRangeEditable(
+      { start: plan.edits[0]!.sourceStart, end: plan.edits[0]!.sourceEnd },
+      document.segments,
+    ),
+    true,
+  );
+  assert.deepEqual(
+    planAiProseIssues(source, segment, [{
+      start: insertion! - 1,
+      end: insertion! - 1,
+      original: '',
+      replacement: ',',
+    }]).edits,
+    [],
+    'nearby protected formula positions must remain immutable',
+  );
+  assert.deepEqual(
+    planAiProseIssues(source, segment, [{
+      start: insertion!,
+      end: insertion!,
+      original: '',
+      replacement: 'therefore',
+    }]).rejected.map((entry) => entry.reason),
+    ['unsafe-replacement'],
+    'the special zero-width slot accepts one punctuation mark, not prose',
+  );
+});
+
+test('inline completion context spans adjacent prose and uses the full bounded suffix budget', () => {
+  const source = [
+    'Earlier context establishes all assumptions.',
+    'The present argument therefore must account for the existing conclusion.',
+    'Later context explains why the conclusion is already present.',
+  ].join('\n\n');
+  const cursor = source.indexOf('must account');
+  const context = aiProseCompletionContextAtOffset(
+    extractAiProseDocument(source),
+    cursor,
+    { maximumPrefixLength: 200, maximumSuffixLength: 200, maximumTotalLength: 400 },
+  );
+  assert.ok(context);
+  assert.match(context.prefix, /Earlier context establishes all assumptions\.[\s\S]*therefore $/u);
+  assert.match(context.suffix, /^must account[\s\S]*Later context explains/u);
+
+  const longSource = 'a'.repeat(20_000);
+  const bounded = aiProseCompletionContextAtOffset(
+    extractAiProseDocument(longSource),
+    13_000,
+  );
+  assert.ok(bounded);
+  assert.equal(bounded.suffix.length, 6_144);
+  assert.equal(bounded.prefix.length, 10_240);
+  assert.equal(bounded.prefix.length + bounded.suffix.length, 16_384);
+});
+
+test('inline completion removes exact text already present after the cursor', () => {
+  assert.equal(
+    removeAiCompletionSuffixOverlap('we have', 'we have already proved the claim'),
+    '',
+  );
+  assert.equal(
+    removeAiCompletionSuffixOverlap(', and therefore we have', 'we have established the bound'),
+    ', and therefore ',
+  );
+  assert.equal(
+    removeAiCompletionSuffixOverlap('existing continuation with extras', 'existing continuation here'),
+    '',
+    'a completion beginning with the existing suffix is rejected instead of duplicated',
+  );
+  assert.equal(
+    removeAiCompletionSuffixOverlap(' gives a sharper estimate', ' than before'),
+    ' gives a sharper estimate',
+  );
 });
 
 test('inline math uses a fixed-width protected placeholder without exposing formula data', () => {
@@ -549,7 +694,7 @@ test('AI prose issue planning rejects edits over protected or multiline source',
   assert.deepEqual(plan.edits, []);
 });
 
-test('AI prose issue planning allows safe zero-width punctuation insertion', () => {
+test('AI prose issue planning rejects an unanchored ordinary-prose insertion', () => {
   const source = 'However this works.';
   const segment = extractAiProseDocument(source).segments[0];
   assert.ok(segment);
@@ -560,9 +705,8 @@ test('AI prose issue planning allows safe zero-width punctuation insertion', () 
     original: '',
     replacement: ',',
   }]);
-  assert.equal(plan.rejected.length, 0);
-  assert.equal(plan.edits[0]?.sourceStart, offset);
-  assert.equal(plan.edits[0]?.sourceEnd, offset);
+  assert.deepEqual(plan.edits, []);
+  assert.deepEqual(plan.rejected, [{ issueIndex: 0, reason: 'protected-source' }]);
 });
 
 test('AI prose issue planning rejects a replacement already present around a truncated range', () => {

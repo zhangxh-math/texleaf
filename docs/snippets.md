@@ -1,6 +1,6 @@
 # TeXLeaf 片段格式
 
-TeXLeaf 的日常入口是 `TeXLeaf: 管理 Snippet 与模板`：它提供结构化搜索、筛选、增删改、trigger 编辑和批量查找替换，不要求用户定位或手写配置文件。扩展内部仍使用一份完整 JSONC 主库，以保留可靠的迁移、导入导出、原字节备份和 Settings Sync 兼容性；首次创建时包含全部 212 条默认规则和 `GREEK`、`SYMBOL`、`MORE_SYMBOLS` 三个变量。只有高级修复或审阅时才需要运行 `TeXLeaf: 打开高级 Snippet JSONC`：
+TeXLeaf 的日常入口是 `TeXLeaf: 管理 Snippet 与模板`：它提供结构化搜索、筛选、增删改、trigger 编辑和批量查找替换，不要求用户定位或手写配置文件。扩展内部仍使用一份完整 JSONC 主库，以保留可靠的迁移、导入导出、原字节备份和 Settings Sync 兼容性；首次创建时包含全部 223 条默认规则和 `GREEK`、`SYMBOL`、`MORE_SYMBOLS` 三个变量。只有高级修复或审阅时才需要运行 `TeXLeaf: 打开高级 Snippet JSONC`：
 
 ```text
 <VS Code 用户数据>/globalStorage/zhangxh-math.texleaf/texleaf-snippets.jsonc
@@ -18,7 +18,7 @@ TeXLeaf 的日常入口是 `TeXLeaf: 管理 Snippet 与模板`：它提供结构
 
 从 0.2.x 升级时，TeXLeaf 会对缺少当前 `defaultsRevision` 的有效全局文件执行一次追加式迁移：保留现有片段和变量，读取一次已移除设置 `texleaf.customSnippets` 的旧用户全局值，再补齐尚不存在的默认定义。对象式且 `snippets` 为数组的 JSONC 会尽量保留注释、未知顶层字段、原顺序和未改动条目的格式；顶层数组或旧字符串格式需要规范化并重新序列化。现有内容优先，工作区级旧设置不会被提升。实际改写之前会创建逐字节备份，因此规范化前的原始内容仍可恢复；标记迁移完成后，用户主动删除的默认项不会在后续启动时重新出现。
 
-工厂迁移 revision 2 会追加缺失的定理类环境，并把仍与旧出厂记录完全一致的 `mode.inline` 触发词从 `mk` 窄迁移为 `lm`。revision 3 只把仍与 revision 2 出厂记录完全一致的 13 个定理片段，从裸 trigger 的手动规则窄迁移为带反斜杠的自动规则，例如 `thm` 变为 `\thm`、`def` 变为 `\dfn`，选项 `tw` 变为 `tAw`。只要记录已被禁用、改名、改写 replacement/选项/说明或分类，就视为用户自定义并保持不动；文件已经标记 revision 3 后，用户删除的默认规则也不会在重启时复活。默认规则总数仍为 212。
+工厂迁移 revision 2 会追加缺失的定理类环境，并把仍与旧出厂记录完全一致的 `mode.inline` 触发词从 `mk` 窄迁移为 `lm`。revision 3 只把仍与 revision 2 出厂记录完全一致的 13 个定理片段，从裸 trigger 的手动规则窄迁移为带反斜杠的自动规则，例如 `thm` 变为 `\thm`、`def` 变为 `\dfn`，选项 `tw` 变为 `tAw`。只要记录已被禁用、改名、改写 replacement/选项/说明或分类，就视为用户自定义并保持不动；文件已经标记 revision 3 后，用户删除的默认规则也不会在重启时复活。当前首次创建与恢复默认使用 223 条工厂规则；revision 3 的窄迁移本身仍不会复活用户已删除的条目。
 
 默认使用 `\dfn` 自动展开 `definition` 环境。所有自动规则仍保留精确 `Tab` 兜底，Suggest 打开时也优先执行与当前输入完全一致的 TeXLeaf trigger。
 
@@ -41,7 +41,7 @@ TeXLeaf 的日常入口是 `TeXLeaf: 管理 Snippet 与模板`：它提供结构
 
 ## 推荐的片段库结构
 
-下面是全局主库的简化对象结构；真实首次文件还包含其余默认变量和 212 条规则。项目附加文件可以省略 `defaultsRevision`，但全局主库应保留它。
+下面是全局主库的简化对象结构；真实首次文件还包含其余默认变量和 223 条规则。项目附加文件可以省略 `defaultsRevision`，但全局主库应保留它。
 
 ```jsonc
 {

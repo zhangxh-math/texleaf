@@ -10,6 +10,7 @@ out/
 coverage/
 .nyc_output/
 .vscode-test/
+.tmp/
 *.vsix
 *.tgz
 *.log

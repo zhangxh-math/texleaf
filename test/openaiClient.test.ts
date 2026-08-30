@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -237,6 +244,8 @@ test('review uses the official Responses API strict structured-output contract',
   assert.match(String(call.body.instructions), /original must be non-empty/u);
   assert.match(String(call.body.instructions), /⟦DISPLAYED_FORMULA⟧/u);
   assert.match(String(call.body.instructions), /meaningful noun phrase or object/u);
+  assert.match(String(call.body.instructions), /whole\s+supplied sentence/u);
+  assert.match(String(call.body.instructions), /missing punctuation mark immediately after a display marker/u);
   assert.match(String(call.body.instructions), /Simplified Chinese/u);
   assert.match(String(call.body.instructions), /Keep replacement in payload\.language/u);
   assert.deepEqual(JSON.parse(String(call.body.input)), {
@@ -258,7 +267,8 @@ test('review uses the official Responses API strict structured-output contract',
   const item = issues.items as Record<string, unknown>;
   assert.equal(item.additionalProperties, false);
   const issueProperties = item.properties as Record<string, Record<string, unknown>>;
-  assert.equal(issueProperties.original?.minLength, 1);
+  assert.equal(issueProperties.original?.minLength, undefined);
+  assert.equal(issueProperties.original?.maxLength, 2_048);
   assert.deepEqual(item.required, [
     'start',
     'end',
@@ -269,6 +279,75 @@ test('review uses the official Responses API strict structured-output contract',
     'category',
     'severity',
   ]);
+});
+
+test('review accepts an exact zero-width formula-punctuation insertion', async () => {
+  const marker = '⟦DISPLAYED_FORMULA⟧';
+  const source = `${marker} Therefore the result follows.`;
+  const offset = marker.length;
+  const mock = fetchQueue(responsePayload(JSON.stringify({
+    issues: [{
+      start: offset,
+      end: offset,
+      original: '',
+      replacement: ',',
+      message: '行间公式末尾缺少逗号。',
+      explanation: '后文仍属于同一句，公式后应使用逗号连接。',
+      category: 'punctuation',
+      severity: 'warning',
+    }],
+  })));
+  const client = new OpenAIClient({ apiKey: 'sk-test', fetch: mock.fetch });
+  const result = await client.review(source);
+  assert.deepEqual(result.issues, [{
+    start: offset,
+    end: offset,
+    original: '',
+    replacement: ',',
+    message: '行间公式末尾缺少逗号。',
+    explanation: '后文仍属于同一句，公式后应使用逗号连接。',
+    category: 'punctuation',
+    severity: 'warning',
+  }]);
+});
+
+test('diagnostic explanations use strict structured output and bounded context', async () => {
+  const mock = fetchQueue(responsePayload(JSON.stringify({
+    explanation: '这条错误表示 TeX 找不到该控制序列。',
+    suggestion: '检查命令拼写，并确认提供该命令的宏包已经加载。',
+  })));
+  const client = new OpenAIClient({ apiKey: 'sk-test', fetch: mock.fetch });
+
+  assert.deepEqual(await client.explainDiagnostic({
+    message: 'Undefined control sequence.',
+    source: 'LaTeX',
+    code: 'undefined-control-sequence',
+    context: '\\begin{document}\n\\badcommand\n\\end{document}',
+  }, { language: 'zh-CN' }), {
+    explanation: '这条错误表示 TeX 找不到该控制序列。',
+    suggestion: '检查命令拼写，并确认提供该命令的宏包已经加载。',
+    model: 'gpt-5.6-luna-2026-08-01',
+  });
+
+  const call = mock.calls[0]!;
+  assert.equal(call.body.max_output_tokens, 2_048);
+  assert.match(String(call.body.instructions), /untrusted data/u);
+  assert.match(String(call.body.instructions), /Do not invent packages/u);
+  assert.deepEqual(JSON.parse(String(call.body.input)), {
+    task: 'explain-latex-diagnostic',
+    language: 'zh-CN',
+    message: 'Undefined control sequence.',
+    source: 'LaTeX',
+    code: 'undefined-control-sequence',
+    context: '\\begin{document}\n\\badcommand\n\\end{document}',
+  });
+  const text = call.body.text as { readonly format: Record<string, unknown> };
+  assert.equal(text.format.type, 'json_schema');
+  assert.equal(text.format.name, 'texleaf_diagnostic_explanation');
+  assert.equal(text.format.strict, true);
+  const schema = text.format.schema as Record<string, unknown>;
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(schema.required, ['explanation', 'suggestion']);
 });
 
 test('rewrite and completion support a custom model, custom HTTPS base, and split output text', async () => {
@@ -328,6 +407,11 @@ test('rewrite and completion support a custom model, custom HTTPS base, and spli
     (mock.calls[1]!.body.text as { format: { name: string } }).format.name,
     'texleaf_completion',
   );
+  assert.match(
+    String(mock.calls[1]!.body.instructions),
+    /suffix is authoritative text that already exists after the\s+cursor/u,
+  );
+  assert.match(String(mock.calls[1]!.body.instructions), /Never repeat words/u);
 });
 
 test('base URL normalization allows HTTPS and loopback HTTP but rejects unsafe forms', async () => {

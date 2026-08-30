@@ -1,6 +1,6 @@
 # TeXLeaf 配置参考
 
-在 VS Code 设置中搜索 `@ext:zhangxh-math.texleaf` 即可修改配置。1.0.0 的 52 个用户可见设置按 **TeXLeaf · 片段**（22 项）、**TeXLeaf · 文献**（9 项）、**TeXLeaf · AI 写作**（14 项）、**TeXLeaf · 预览**（7 项）分成四个原生分类。全部 AI 写作设置都是 application 级，只能由用户/Profile 设置控制；真正联网前仍要求受信任工作区、针对实际接收地址的明确同意，以及 SecretStorage 中该目标专用的 API Key。
+在 VS Code 设置中搜索 `@ext:zhangxh-math.texleaf` 即可修改配置。1.0.0 的 56 个用户可见设置按 **TeXLeaf · 片段**（22 项）、**TeXLeaf · 文献**（9 项）、**TeXLeaf · AI 写作**（14 项）、**TeXLeaf · 可视化编辑器**（4 项）、**TeXLeaf · 预览**（7 项）分成五个原生分类。全部 AI 写作设置与 `texleaf.visualEditor.defaultMode` 都是 application 级，只能由用户/Profile 设置控制；真正联网前仍要求受信任工作区、针对实际接收地址的明确同意，以及 SecretStorage 中该目标专用的 API Key。
 
 ## 设置项
 
@@ -44,13 +44,17 @@
 | `texleaf.aiWriting.completionDelayMs` | 自动行内补全发出请求前的额外等待，默认 500 毫秒。 |
 | `texleaf.aiWriting.maxParagraphLength` | 单个自动检查句子或手动正文段最多发送的 UTF-16 字符数，默认 6000；设置名为兼容旧配置而保留。 |
 | `texleaf.aiWriting.maxDocumentLength` | 手动整篇检查单次最多发送的正文 UTF-16 字符数，默认 30000。 |
+| `texleaf.project.rootFile` | 可选的工作区文件夹相对主 TeX 文件。留空时依次使用有效 `% !TEX root`、当前文件的 `documentclass` 和唯一反向 include；显式值无效时 fail closed，不猜另一个 root。 |
+| `texleaf.visualEditor.defaultMode` | 普通打开 `.tex` 时默认使用 `visual`（默认）或 `source`。这是 application 级用户/Profile 选择；只管理 `*.tex` 的编辑器关联，不改其他文件类型。 |
+| `texleaf.visualEditor.providerCompletions` | 是否通过 VS Code 官方补全提供器命令把安全普通候选与常见 Snippet 桥接到可视化/同标签页源码模式，默认开启。带命令回调、额外编辑或复杂 transform 的候选仍只在“↗ 原生”中使用。 |
+| `texleaf.visualEditor.latexWorkshopCompatibility` | 保存及可视化工具栏命令是否短暂建立 LaTeX Workshop 需要的原生 TextEditor/光标上下文，默认开启。 |
 | `texleaf.mathPreview.enabled` | 内置数学公式预览总开关，默认开启。 |
 | `texleaf.mathPreview.presentation` | 显示方式：光标公式旁的 `cursor`（默认）、原生 `hover`，或 `both`；默认值可避免与其他 LaTeX 扩展重复显示 Hover。 |
-| `texleaf.mathPreview.placement` | `cursor` 浮动卡片的位置：`autoBelow`（默认，优先下方）、`autoAbove`（优先上方）、`above` 或 `below`；两种自动模式在首选侧不足时尝试另一侧，上下都不足时都强制使用上方，并对超高、多行公式保留公式尾部；显式值固定方向。旧值 `auto` 仍按 `autoBelow` 运行，但不再显示在设置选项中。 |
+| `texleaf.mathPreview.placement` | 源码与可视化编辑器共用的光标公式浮动卡片位置：`autoAbove`（默认，优先上方）、`autoBelow`（优先下方）、`above` 或 `below`；两种自动模式在首选侧不足时尝试另一侧，上下都不足时都强制使用上方。可视化编辑器按公式内的精确源码光标锚定卡片，超宽/超高预览用横纵滚动条保持正常字号并自动显示光标；显式值固定方向。旧值 `auto` 仍按 `autoBelow` 运行，但不再显示在设置选项中。 |
 | `texleaf.mathPreview.debounceMs` | 停止输入/移动光标后延迟多少毫秒更新预览，默认 120；大文档自动至少使用 300。 |
 | `texleaf.mathPreview.scale` | 公式 SVG 的显示缩放，默认 1，范围 0.5–3。 |
 | `texleaf.mathPreview.maxSourceLength` | 单条公式送入后台渲染器的最大 UTF-16 字符数，默认 8192，范围 256–32768。 |
-| `texleaf.mathPreview.macros` | 可选的 MathJax 宏对象，键不带反斜杠；文档前言中的受支持宏定义覆盖同名设置。 |
+| `texleaf.mathPreview.macros` | 可选的 MathJax 宏对象，键不带反斜杠；显式设置会覆盖模板能力层的近似兜底，根文档前言中的受支持静态宏定义再覆盖同名设置。 |
 | `texleaf.snippetFiles` | 可选的项目专属附加 JSONC 文件；默认是空数组，相对路径按工作区文件夹解析。全局主文件不需要在这里配置；未信任工作区会忽略项目级值。 |
 | `texleaf.excludedEnvironments` | 禁止自动处理的 LaTeX 环境，例如 verbatim、代码或抄录环境。 |
 | `texleaf.matrixEnvironments` | 被视为矩阵/对齐区域的环境名称列表。 |
@@ -68,7 +72,7 @@
 | `TeXLeaf: 管理 Snippet 与模板` | `texleaf.openSnippetEditor` | 打开结构化管理器，搜索、增删改、批量替换并安全保存当前 Profile 的 Snippet 与模板。 |
 | `TeXLeaf: 管理 TeX 模板` | `texleaf.openTemplateFile` | 打开同一个管理器并直接切到模板页，可修改 trigger 与完整正文。 |
 | `TeXLeaf: 打开高级 Snippet JSONC` | `texleaf.openSnippetFile` | 仅在高级修复、原始审阅或原生 JSONC 工具需要时打开内部后端。 |
-| `TeXLeaf: 恢复默认片段` | `texleaf.restoreDefaultSnippets` | 确认并备份现有文件后，用当前版本的完整 212 条默认规则恢复全局库。 |
+| `TeXLeaf: 恢复默认片段` | `texleaf.restoreDefaultSnippets` | 确认并备份现有文件后，用当前版本的完整 223 条默认规则恢复全局库。 |
 | `TeXLeaf: 重载片段` | `texleaf.reloadSnippets` | 重新读取全局库与当前项目明确配置的附加文件，并刷新诊断。 |
 | `TeXLeaf: 搜索并插入片段` | `texleaf.pickSnippet` | 从可用片段中搜索并插入。 |
 | `TeXLeaf: 切换启用状态` | `texleaf.toggle` | 启用或停用 TeXLeaf，并保存到工作区设置（无工作区时保存到用户设置）。 |
@@ -80,18 +84,45 @@
 | `TeXLeaf: 切换 Math Preview` | `texleaf.toggleMathPreview` | 切换当前资源范围的 Math Preview 总开关。 |
 | `TeXLeaf: 刷新 Math Preview` | `texleaf.refreshMathPreview` | 清除扫描、SVG 和错误缓存，重新渲染当前公式。 |
 | `TeXLeaf: 关闭当前 Math Preview` | `texleaf.dismissMathPreview` | 只隐藏当前 decoration；移动光标或继续编辑后可再次出现。 |
+| `TeXLeaf: 使用可视化编辑器打开` | `texleaf.visualEditor.open` | 用默认的 TeXLeaf Custom Text Editor 打开当前 `.tex`。 |
+| `TeXLeaf: 切换到 LaTeX 源码编辑器` | `texleaf.visualEditor.openSource` | 在同一编辑组打开 VS Code 原生 Text Editor，并保留可视化光标位置。 |
+| `TeXLeaf: 使用 LaTeX Workshop 编译` | `texleaf.visualEditor.build` | 从当前可视化文档建立原生编辑器上下文并调用 `latex-workshop.build`。 |
+| `TeXLeaf: 使用 LaTeX Workshop 查看 PDF` | `texleaf.visualEditor.viewPdf` | 调用 LaTeX Workshop 的 PDF viewer。 |
+| `TeXLeaf: 从可视化光标定位到 PDF` | `texleaf.visualEditor.synctex` | 把可视化编辑器光标桥接到原生选择，再调用 LaTeX Workshop 正向 SyncTeX。 |
 | `TeXLeaf: 切换 AI 写作助手` | `texleaf.aiWriting.toggle` | 显示首次联网与计费确认，并持久启用或关闭总开关。 |
 | `TeXLeaf: 设置当前 AI 服务商 API Key` | `texleaf.aiWriting.setApiKey` | 使用密码输入框，把当前 Provider/规范化 Base URL 的 Key 保存到本扩展环境的 SecretStorage。 |
 | `TeXLeaf: 清除当前 AI 服务商 API Key` | `texleaf.aiWriting.clearApiKey` | 只删除当前 Provider/地址的 Key，并取消请求、清除 AI 问题。 |
 | `TeXLeaf: AI 检查当前段落或选区` | `texleaf.aiWriting.reviewParagraph` | 手动检查当前纯正文选区；没有选区时检查当前段落。 |
 | `TeXLeaf: AI 检查当前文档` | `texleaf.aiWriting.reviewDocument` | 分段检查当前已命名的 `.tex` 编辑器正文，受发送长度上限约束。 |
-| `TeXLeaf: 显示 AI 写作问题列表` | `texleaf.aiWriting.showIssues` | 打开 TeXLeaf 活动栏中的“AI 写作问题”视图，集中查看当前文档的检查状态与建议。 |
+| `TeXLeaf: 在“问题”面板显示 AI 写作问题` | `texleaf.aiWriting.showIssues` | 打开 VS Code 原生 Problems；AI 建议的 source 为 `TeXLeaf AI`，编译诊断继续由 LaTeX Workshop 自己发布。 |
 | `TeXLeaf: 应用当前全部 AI 建议` | `texleaf.aiWriting.applyAll` | 确认并重新校验后，一次应用当前文档中全部仍然安全有效的建议。 |
 | `TeXLeaf: AI 改写选区或当前句` | `texleaf.aiWriting.rewriteSelection` | 改写连续纯正文；遇到受保护的 TeX 标记时拒绝整段替换。 |
 | `TeXLeaf: 触发 AI 行内补全` | `texleaf.aiWriting.triggerCompletion` | 调用 VS Code 原生 Inline Suggest，按当前光标正文请求续写。 |
 | `TeXLeaf: 清除 AI 写作问题` | `texleaf.aiWriting.clearDiagnostics` | 清空当前保存的 AI 问题标记和本机恢复快照，不修改正文；命令 ID 为兼容旧版保持不变。 |
 
-表中列出的是正常需要从 Command Palette 运行的功能命令。`texleaf.handleTab`、`texleaf.matrixEnter`、`texleaf.handleSpace`、`texleaf.deleteEmptyMathDelimiters` 等编辑器动作由 when context 和键位调用；`texleaf.aiIssues.reveal`、`texleaf.aiIssues.apply`、`texleaf.aiIssues.ignore` 仅供受控问题树、Hover 与 Quick Fix 入口使用，并在 Command Palette 中隐藏，不应作为外部自动化 API。
+表中列出的是正常需要从 Command Palette 运行的功能命令。`texleaf.handleTab`、`texleaf.matrixEnter`、`texleaf.handleSpace`、`texleaf.deleteEmptyMathDelimiters` 等编辑器动作由 when context 和键位调用；`texleaf.aiIssues.reveal`、`texleaf.aiIssues.apply`、`texleaf.aiIssues.ignore` 是旧入口兼容转发命令，只供 Problems 建议卡、Hover 与 Quick Fix 的内部路径使用，并在 Command Palette 中隐藏，不应作为外部自动化 API。
+
+## 可视化编辑器配置与兼容边界
+
+TeXLeaf 以 `priority: default` 为 `*.tex` 注册 `texleaf.visualEditor`，因此 `texleaf.visualEditor.defaultMode=visual` 时，新打开的 `.tex` 默认进入可视化编辑器；选择 `source` 会在用户/Profile 层把 `*.tex` 关联到 VS Code Text Editor。重置该设置时，TeXLeaf 只移除自己曾写入的关联，不删除用户为其他编辑器建立的关联。公式范围仍由 TeXLeaf 的注释、verb/verbatim、数学环境和前言宏安全扫描器识别；只渲染已经闭合、位于文档正文且没有超过 `texleaf.mathPreview.maxSourceLength` 的公式。公式 SVG 继续在有超时、队列和输出上限的后台 MathJax Worker 中生成，Webview 不执行公式返回的 HTML 或脚本。
+
+多文件项目仍以每个物理 `TextDocument` 为唯一可编辑真源，不把多个文件拼接成虚拟文档。项目上下文优先读取打开且尚未保存的缓冲区，再读取 Workspace FS；只跟随有界、字面量且未越出当前 workspace folder 的 `input`、`include`、`subfile`、`import` 和 `subimport`。根识别依次考虑 `texleaf.project.rootFile`、有效 magic root、`subfiles` 文档类的字面主文件参数、本文件文档类及唯一反向可达根；相对配置按当前文件所属 workspace folder 解析。正文 fragment 会继承根文档的语言、chapter/section 层级和安全导言宏；项目 label 索引为 `\ref` / `\eqref` 提供跨文件补全、悬停目标预览与物理文件跳转。动态 TeX 路径、循环、缺失文件、重复执行、重复 label 或根歧义会降级并停止猜测，不执行 class、package 或任意 TeX 宏来发现依赖。
+
+静态 include 路径模型为每个执行 occurrence 携带独立路径状态：普通 `\input` / `\include` 按语义主文件的构建目录及当前有序导入搜索目录解析，`\import` 从主文件目录建立导入根，`\subimport` / `\subfile` 继承当前导入目录；反向 root discovery 对每个 `documentclass` 候选复用同一 resolver、源码顺序与共享 document 阶段做有界正向可达性验证。因此嵌套普通 input、同一物理文件在不同 import occurrence 下的后继、完整 document wrapper 的终止，以及 dirty buffer 中刚改动的依赖都不会再按 containing-file 目录或独立 DFS 猜测。`subfiles` 正文 occurrence 会忽略子文件独立编译导言；`\endinput`、`\end{document}`、常见 opaque 环境和无法证明的条件分支都形成保守执行边界。它仍没有模拟 `\input@path`、TEXINPUTS/kpathsea、`\includeonly`、宏生成路径或真实 TeX 条件执行；遇到未知条件、动态目标、读取/数量/深度边界或候选根不唯一时会标记 incomplete/unresolved。工作区边界仍是 scheme、authority 和 URI path 的词法 containment；本地 symlink/junction 的真实路径 containment 尚未建模。
+
+Math Preview 的项目入口环境按模板 capability、显式 `texleaf.mathPreview.macros`、展开后的根导言依次合并，当前文件的安全顶层静态定义再按 source offset 应用；`\providecommand` 保留 TeX 的“不覆盖”语义。公式原位替换、光标卡片、表格/TikZ 结构数学与虚拟结构编辑请求都会绑定当前 project context、文档 revision 和位置宏环境，过时结果不能跨根或跨代次回写。常见局部分组与已知条件区中的定义不提升为全局宏；无法证明安全的定义、正文文件之间的运行时宏传播、class/package 执行与任意 TeX 展开仍会保留源码或降级。正文 fragment 没有新鲜构建 counter state 时只显示结构标题，不伪造跨文件章节、定理或公式编号。
+
+选择区与某条公式相交时，该公式保持源码，并按 `texleaf.mathPreview.placement` 在精确源码光标附近显示不占正文行高的浮动 Math Preview；选择区完全离开后才恢复原位替换部件。点击部件会把光标放入精确 `bodyRange`。SVG 使用主题跟随色和 Worker 返回的固有几何；普通块公式不会因总宽或总行数被预先缩小，正文中的纵向多行公式直接以完整固有高度撑开且不建立公式内部滚动框。浮动 Math Preview 因为不参与正文布局，仍保留有边界的横纵滚动视口并自动追踪光标。只有异常到数百 `em` 的 Worker 几何才触发绘制安全上限。可见块由浏览器完成字体排版后交给 `ResizeObserver` 读取真实像素宽高，并触发 CodeMirror measure pass，因此图形位置、行高和鼠标命中范围不会依赖固定字号估算。只有尚未进入视口的虚拟化内容使用 CodeMirror 的短期占位几何，首次显示后立即以实测值替换。视口只请求附近有限数量的公式，滚动和文档版本变化会取消旧代次；渲染失败的公式保留源码，不用错误占位覆盖作者文字。
+
+文档结构扫描独立识别 `\begin{document}` 前的导言区、`\title` / `\author` / `\date` / `\maketitle`、part 至 subparagraph 各级标题、内置与 `\newtheorem` 定理定义、proof、三类标准列表、citation、`\ref` / `\eqref`、`\label`、`\bibliography` / `\addbibresource` / `\printbibliography`、`thebibliography`、table/tabular 家族和独立图片命令。导言区默认折叠，展开后仍是同一份可编辑高亮源码；折叠时若光标位于将被隐藏的范围，会安全移到正文起点。表格卡片按可安全识别的行列提供语义预览，但不执行任意宏，也不承诺复刻 `multicolumn`、列宽或最终 PDF。图片预览只解析当前文档目录或工作区内、能被 Webview 安全读取的 `.png` / `.jpg` / `.jpeg` / `.gif` / `.webp` / `.bmp` / `.avif`；无法解析、超出允许根、远程地址、PDF/EPS/SVG 等保留可编辑源码或占位提示。外部 `.bib` 只读预览复用现有工作区内相对路径校验，点击“打开 .bib”才进入正常编辑流程；结构样式是编辑辅助，不承诺复刻文档类、计数器或最终 PDF 的全部排版细节。
+
+Custom Text Editor、其同标签页源码模式和另开的原生源码编辑器共享一个 VS Code `TextDocument`。工具栏“源码模式”只在当前 Webview 内重新配置 CodeMirror：隐藏结构/公式替换，显示完整 LaTeX，继续提供随 VS Code 主题动态更新的语法颜色和活动 Math Preview；再次点击“可视化模式”原位恢复。把同一 `.tex` 的原生源码视图和可视化视图同时放在不同编辑组时，源码侧修改会经文档变化事件推送给全部可视化实例；Webview 编辑则经过有序、版本化且有范围/总量上限的 `WorkspaceEdit` 回写，因此原生源码视图立即看到同一改动。主机同步事务不会被 Webview 再次回传，避免更新循环；快速冲突或过时消息会拒绝猜测性合并，并以当前 `TextDocument` 重新同步。所有视图共享 dirty 状态、保存结果和原生 Undo/Redo 历史。自动片段响应还会核对 client revision、原始匹配文本和每个外层括号修饰范围，过时响应直接失效。可视化模式使用与源码模式相同的 SnippetRuntime、TemplateManager、分子边界、Tabout、自动括号放大和 LaTeX 上下文扫描结果；CodeMirror 只负责即时括号、选择与可导航占位符。外部修改、保存和原生 Undo/Redo 后会重新同步整份文档。
+
+LaTeX Workshop 10.18 没有对外返回编译 API，并且其公开 build/view/synctex 命令要求 `window.activeTextEditor`。兼容桥只调用这些公开命令：先在同一编辑组短暂显示原生文档并还原当前选择，待命令取得上下文后返回可视化面板。保存时也这样处理，默认 `onFileChange` 自动构建会保留约 400 ms 的原生上下文，因此可能看到短暂切换；可关闭 `texleaf.visualEditor.latexWorkshopCompatibility`，再手动进入源码模式运行 LaTeX Workshop。
+
+Webview 本身仍不是原生 Monaco `TextEditor`。可视化模式已经支持 TeXLeaf 自动/手动/Visual 片段、模板、Tab 占位符、自动分数/括号放大、Tabout、matrix/align 键位、结构预览、引用选择与导入、AI 检查标记和操作，以及显式“AI 续写”。开启 `texleaf.visualEditor.providerCompletions` 后，Webview 会调用 VS Code 官方 `vscode.executeCompletionItemProvider`，把 TeXLeaf、LaTeX Workshop 等已注册 Provider 返回的普通文本和常见 Snippet 候选显示在主题跟随的 CodeMirror 补全框中；自动触发和 `Ctrl+Space` 都受版本、选区、范围、长度与上下文校验。候选若含命令回调、`additionalTextEdits`、多行替换范围或复杂 Snippet transform 会 fail closed 跳过，因为这些行为无法在非 Monaco 宿主中原样提交。Hover、Code Action、Inline Suggest、扩展专属键位、完整原生 Suggest 交互和 TeXLeaf 自动浮现的 AI 灰字仍需工具栏“↗ 原生”或命令 `TeXLeaf: 切换到 LaTeX 源码编辑器`。同标签页“源码模式”提供完整源码、高亮和 Math Preview，但不会伪装成 Monaco Provider 宿主。所有模式始终编辑同一份文本。
+
+可视化 Webview 的 `html`、`body`、编辑器和 gutter 表面都保持透明，正文和结构字体继承 VS Code 的 `editor.fontFamily`、`editor.fontSize`、`editor.lineHeight`，主题色也全部通过 `--vscode-*` 变量解析。因此 VS Code 主题、字号和行高变化会即时参与重绘/重测；用户通过工作台样式扩展放在编辑器层后的背景通常可以透出。若某个背景扩展只向 Monaco 私有 DOM 注入图片，而没有绘制在 Custom Editor 后方，VS Code 不会向 TeXLeaf 暴露该私有图片地址，TeXLeaf 无法安全复制它；此时仍可用“↗ 原生”看到原生背景。
 
 ## AI 写作配置与行为
 
@@ -109,25 +140,25 @@ ChatGPT Plus/Pro、Codex 使用额度与 OpenAI API 是彼此独立的产品和�
 
 ### Grammarly 风格检查
 
-自动模式在停止键入后优先检查本次改动的正文句子；没有改动句子待处理时，纯光标导航才会选择光标附近句子。返回问题由编辑器装饰线标出；TeXLeaf 专用 Hover 提供分类、解释、替换预览和“应用这条建议”链接，活动栏问题树保留真实严重性，Hover 链接与灯泡 Quick Fix 都在应用前重新验证文档版本、问题身份、范围、exact `original` 和可编辑正文。Hover 只信任 TeXLeaf 白名单中的内部应用命令，模型文字不能构造或执行命令。AI 问题不发布为 VS Code 原生 Diagnostic，也不会出现在 Problems，从而避免重复 Hover 与 Error/Warning accessibility signal；TeXLeaf 本身不包含或播放音频。本次会话可以忽略单条建议；手动清除问题不会修改文件。显式检查多段选区或整篇文档会按正文段顺序运行，并在达到 `maxDocumentLength`、单段长度或单次 32 个正文段时停止并提示，而不是偷偷发送超出范围的内容；这一独立段数上限可防止大量极短正文段产生无界的付费请求。响应顶层不是合法的受限 `issues` 数组时整批失败；数组中只有个别条目无效时则逐条丢弃，独立且不重叠的有效条目仍可进入装饰线、Hover 与问题树。
+自动模式在停止键入后优先检查本次改动的正文句子；没有改动句子待处理时，纯光标导航才会选择光标附近句子。经过本地校验的问题通过独立 DiagnosticCollection 发布到 VS Code 原生 Problems，source 为 `TeXLeaf AI`，同时保留编辑器装饰线、TeXLeaf 专用 Hover、建议卡与灯泡 Quick Fix。点击 Problems 条目会打开正确物理文档、定位准确行列并显示分类、解释、`原文 → 替换` 和应用/忽略操作。所有应用入口都在写入前重新验证文档版本、问题身份、范围、exact `original` 和可编辑正文；忽略只消费当前会话中的该条建议。模型文字不能构造或执行命令。TeXLeaf 不包含或主动播放音频，但 VS Code 可按用户的原生 Diagnostic 辅助功能设置播报。手动清除问题不会修改文件。显式检查多段选区或整篇文档会按正文段顺序运行，并在达到 `maxDocumentLength`、单段长度或单次 32 个正文段时停止并提示，而不是偷偷发送超出范围的内容；这一独立段数上限可防止大量极短正文段产生无界的付费请求。响应顶层不是合法的受限 `issues` 数组时整批失败；数组中只有个别条目无效时则逐条丢弃，独立且不重叠的有效条目仍可进入 Problems、装饰线、Hover 与 Quick Fix。
 
 问题类别包括拼写、语法、标点、清晰度、措辞与风格。模型建议不是编译器或人工编辑结论，技术术语、专名和领域惯例可能被误报；应用前仍需作者审阅。网络、超时、余额、限流、无效 JSON 或服务端错误不会自动修改正文；批量检查中此前已经成功的句子/正文段仍保留在问题列表，后续失败不会回滚这些结果。
 
-### 活动栏问题列表与批量应用
+### 原生 Problems 与批量应用
 
-TeXLeaf 活动栏中的“AI 写作问题”视图只展示当前活动 `.tex` 文档。它会显示检查中、已调度、AI 未启用、没有可审阅问题，以及“多少个改动句子等待局部复检；其他问题仍保留”等状态；每条建议包含行号、类别、真实严重性、`原文 → 替换` 与解释。点击建议会把对应范围滚动到可见区域，并叠加主题自适应背景与轮廓；其他问题仍保留下划线。这个选中高亮不移动编辑器主光标、不夺走问题列表焦点，也不发布 Diagnostic 或触发对应音效。安全平移时它按稳定 issue lineage 跟随当前问题；应用、忽略、清除、失效或关闭 AI 后自动清除。单条建议可从上下文菜单应用或在本次会话忽略。状态栏中的 TeXLeaf AI 项和命令 `texleaf.aiWriting.showIssues` 都可以打开该视图。
+TeXLeaf 通过独立 DiagnosticCollection 把 AI 建议发布到 VS Code 原生 Problems，source 固定为 `TeXLeaf AI`；不再注册活动栏“文档问题”视图。LaTeX Workshop 的编译 Diagnostic 直接出现在同一面板，但其创建、替换、排序和清理完全由 LaTeX Workshop 负责，TeXLeaf 不复制、不解释也不加入 AI 队列。AI 的检查中、已调度和等待局部复检状态显示在 TeXLeaf AI 状态栏；每条安全建议在 Problems 中携带准确 URI、行列、类别消息和严重性。状态栏和 `texleaf.aiWriting.showIssues` 都会打开原生 Problems。
 
-点击问题树中的条目只滚动到对应范围，不移动主光标或夺走列表焦点。装饰线不带内置消息或严重性，专用 Hover 是唯一的详细悬停卡片；因此不会与 VS Code 原生诊断 Hover 重复。0.8.9 起可以直接点击 Hover 中的“应用这条建议”；该链接与 Quick Fix 使用同一安全应用路径，问题内容和应用前严格校验不受入口差异影响。
+点击 Problems 中的条目会移动原生选择到对应范围；可视化编辑器通过桥接消息定位同一 CodeMirror 逻辑范围，并显示 TeXLeaf 建议卡。专用 Hover、建议卡和 Quick Fix 使用同一个 opaque issue ID；应用前的严格校验不受入口差异影响，忽略只影响本次扩展宿主会话。TeXLeaf 不再注册独立“文档问题”侧栏，也不复制 LaTeX Workshop 的编译 Diagnostic。
 
-Windows 的微软拼音在中文模式下会把 `Ctrl+.` 用于切换中英文标点，按键可能不会到达 VS Code；这不是 TeXLeaf 没有生成 Quick Fix。可以按 `Shift` 切到英文输入模式后再按 `Ctrl+.`，或通过 `F1` / Command Palette、右键菜单运行“快速修复...”、点击灯泡或使用 Hover 的“应用这条建议”。TeXLeaf 不新增或接管其他系统级快捷键。
+Windows 的微软拼音在中文模式下会把 `Ctrl+.` 用于切换中英文标点，按键可能不会到达 VS Code；这不是 TeXLeaf 没有生成 Quick Fix。可以按 `Shift` 切到英文输入模式后再按 `Ctrl+.`，或通过 `F1` / Command Palette、右键菜单运行“快速修复...”、点击灯泡或使用 Hover 的“应用修改”。TeXLeaf 不新增或接管其他系统级快捷键。
 
-视图工具栏与命令 `texleaf.aiWriting.applyAll` 可以应用当前全部建议。TeXLeaf 会先显示模态确认，再重新核对文档版本、每一条范围与原文以及建议之间是否重叠；校验失败时整批不修改，避免把已经过期的建议应用到新正文。单条 Quick Fix 或整批 WorkspaceEdit 成功后，对应问题会立即从当前状态和持久缓存中消费，不依赖另一个异步文档变更回调代为清理。模型提供的文字只作为不受信任文本显示，不会作为可执行 Markdown 命令运行。
+命令 `texleaf.aiWriting.applyAll` 可以应用当前全部建议。TeXLeaf 会先显示模态确认，再重新核对文档版本、每一条范围与原文以及建议之间是否重叠；校验失败时整批不修改，避免把已经过期的建议应用到新正文。单条 Quick Fix 或整批 WorkspaceEdit 成功后，对应问题会立即从当前状态、DiagnosticCollection 和持久缓存中消费，不依赖另一个异步文档变更回调代为清理。模型提供的文字只作为不受信任文本显示，不会作为可执行 Markdown 命令运行。
 
-增量算法已经证明未受影响、仅因前方编辑而平移的问题会保留稳定的 lineage ID；它们的文档版本、范围、UTF-16 offset 与安全 fingerprint 仍按当前正文更新。这样已经渲染的问题树节点或 Quick Fix 不会仅因绝对位置改变而失效，应用时仍必须通过当前范围、exact `original` 与 editable prose 校验。真正过期的旧节点会让 TeXLeaf 刷新问题列表，并只在状态栏短暂提示“问题列表已更新；旧建议已失效”，不再弹出误导性的“文档已变化”通知，也不会播放音效。
+增量算法已经证明未受影响、仅因前方编辑而平移的问题会保留 stable lineage ID；它们的文档版本、范围、UTF-16 offset 与安全 fingerprint 仍按当前正文更新。这样已经渲染的 Quick Fix 或建议卡不会仅因绝对位置改变而失效，应用时仍必须通过当前范围、exact `original` 与 editable prose 校验。真正过期的旧入口会让 TeXLeaf 刷新 Problems 和装饰状态，并只在状态栏短暂提示“问题列表已更新；旧建议已失效”，不再弹出误导性的“文档已变化”通知。
 
 “应用全部”在确认前捕获当前安全问题的稳定 ID；确认后从最新状态逐条重新解析这些 ID，再复核文档版本、范围、原文和重叠。内部创建了内容等价的新状态对象不会单独导致失败；任一捕获问题已移除、失效或无法唯一解析，或者文档版本、范围、原文或重叠校验不再成立时仍整批停止，不进行部分修改。确认后才出现的其他问题不属于这一批。
 
-如果提示“42 条可审阅，另安全忽略 20 条”，含义是模型候选中有 42 条完成了精确、无歧义的本地映射，另有 20 条因完全重复、范围重叠、字段无效、找不到原文或无法唯一定位而 fail closed 丢弃。这个计数不是 API Key、余额、认证或网络错误；被忽略的候选和仅显示在列表中的建议都不会自动修改原文。视图会用不含论文内容的拒绝摘要显示安全忽略数量。
+如果提示“42 条可审阅，另安全忽略 20 条”，含义是模型候选中有 42 条完成了精确、无歧义的本地映射并进入 Problems，另有 20 条因完全重复、范围重叠、字段无效、找不到原文或无法唯一定位而 fail closed 丢弃。这个计数不是 API Key、余额、认证或网络错误；被忽略的候选和仅显示在 Problems 中的建议都不会自动修改原文。状态/通知与 Output 只用不含论文内容的拒绝摘要显示安全忽略数量。
 
 ### 自动检查调度
 
@@ -141,9 +172,9 @@ Windows 的微软拼音在中文模式下会把 `Ctrl+.` 用于切换中英文�
 
 所有联网入口同时要求：当前 VS Code 窗口受信任、文档是已经有文件名和路径的本地 `file:` 或 Remote/WSL/Dev Container `vscode-remote:` `.tex`、language ID 为 `latex`/`tex`、扩展和 AI 总开关均开启、当前目标已经独立 consent，且 SecretStorage 中存在该目标自己的 Key。这里“已命名”不等于编辑器当前没有修改：自动检查和补全会读取当前内存文本，因此可能发送尚未按 `Ctrl+S` 写入磁盘的最新正文。`.bib`、untitled、Git/其他虚拟 URI、未信任窗口、数学区域、注释和代码环境不会成为请求正文。
 
-提取器在本地用等长空格遮罩注释、`verb`/`verbatim`/`minted`/`lstlisting`、citation/ref/label/URL/路径/文件参数、未知宏的强制参数，以及代码和未知环境的内容；只有 `section`、`caption`、`footnote`、`emph`、`textbf`、`textit` 等明确正文命令保留可读参数。数学范围则替换为受保护、不可编辑、与源码 UTF-16 等长的语义占位符；公式内容不会发送，模型只知道此处存在一个 inline/display formula，并被明确要求把它视为上下文中的名词短语或宾语，不能把 `Take` 后的行间公式误报为缺少宾语，也不能把占位符或 padding 放进 `original`/`replacement`。模型被要求返回零基 UTF-16 offset，但 TeXLeaf 也能对模型常见的 Unicode code point、UTF-8 byte 与把 CRLF 视为一个换行的计数差异做有限重定位。无论采用哪种坐标解释，`original` 都必须是非空、单行的原文锚点并逐字对应一个无歧义的源码范围；如果上报范围不吻合，只允许回退到全文中唯一的逐字匹配。重复文本或多种解释指向不同位置时按歧义拒绝，不做 Unicode、大小写、引号、空白或换行内容归一化，也不做模糊匹配。Review 合约要求 `message` 与 `explanation` 使用简体中文，`replacement` 保持 `payload.language` 与来源正文的原语言。纯插入必须表示为带相邻不变原文的非空范围，并在 replacement 中保留锚点，不能使用零长度 `original`；本地验证非空 exact 锚点和 replacement 安全字符，但不会要求所有普通替换都包含 original。如果当前源码已由候选的 `original` 范围加紧邻上下文组成完整 `replacement`，则说明模型给出了会重报既有正文的截短范围，该条会被拒绝。通过定位后的建议还必须全部落在可编辑区、与其他保留建议互不重叠，并且 replacement 不含换行、反斜杠、美元号、百分号或花括号，才会进入 UI。
+提取器在本地用等长空格遮罩注释、`verb`/`verbatim`/`minted`/`lstlisting`、citation/ref/label/URL/路径/文件参数、未知宏的强制参数，以及代码和未知环境的内容；只有 `section`、`caption`、`footnote`、`emph`、`textbf`、`textit` 等明确正文命令保留可读参数。数学范围则替换为受保护、不可编辑、与源码 UTF-16 等长的语义占位符；公式内容不会发送，模型只知道此处存在一个 inline/display formula，并被明确要求把它视为上下文中的名词短语或宾语，不能把 `Take` 后的行间公式误报为缺少宾语，也不能把占位符或 padding 放进 `original`/`replacement`。行间公式末尾已有的 `,.;:!?` 或中文标点会保留在遮罩正文中供句法审阅：逗号和分号表示后文仍属于同一句，只有终止标点才开始新句；如果公式缺少上下文要求的标点，本地只开放公式正文末端、结构性 `\\` 与 `\end` 之前的一个零宽插入边界。模型被要求返回零基 UTF-16 offset，但 TeXLeaf 也能对普通非空修改中常见的 Unicode code point、UTF-8 byte 与把 CRLF 视为一个换行的计数差异做有限重定位。普通 `original` 必须是非空、单行的原文锚点并逐字对应一个无歧义的源码范围；如果上报范围不吻合，只允许回退到全文中唯一的逐字匹配。重复文本或多种解释指向不同位置时按歧义拒绝，不做 Unicode、大小写、引号、空白或换行内容归一化，也不做模糊匹配。Review 合约要求 `message` 与 `explanation` 使用简体中文，`replacement` 保持 `payload.language` 与来源正文的原语言。一般纯插入必须表示为带相邻不变原文的非空范围并在 replacement 中保留锚点；只有“行间公式缺少标点”可使用 `start === end`、空 `original` 和单个所需标点，而且必须按原始 UTF-16 坐标精确命中上述批准边界，不进行坐标猜测或唯一文本回退。如果当前源码已由候选的 `original` 范围加紧邻上下文组成完整 `replacement`，则说明模型给出了会重报既有正文的截短范围，该条会被拒绝。通过定位后的建议还必须全部落在可编辑区、与其他保留建议互不重叠，并且 replacement 不含换行、反斜杠、美元号、百分号或花括号，才会进入 UI。
 
-句子改写只允许连续纯正文范围，避免整句替换时抹掉不可见的 LaTeX 标记。行内补全只在当前行的零宽光标范围插入经过同类字符校验的 suffix；原生 Suggest 已选中候选、光标处于数学/命令区域、请求被编辑取消或文档版本变化时不显示结果。
+句子改写只允许连续纯正文范围，避免整句替换时抹掉不可见的 LaTeX 标记。行内补全只在可编辑正文的零宽光标范围插入经过同类字符校验的纯文本。默认上下文会跨相邻遮罩正文段读取光标两侧，合计最多 16,384 个 UTF-16 单元：后文优先保留最多 6,144，前文使用剩余预算且不超过 12,288。Provider 被明确要求把 suffix 当作已经存在、不得重复的权威后文；返回后本地还会删除精确尾首重叠，若建议以较长既有后文开头则整条安全丢弃。原生 Suggest 已选中候选、光标处于数学/命令区域、请求被编辑取消或文档版本变化时不显示结果。
 
 ### 性能与隐私边界
 
@@ -205,13 +236,13 @@ Better BibTeX 路径使用其返回的权威 `citekey`；官方 Local API 回退
 
 ## Math Preview 配置与行为
 
-`cursor`/`both` 模式的预览卡片在安全 SVG 内绘制圆角背景、边框与内边距。卡片底色在深浅主题中均为 100% 不透明，并位于源代码文字之上。公式光标显示为与公式前景明显区分的窄竖线：深色主题为高亮青色，浅色主题为鲜明洋红色。深色公式使用纯白矢量路径、深色实底和 SVG `geometricPrecision` 渲染提示；没有用会同时破坏分数线、根号和定界符的全局描边。光标位于 TeX 语法结构内部时会吸附到最近的安全排版边界；若标记版本不能渲染，则自动显示不带标记的原公式。
+`cursor`/`both` 模式的预览卡片在安全 SVG 内绘制圆角背景、边框与内边距。卡片底色在深浅主题中均为 100% 不透明，并位于源代码文字之上。公式光标显示为与公式前景明显区分的窄竖线：深色主题为亮洋红色，浅色主题为高亮蓝色；可视化编辑器还为它增加静态描边与柔和阴影，不使用会造成闪烁的动画。深色公式使用纯白矢量路径、深色实底和 SVG `geometricPrecision` 渲染提示；没有用会同时破坏分数线、根号和定界符的全局描边。光标位于 TeX 语法结构内部时会吸附到最近的安全排版边界；若标记版本不能渲染，则自动显示不带标记的原公式。
 
 Math Preview 只对已保存的 `.tex` 文件和 `latex`/`tex` language ID 生效。它复用 TeXLeaf 的 LaTeX 扫描状态机识别 `$…$`、`$$…$$`、`\(…\)`、`\[…\]` 和常见数学环境，并跳过注释、`\verb` 以及排除环境。嵌套的 `align`/`cases`/matrix 等区域只生成一个最外层预览，避免重复装饰；尚未输入闭合分隔符时，可以按光标位置生成临时闭合的编辑中预览。
 
-默认 `cursor` 模式只渲染主光标所在的一个公式。行内公式的浮动卡片跟随活动源码行：光标仍在公式起始行时对齐 `$` 或 `\(` 的反斜杠；进入后续源码行时改为对齐该行首个非空白字符，保留缩进但不跟随光标横坐标。默认 `autoBelow` 优先把卡片放在该行下方，`autoAbove` 则优先放在上方。行间公式对齐 `$$`、`\[` 或 `\begin{…}` 的真实起始定界符列，并补偿跨行缩进和 Tab 差异。VS Code 公共扩展 API 不公开编辑器内容区的实时像素宽度，所以超宽卡片的右端可能被编辑器裁切；插件不会用窗口宽度猜测代替编辑器宽度。浮动卡片不参与源代码行宽和自动换行计算，因此在公式后继续输入不会被卡片推挤、折行或叠到一起。
+默认 `cursor` 模式只渲染主光标所在的一个公式。普通公式按整个公式环境的外边界排版：优先直接放在 `\begin` 上方，上方放不下时放到 `\end` 下方，并维持原有约 `0.75em` 的间距（可视化编辑器为 12px）。只有预览在环境上方、下方都无法完整容纳时，才进入环境内部跟随活动源码行，并使用固定 `50px` 的纵向间距。行内公式的左边框仍跟随活动源码行：光标在起始行时精确对齐 `$` 或 `\(`，进入后续行时对齐该行首个非空白字符。行间公式对齐 `$$`、`\[` 或 `\begin{…}` 的真实起始定界符列，并补偿跨行缩进和 Tab 差异；超高卡片进入内部模式后，左边框固定回最外层 `\begin`/起始定界符列。VS Code 公共扩展 API 不公开编辑器内容区的实时像素宽度，所以超宽卡片的右端可能被编辑器裁切；插件不会用窗口宽度猜测代替编辑器宽度。浮动卡片不参与源代码行宽和自动换行计算，因此在公式后继续输入不会被卡片推挤、折行或叠到一起。
 
-`texleaf.mathPreview.placement` 提供两种空间感知模式。默认 `autoBelow` 先尝试下方，下方无法完整容纳预览时改到上方；`autoAbove` 先尝试上方，上方不足时改到下方。两种模式只有在另一侧能够完整容纳时才换边；如果上下都不足，都强制选择上方，并共用超高、多行公式的末尾保留策略，使预览底部和公式源码最后几行尽量同时留在视口内。`above` / `below` 则严格固定方向，不因可见空间自动改写。为兼容已有用户设置，旧值 `auto` 在运行时仍映射为 `autoBelow`，但 manifest 不再把它列为可选值。正常高公式不会压缩到旧的 8em 上限；仅当宽度超过 40em 时等比缩放，并保留 256em 的异常几何安全上限。
+`texleaf.mathPreview.placement` 提供两种空间感知模式。默认 `autoAbove` 先尝试上方，上方无法完整容纳预览时改到下方；`autoBelow` 先尝试下方，下方不足时改到上方。两种模式只有在另一侧能够完整容纳时才换边；如果上下都不足，都强制选择上方，并共用超高、多行公式的末尾保留策略，使预览底部和公式源码最后几行尽量同时留在视口内。可视化编辑器展开公式时以公式内当前源码光标的真实 DOM 纵坐标作为卡片锚点，所以几十行的 `align` 可以在当前行附近自动置于上方或下方，不必把整张卡片排到 `\begin` 之前或 `\end` 之后；横坐标按上一段的定界符/活动行/超高公式规则独立计算。浮动 Math Preview 本身始终是有边界的双向滚动视口，不会缩放内部 SVG；每次完成 SVG 与 Tooltip 布局后都会再次测量鲜艳光标标记，并把它横向、纵向滚到视口中央附近。与此相反，文档正文中未展开的块公式按编辑器字号和完整固有高度直接撑开，不设置 `max-height`，不建立公式内部滚动框，也不再使用旧的 `36em` 资产预缩放；只保留 512em × 256em 的异常几何绘制安全上限。`above` / `below` 则严格固定方向，不因可见空间自动改写。为兼容已有用户设置，旧值 `auto` 在运行时仍映射为 `autoBelow`，但 manifest 不再把它列为可选值；非法或缺失的新值回退到 `autoAbove`。
 
 0.8.11 的 `cursor` / `both` 使用 last-known-good（stale-while-revalidate）：防抖和后台渲染期间保留上一张有效卡片，通过单一稳定 decoration 原位换帧；临时不完整 TeX 或渲染失败有 750 ms 宽限，Hover SVG 只在实际请求 Hover 时写入扩展私有缓存。离开公式、禁用预览、运行“关闭当前 Math Preview”，或停在无效状态超过宽限仍会清理旧卡片。纯 `hover` 继续由 VS Code 控制生命周期，输入时可能自行关闭；连续输入不闪烁的保证针对 cursor decoration。
 
@@ -219,7 +250,7 @@ VS Code 稳定扩展 API 没有可供此功能使用的公开 view-zone 或任�
 
 TeXLeaf 使用离线打包的 MathJax SVG 渲染器和 New Computer Modern 字体。MathJax 在首次需要公式时才在独立 Node Worker 中载入，主扩展线程不执行排版。扫描结果按 `TextDocument.version` 缓存，重复公式复用有上限的 SVG 缓存，异步结果带代次校验，过时渲染不会覆盖新内容。渲染有 5 秒超时、长度上限、宏数量/展开上限和短暂错误冷却；SVG 会拒绝脚本、事件属性、外部链接、`foreignObject` 等活动内容。
 
-文档前言中支持 `newcommand`、`renewcommand`、`providecommand` 和 `DeclareMathOperator`（含星号变体）；不扫描 `\input`/`\include` 中的外部宏，也不尝试执行任意 TeX 包加载。渲染器只加载显式允许的 MathJax package，不启用 `require`、`autoload`、HTML/TeXHTML 或运行时 `setoptions`。
+文档前言中支持 `newcommand`、`renewcommand`、`providecommand` 和 `DeclareMathOperator`（含星号变体）。可视化编辑器在已确定的多文件项目中会按 TeX 顺序展开根导言内可安全解析的字面量 include，并把得到的不可变宏环境传给正文 fragment；正文文件自己的静态宏按源码位置生效，因此定义前后的公式不会错误共用一个缓存键。ThuThesis 的 `symup`、`symbf`、`symbfsf`、`uppi`、`increment` 和 `dif` 有受限的 MathJax 近似能力；条件、间接控制序列、文件 I/O、动态定义或其他无法静态翻译的 replacement 会 fail closed，不覆盖安全 fallback。独立的源码编辑器 Math Preview 仍只扫描当前物理文档；所有模式都不执行 class、package 或任意 TeX 宏，也不承诺复刻 XeLaTeX 字体与间距。渲染器只加载显式允许的 MathJax package，不启用 `require`、`autoload`、HTML/TeXHTML 或运行时 `setoptions`。
 
 Math Preview 的产品方向受到 Ultra Math Preview 与 hscopes-booster 的启发；TeXLeaf 当前使用随 VSIX 提供的 MathJax Worker、区域扫描、宏处理、布局规划、缓存和 SVG 安全处理来完成活动公式预览。完整致谢和实现边界见 README、Wiki 与 `THIRD_PARTY_NOTICES.md`。
 
@@ -227,13 +258,13 @@ VS Code 没有允许单个扩展控制 Electron GPU 的公开 API，而且 MathJ
 
 ## 内置 Snippet 与模板管理
 
-`TeXLeaf: 管理 Snippet 与模板` 打开结构化面板，不显示或要求用户处理存储路径。Snippet 页支持 trigger/replacement/options/priority/category/description/flags/占位符版本/启用状态编辑，模板页支持名称、trigger、说明和完整 TeX 正文编辑；两页都有搜索、添加、复制、删除、恢复默认，以及带字段范围、大小写、正则、预览和撤销的批量查找替换。保存前后使用 revision 校验，检测到另一个窗口、Settings Sync 或高级编辑器的变化时拒绝覆盖。
+`TeXLeaf: 管理 Snippet 与模板` 打开结构化面板，不显示或要求用户处理存储路径。Snippet 页支持 trigger/replacement/options/priority/category/description/flags/占位符版本/启用状态编辑，模板页支持名称、trigger、说明和完整 TeX 正文编辑；两页都有搜索、添加、复制、删除、恢复默认，以及带字段范围、大小写、正则、预览和撤销的批量查找替换。删除、模板恢复和批量替换使用面板内的确认卡片，不依赖 VS Code Webview 中可能被拦截的浏览器 `confirm()`；删除确认后先修改草稿，保存前仍可撤销。保存前后使用 revision 校验，检测到另一个窗口、Settings Sync 或高级编辑器的变化时拒绝覆盖。
 
 在 Windows Stable 中，其典型位置是 `%APPDATA%\Code\User\globalStorage\zhangxh-math.texleaf\texleaf-snippets.jsonc`。实际路径由当前 VS Code Profile 与运行环境决定；命令入口会始终使用正确 URI。该文件不属于任何项目，切换工作区无需复制。不同 VS Code Profile 或不同 Remote 主机拥有各自的全局存储。
 
 从旧 `local-lab.texleaf` 身份首次迁入时，先在旧版保存所有修改；如自定义过模板，还要逐项保留名称、trigger、说明和正文。新版检测到仍启用的旧版时会暂停激活，避免两个实例同时注册 `texleaf.*` 命令，也避免复制一个尚未保存的磁盘快照。此时先**禁用但不要卸载**旧版并执行“Developer: Reload Window”。新主片段文件尚不存在、旧 JSONC 严格校验通过且复制期间内容未变化时，新版会尽力逐字节复制片段库；旧文件不会被移动或删除。确认 Snippet 迁移无误、按需重建自定义模板后，再卸载旧身份扩展。未修改的四个工厂模板会由新版自动创建；旧模板 catalog、既有 `globalState` 与 Settings Sync 基线不会跨扩展 ID 自动迁移。
 
-首次创建时，文件直接包含当前版本的 212 条默认规则、`GREEK`、`SYMBOL`、`MORE_SYMBOLS` 三个变量，以及 `defaultsRevision` 迁移标记。运行时只有这份全局文件和用户显式配置的项目附加文件，不再有隐藏的 `builtin` 或 `settings` 片段源。用户可以在全局文件中直接修改、禁用或删除默认规则；`defaultsRevision` 已完成后，启动时不会把用户删除的规则重新补回。
+首次创建时，文件直接包含当前版本的 223 条默认规则、`GREEK`、`SYMBOL`、`MORE_SYMBOLS` 三个变量，以及 `defaultsRevision` 迁移标记。运行时只有这份全局文件和用户显式配置的项目附加文件，不再有隐藏的 `builtin` 或 `settings` 片段源。用户可以在全局文件中直接修改、禁用或删除默认规则；`defaultsRevision` 已完成后，启动时不会把用户删除的规则重新补回。
 
 article/Beamer 长模板保存在当前 Profile 的插件内部、可同步模板库中，不混入主 JSONC。出厂 trigger 为 `article-cn`、`article-en`、`beamer-cn` 和 `beamer-en`。1.0.0 只考虑一次 article factory trigger 迁移：当前值仍等于旧出厂值 `tmpa-cn` / `tmpa-en` 时分别尝试改为 `article-cn` / `article-en`，当前已经是其他值时不改。迁移 marker 会先写入；新 trigger 被占用、存在前缀冲突或提交失败时保留旧值，**Output → TeXLeaf** 会记录原因，之后激活不会重试，用户日后主动改回旧 trigger 也不会再次迁移。首次升级会一次性迁移旧 `globalStorageUri/templates/*.tex` 的自定义内容，之后运行时不再依赖这些外部副本。模板只会在已保存、除空白与完整 trigger 外没有其他内容的 `.tex` 文档中，由单光标输入完整 trigger 后自动展开；展开会替换整份空白文档。`texleaf.autoSnippets` 是模板自动展开总开关；关闭时可在完整 trigger 后按 `Tab`。模板正文使用 v2 的 `@0`、`@1`、`@{1:默认文本}` 占位符，字面量 `@` 写成 `@@`。
 
@@ -249,11 +280,11 @@ article/Beamer 长模板保存在当前 Profile 的插件内部、可同步模�
 
 `texleaf.customSnippets` 已从 0.3.0 设置清单中移除，也不再参与运行时匹配。迁移代码只读取旧设置的用户全局值一次，不读取或提升工作区级旧值。若旧设置无效，只跳过相关定义并报告问题。迁移需要改写文件时会先在 `globalStorageUri/backups` 中创建逐字节备份；全局文件本身无效或在迁移期间发生变化时不会覆盖。
 
-revision 2 会追加缺失的定理类片段；只有仍与 revision 1 出厂记录完全一致的 `mode.inline` 才会从 `mk` 改为 `lm`。revision 3 只迁移仍与 revision 2 出厂记录完全一致的 13 个定理条目：裸 trigger 改为带反斜杠并加入自动选项，例如 `thm`/`tw` 变为 `\thm`/`tAw`，definition 的 `def` 则变为 `\dfn`。已禁用或改写的同 ID 记录视为用户自定义并保留；一旦文件标记 revision 3，之后主动删除的默认规则也不会复活。默认库仍是 212 条。
+revision 2 会追加缺失的定理类片段；只有仍与 revision 1 出厂记录完全一致的 `mode.inline` 才会从 `mk` 改为 `lm`。revision 3 只迁移仍与 revision 2 出厂记录完全一致的 13 个定理条目：裸 trigger 改为带反斜杠并加入自动选项，例如 `thm`/`tw` 变为 `\thm`/`tAw`，definition 的 `def` 则变为 `\dfn`。已禁用或改写的同 ID 记录视为用户自定义并保留；一旦文件标记 revision 3，之后主动删除的默认规则也不会复活。当前首次创建与恢复默认使用 223 条工厂规则；revision 3 的窄迁移本身仍不会复活用户已删除的条目。
 
 ### 恢复默认与本地备份
 
-`TeXLeaf: 恢复默认片段` 可从 Command Palette、片段侧栏标题和内置管理器运行。它是完整替换而不是合并：确认后使用当前版本的 212 条默认规则与三个变量替换全局文件。高级 JSONC 编辑器或管理器有未保存内容时会被拒绝；确认期间磁盘哈希变化时会取消；写入前先创建并校验原文件的逐字节备份，再通过临时文件替换并重新加载验证。
+`TeXLeaf: 恢复默认片段` 可从 Command Palette、片段侧栏标题和内置管理器运行。它是完整替换而不是合并：确认后使用当前版本的 223 条默认规则与三个变量替换全局文件。高级 JSONC 编辑器或管理器有未保存内容时会被拒绝；确认期间磁盘哈希变化时会取消；写入前先创建并校验原文件的逐字节备份，再通过临时文件替换并重新加载验证。
 
 备份位于当前环境的 `globalStorageUri/backups`，不会纳入 Settings Sync。恢复成功通知可以直接打开备份；若要撤回，可审阅后运行 `TeXLeaf: 导入片段`。
 
@@ -303,13 +334,15 @@ Snippet 配置命令和侧栏仍然可以在任意编辑器上下文中打开，
 
 ### 自动分数
 
-在数学区域输入 `/` 时，TeXLeaf 先保留可见的斜杠并记录左侧候选分子；首个有效分母字符到来时才完成转换。例如输入 `1/2` 的过程是先显示 `1/`，输入 `2` 后再得到 `\frac{1}{2}`，光标留在分母中。扫描受括号配对和 `texleaf.autoFractionBreakingCharacters` 限制，不会尝试理解完整 TeX 宏展开。
+在数学区域输入 `/` 时，TeXLeaf 先保留可见的斜杠并记录左侧候选分子；首个有效分母字符到来时才完成转换。例如输入 `1/2` 的过程是先显示 `1/`，输入 `2` 后再得到 `\frac{1}{2}`，光标留在分母中。默认停止字符包含 `<`、`>`、`≤` 与 `≥`，同时 `\le`、`\leq`、`\ge`、`\geq` 也固定按关系边界处理，所以 `<1/2` 生成 `<\frac{1}{2}` 而不是 `\frac{<1}{2}`。扫描受括号配对和 `texleaf.autoFractionBreakingCharacters` 限制，不会尝试理解完整 TeX 宏展开；用户若显式覆盖该设置，应自行保留其他需要的关系符边界。
 
 自动片段匹配先于待处理的自动分数，所以输入第二个 `/` 时，默认 `//` 显式片段仍可展开为空分子、空分母的结构。若规则不适合当前写作习惯，可关闭 `texleaf.autoFraction`，继续单独使用 `//`。
 
 ### 自动放大括号
 
-当插入内容使当前括号需要适应较高的数学结构时，TeXLeaf 可以使用 `\left` 与 `\right`。此功能是文本层面的保守改写，不调用 TeX 引擎；复杂宏或不平衡括号可能不会处理。
+当插入内容使当前括号需要适应较高的数学结构时，TeXLeaf 可以使用 `\left` 与 `\right`。默认高结构触发命令包括 `\frac`、`\binom`、`\sum`、`\prod`、`\int` 与 `\lim`，因此在普通圆括号里展开 `bino` 会像分式一样得到可伸缩括号。同一次插入被多层括号包围时，1.0.0 会在同一数学范围、TeX 花括号作用域和对齐单元内，一次处理所有尚未加尺寸的严格祖先层。例如 `(1-(//))` 会直接变成 `\left(1-\left(\frac{}{}\right)\right)`；已经带 `\left` / `\right` 或 `\bigl` / `\bigr` 等修饰的层保持不变，但不会阻断检查更外层的普通括号。此功能是文本层面的保守改写，不调用 TeX 引擎；复杂宏、`\verb`、畸形交叉或不平衡括号会安全跳过。
+
+没有 tabstop 的普通片段会把替换与全部尺寸修饰作为一次原子编辑，立即 Undo 一次即可整体恢复。片段本身带 tabstop 时，TeXLeaf 优先使用 VS Code 原生嵌套 Snippet Session，以保留“内层分子/分母 → 外层后续占位符”的完整导航；受稳定扩展 API 的 undo 边界限制，紧接展开执行 Undo 时会分两步撤销内层片段与外部尺寸修饰。
 
 普通片段没有显式 tabstop 时，0.8.11 会在扩大整个括号范围后把光标恢复到生成的 `\right` 之前；例如 `(sum)` 会成为 `\left(\sum|\right)`。可以继续输入 `+`、上下标或其他内容；当当前位置没有精确手动片段 trigger 时，按一次 `Tab` 执行 Tabout。刚停在 `\sum` 后直接按 `Tab` 时，既有 `sum`-limits 手动片段优先展开；片段已经声明 tabstop 时也不合成额外占位符，继续遵循原导航顺序。
 
@@ -317,13 +350,13 @@ Snippet 配置命令和侧栏仍然可以在任意编辑器上下文中打开，
 
 ### Matrix 快捷键
 
-矩阵快捷键只在 `texleaf.matrixEnvironments` 列出的 matrix、align 等环境中工作：`Tab` 先处理活动 snippet tabstop，再尝试越过当前单元格内的右侧闭合符；只有没有局部 Tabout 目标时才插入下一列的 ` & `。`Enter` 在块级环境插入 `\\`、换行并保留当前缩进，在行内矩阵中插入带空格的 `\\`；`Shift+Enter` 跳到当前数学环境之后。Tabout 不会跨未转义的 `&` 或行结束命令去寻找下一单元格/下一行的括号。若某个自定义环境行为异常，将其移出列表即可。
+矩阵快捷键只在 `texleaf.matrixEnvironments` 列出的 matrix、align 等环境中工作：`Tab` 先处理活动 snippet tabstop，再检查光标是否确实位于当前单元格内尚未闭合的定界符中；只有找到与最内层 opener 配对的 closer 才执行 Tabout，否则插入下一列。普通单元格之间插入 ` & `；如果从只含缩进的行首开始，则在既有缩进后插入 `& `，不会多加一个会被后续 Enter 复制的前导空格，因此连续换行与 Tab 不再让每行缩进递增。`Enter` 在块级环境插入 `\\`、换行并保留当前缩进，在行内矩阵中插入带空格的 `\\`；`Shift+Enter` 跳到当前数学环境之后。Tabout 不会认领右侧未来命令参数中的无关 `}`，也不会跨未转义的 `&` 或行结束命令寻找括号。若某个自定义环境行为异常，将其移出列表即可。
 
 同一个 `texleaf.matrixShortcuts` 开关也控制安全的 left/right 跨行 Enter：在 equation、align、aligned、gather、multline、flalign、split 等可换行数学环境中，光标位于唯一、顶层匹配的 `\left…\right…` 内时，Enter 会在上一行插入 `\right.\\`，并在保持缩进的下一行插入 `\left.`。遇到跨光标嵌套 pair、花括号参数、命令 token、`&`、已有行终止、comment/verb 或嵌套环境时不会猜测，直接回到原来的矩阵或普通 Enter。
 
 ### Tabout
 
-Tabout 优先遵守活动 snippet 的 tabstop；没有可前往的 tabstop 时，再尝试越过临近的右括号、`\rangle` 或数学结束分隔符。原生 Suggest 会把与当前输入精确相同的 TeXLeaf trigger 优先显示并预选，例如 `\thm`、`\lem`、`\dfn`、`\cor`；普通非精确候选仍遵循 VS Code 的原生排序。模板、定理环境或 `dm` 的自动展开偶发未触发时，直接按 `Tab` 会精确展开 TeXLeaf 片段，不会接受一个相近的普通单词；这个 exact 路径在 Suggest 已打开时仍优先。
+活动 Snippet Session 中的 Tabout 会先检查当前行的局部闭合符，再前往下一个 tabstop。例如展开 `\thm` 后在正文输入 `(1`，第一次 `Tab` 先越过自动补齐的 `)`，下一次才离开定理环境；文本模式下这项检查严格限制在当前行，不会跳到环境尾部或后续命令中的无关括号。普通数学 Tabout 则只越过真正包围光标且与最内层 opener 配对的右括号、命名定界符或 `\left...\right`，或者在末尾只剩空白时退出数学分隔符。原生 Suggest 会把与当前输入精确相同的 TeXLeaf trigger 优先显示并预选，例如 `\thm`、`\lem`、`\dfn`、`\cor`；普通非精确候选仍遵循 VS Code 的原生排序。模板、定理环境或 `dm` 的自动展开偶发未触发时，直接按 `Tab` 会精确展开 TeXLeaf 片段，不会接受一个相近的普通单词；这个 exact 路径在 Suggest 已打开时仍优先。
 
 0.8.10 起，TeXLeaf 的普通片段候选必须与光标前输入具有非空 trigger 前缀匹配；1.0.0 进一步保留全部适用候选中的**全局最长非零前缀组**，并额外保留所有已经完整输入的 literal trigger，避免 regex shadow 或重复 ID 把完整字面量候选筛掉。只有 runtime 唯一选中的 exact literal 获得 Keyword 类型、preselect 与 exact sort 优先级；其他完整 literal 仍按普通 Snippet 候选排序。例如输入 `ss` 时，不会再把只匹配末尾单个 `s` 的 `sum`、`sim`、`sub`、`sup` 与匹配两个字符的 `SS2`、`SSE`、`SSP`、`SSS` 混在一起；输入单个 `s` 与完整 trigger 仍保持原行为。默认开启 Tabout 时，Suggest 可见且没有精确 TeXLeaf trigger，扩展会重新规划当前位置：有真实 Tabout 目标才跳出，否则调用 VS Code 原生的“接受所选建议”。数学区域的活动 Snippet Session 若仍有下一 tabstop，会由专用路由先关闭 Suggest、再前往该占位符；普通 Suggest-aware Tabout 路径明确排除活动 Snippet Session、Inline Suggest 与 Rename 输入框。Matrix/Align 中同样先使用当前单元格内的真实 Tabout 目标，再回退到插列，而且不会越过行列边界。无需先输入 trigger 即可用 `Ctrl+Alt+L`（macOS 为 `Cmd+Alt+L`）浏览当前上下文可直接插入的普通片段。若 `Tab` 已被其他扩展接管，可通过键盘快捷方式页面检查 `texleaf` 命令的 when 条件与冲突来源。
 
@@ -331,11 +364,15 @@ Tabout 优先遵守活动 snippet 的 tabstop；没有可前往的 tabstop 时�
 
 TeXLeaf 识别常见的 `$ … $`、`\( … \)`、`$$ … $$`、`\[ … \]` 与配置允许的环境。该判断面向低延迟输入，不等价于完整 TeX 解析：注释、转义、嵌套宏和不完整源码都可能影响结果。把 `verbatim`、`lstlisting`、`minted` 等不应展开的区域加入 `texleaf.excludedEnvironments`。
 
+正则片段不会从 TeX 字母控制词中间截取有歧义的字母数字后缀。默认字母数字下标规则仍会把 `x0` 展开为 `x_{0}`，但不会截取 `\leq0` 的 `q0`、`\cdots0` 的 `s0` 或 `\alpha2` 的 `a2`。以纯标点作为显式终结标记的后缀仍可使用，例如紧接自动展开的 `\sum` 输入 `t,.` 会得到 `\sum\mathbf{t}`；确实需要匹配整个命令的自定义正则仍建议把开头反斜杠纳入 trigger。
+
 `\label{...}`、`\tag{...}` 与 `\tag*{...}` 的参数会被识别为片段抑制区，即使它们位于 equation/align 内、跨行或含嵌套花括号，数学 trigger 也不会展开；闭合最外层参数后立即恢复外层数学上下文。
 
-### 整篇所见即所得边界
+### 可视化编辑器与源码模式边界
 
-TeXLeaf 专注于 VS Code 源码编辑器中的活动公式预览。VS Code 的稳定扩展 API 无法在原文本范围里提供可点击、可交互、能自动重排编辑器行高的任意 MathJax 替换部件；Decoration 也没有可靠的点击回调。因此本版不提供整篇所见即所得替换或内置 PDF Webview，只保留不修改文档内容、字符偏移、光标或选择范围的当前公式浮动预览。
+VS Code 的稳定扩展 API 无法在原生 Monaco 文本范围内放入可点击、可交互并自动参与行高布局的任意 MathJax 部件；Decoration 也没有可靠的点击回调。因此 TeXLeaf 1.0.0 使用正式 `CustomTextEditorProvider` 提供独立的 CodeMirror 6 可视化编辑器，并把它注册为 `*.tex` 的默认编辑器。完整公式在选区之外显示为 SVG；点击或键盘激活后原位恢复 LaTeX 源码，光标移出后重新排版。编辑、保存、dirty 状态、Undo/Redo 和外部变化始终同步到同一个 VS Code `TextDocument`，不会创建第二份 TeX 文件。
+
+Custom Editor Webview 不是原生 `TextEditor`，但 TeXLeaf 的输入规划已通过专用消息桥接到 CodeMirror：自动/手动/Visual 片段、模板、占位符、自动分数与括号放大、Tabout、matrix/align 键位、片段搜索、引用、AI 检查/改写/续写都可直接使用。工具栏“源码模式”在当前标签内显示完整主题高亮源码并继续提供不改动文档字符或选择范围的活动公式浮动预览；安全普通 Provider 候选和常见 Snippet 也可通过官方执行命令桥接。只有复杂补全副作用、完整 Monaco Suggest UI、Hover、Code Action、Inline Suggest 和扩展专属键位需要点击“↗ 原生”。TeXLeaf 不重复实现 TeX 编译器或 PDF Webview，PDF 仍交给 LaTeX Workshop。
 
 ## 与其他扩展共存
 

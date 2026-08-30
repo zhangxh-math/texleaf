@@ -1,160 +1,209 @@
 # TeXLeaf
 
-![TeXLeaf icon](media/icon.png)
+<p align="center">
+  <img src="media/icon.png" width="112" alt="TeXLeaf 图标">
+</p>
 
-TeXLeaf 是一个面向 VS Code 桌面版的 LaTeX 写作扩展，把高频片段、可选的 AI 写作检查、Zotero 引用和活动公式预览整合到同一个插件中。它不接管 LaTeX 编译，也不会把 VSIX 二进制提交到源码仓库；功能构思与交互设计受到下文所列开源项目的启发。
+<p align="center">
+  面向 VS Code 的可视化 LaTeX 写作扩展：原位编辑公式与文档结构，并整合高频片段、Math Preview、项目引用、Zotero 和可选 AI 写作检查。
+</p>
 
-当前版本：`1.0.0`。支持 Windows、macOS 和 Linux 上的 VS Code `1.98+`；Zotero 联动需要 Zotero 桌面端允许本机通信，推荐安装 Better BibTeX。AI 写作功能需要用户为所选服务商自行准备 API Key，默认关闭。
+<p align="center">
+  <strong>TeXLeaf 1.0.0</strong> · VS Code 1.98+ · Windows / macOS / Linux · GPL-3.0-only
+</p>
 
-安装方式：优先从 [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=zhangxh-math.texleaf) 安装；也可以从 [GitHub Releases](https://github.com/zhangxh-math/texleaf/releases) 下载对应版本的 VSIX，在 VS Code 运行“Extensions: Install from VSIX...”。源码仓库只保存可审阅的源文件，VSIX 仅作为 Release 资产发布。
+TeXLeaf 始终编辑原来的 `.tex` / `.bib` 文件，不创建中间文档，也不改变 LaTeX 源码格式。可视化模式、同标签页源码模式和 VS Code 原生编辑器共享同一份 `TextDocument`、保存状态与 Undo/Redo 历史。
 
-从旧身份 `local-lab.texleaf` 升级时，先在旧版中保存所有修改；如果改过模板，还应逐项保留模板名称、trigger、说明和正文。安装新版后，它会在旧版仍启用时暂停激活：此时先**禁用但不要卸载**旧版，再执行“Developer: Reload Window”。新版会在新主文件不存在、旧 JSONC 有效且磁盘内容没有变化时尽力逐字节复制旧 Snippet，并保留旧文件；确认新库无误、按需重建自定义模板后再卸载旧版。未修改的四个工厂模板会由新版自动创建。
+TeXLeaf 不自带 TeX 编译器。编译、PDF 查看和 SyncTeX 交给 [LaTeX Workshop](https://github.com/James-Yu/LaTeX-Workshop)；TeXLeaf 专注于写作、结构化编辑、公式预览和引用工作流。
 
-## 片段
+当前 **TeXLeaf 是 LaTeX Workshop 桥接版**：它复用 LaTeX Workshop 的公开命令、编译配方、PDF 查看器、SyncTeX 和编译诊断，不重复实现一套 TeX 编译基础设施。后续还将推出 **TeXLeaf-Z**——不再桥接 LaTeX Workshop、提供集成编译工作流的版本；具体功能范围和发布时间以后续公告为准，敬请期待。
 
-TeXLeaf 首次创建全局用户片段库时写入 212 条可编辑的 LaTeX 默认规则，并提供一键备份与恢复默认；运行时不再区分隐藏的内置片段和用户片段。规则支持文本、行内数学、行间数学、词边界、自动展开、正则触发、Visual 选区和 v2 占位符。常用例子包括：
+## 功能总览
 
-- `lm` → `\(...\)`，`dm` → `\[...\]`；
-- `\thm`、`\lem`、`\dfn`、`\cor` 等 13 个定理类环境自动展开；
-- 分式、上下标、括号放大、矩阵、希腊字母、物理与量子力学片段；
-- 矩阵和 align 环境中的 Tab 插列、Enter 换行、Shift+Enter 跳出；
-- `\label{...}`、`\tag{...}` 和 `\tag*{...}` 内自动抑制数学片段，避免标签文本被意外展开；
-- 可换行数学环境中对安全的 `\left...\right...` 结构执行智能跨行 Enter。
-
-运行 `TeXLeaf: 管理 Snippet 与模板` 可打开结构化管理器。Snippet 页提供搜索、分类/状态筛选、添加、复制、删除、启用/禁用，以及 trigger、replacement、options、说明、分类、优先级、正则 flags 和占位符版本编辑；查找替换支持字段范围、大小写、正则、变更预览和草稿撤销。高级用户仍可显式打开 JSONC，但日常使用无需接触外部配置文件。
-
-四个长模板保存在当前 VS Code Profile 的插件内部模板库中，不作为运行时外部文件：
-
-| Trigger | 模板 |
+| 功能 | 能做什么 |
 | --- | --- |
-| `article-cn` | 中文 article |
-| `article-en` | 英文 article |
-| `beamer-cn` | 中文 Beamer |
-| `beamer-en` | 英文 Beamer |
+| 可视化 LaTeX 编辑器 | 把完整公式、标题、定理、证明、列表、表格、图片、参考文献等显示为可编辑结构；点击任意部件可原位恢复准确源码。 |
+| 公式编辑与 Math Preview | 行内、行间及 `equation` / `align` / matrix 等环境由本地 MathJax 4 Worker 渲染；编辑时显示带精确光标的浮动预览，离开后自动恢复排版。 |
+| 表格与交换图 | 用结构化表单编辑 table/tabular 的行列、单元格、表题、标签和样式；直接操纵 `tikzcd` 节点、箭头与标签，再安全回写原环境。 |
+| 片段与模板 | 223 条可编辑 Snippet、四个整篇 article/Beamer 模板、结构化管理器、高级 JSONC、导入/导出和 Settings Sync。 |
+| 数学输入辅助 | 自动分式、级联括号放大、Tabout、成对括号、空公式删除、matrix/align 键位、Visual 选区片段和嵌套 tabstop。 |
+| 多文件项目与交叉引用 | 从显式 root、magic root、`subfiles` 或唯一包含关系建立保守项目上下文；跨文件补全、预览并跳转 `\ref` / `\eqref` / label。 |
+| 文献与 Zotero | 搜索项目 bibliography 和 Zotero/Better BibTeX；插入 citekey，必要时把 BibTeX/BibLaTeX 条目原子写入 `reference.bib`。 |
+| AI 写作助手 | 可选的 DeepSeek/OpenAI 正文检查、改写与续写；问题发布到 VS Code 原生 Problems，支持精确跳转、应用、忽略和批量应用。 |
+| LaTeX Workshop 桥接 | 从可视化工具栏复用 LaTeX Workshop 的编译、PDF、SyncTeX 与诊断能力；TeXLeaf 不复制一套编译基础设施。 |
 
-在已保存且内容为空白的 `.tex` 文档中输入完整 trigger 即可自动展开。1.0.0 只会考虑一次 article factory trigger 迁移：当前值仍是旧出厂值 `tmpa-cn` / `tmpa-en` 时，分别尝试改为 `article-cn` / `article-en`；当前已经是其他值则保持不变。迁移 marker 会先写入，因此新 trigger 被占用、存在前缀冲突或提交失败时会保留旧值并在 **Output → TeXLeaf** 记录提示，之后激活不会反复覆盖；用户日后主动改回 `tmpa-cn` / `tmpa-en` 也不会再次迁移。模板页可以修改名称、trigger、说明和完整 TeX 正文，也可以添加、复制、删除和恢复模板；保存后立即生效。出厂 article 模板使用 `reference.bib`，默认 BibTeX 样式为 `alpha`，并已移除姓名、邮箱、学校和导师等个人信息。
+## 功能演示
 
-片段设置集中在 VS Code Settings 的 `TeXLeaf · 片段`，包括总开关、自动片段、补全、项目片段文件、数学快捷键和高级匹配参数。详细格式、迁移与安全边界见 Wiki 的 [片段与模板](https://github.com/zhangxh-math/texleaf/wiki/Snippets-and-Templates) 和 [Snippet 格式](https://github.com/zhangxh-math/texleaf/wiki/Snippet-Format)。
+以下 GIF 均录自隔离的 VS Code Extension Host 和当前构建，按真实鼠标、键盘与滚动过程连续取帧；文档、作者、邮箱及引用均为测试数据。
 
-0.8.10 收紧了原生 Suggest：TeXLeaf 只返回与光标前输入具有**非空 trigger 前缀匹配**的片段；继续输入后已经不再匹配的候选会从列表移除，不会在公式末尾留下 `+-` 等无关片段。需要不依赖当前前缀浏览当前上下文可直接插入的普通片段时，使用 `Ctrl+Alt+L`（macOS 为 `Cmd+Alt+L`）。默认开启 Tabout 时，Suggest 已打开且当前位置确实有可越过的右括号、`\rangle` 或数学结束分隔符，`Tab` 优先执行 Tabout；若没有真实跳出目标，则仍接受 VS Code 当前选中的原生补全。数学区域的活动 Snippet Session 仍有下一 tabstop 时会先关闭 Suggest、再前往该占位符；Suggest/Tabout 路径不会抢占精确 TeXLeaf trigger、Inline Suggest 或 Rename 输入框的既有 Tab 优先级。Matrix/Align 在 1.0.0 中采用下文说明的“局部 Tabout 优先、无目标才插列”。
+### 点击公式，原位编辑，再自动排版
 
-0.8.11 修复了普通片段没有显式 tabstop、但展开时同时触发自动放大括号的光标位置。例如在 `(sum)` 中输入完成后会得到 `\left(\sum|\right)`，光标保留在生成的 `\right` 前，可以继续输入 `+`、上下限或被求和项；当当前位置没有精确手动片段 trigger 时，按一次 `Tab` 可跳到右定界符之后。刚停在 `\sum` 后直接按 `Tab` 时，既有 `sum`-limits 手动片段仍优先展开，这是有意的既有优先级。片段本身已经声明 tabstop 时仍按它原有的占位符顺序导航。
+点击公式后恢复 LaTeX 源码；输入时浮动 Math Preview 实时更新；光标离开公式范围后重新生成静态公式。
 
-1.0.0 在候选筛选中保留当前全部适用候选的**全局最长非零前缀组**，并额外保留所有已经完整输入的 literal trigger，避免 regex shadow 或重复 ID 把完整字面量候选筛掉。只有 runtime 唯一选中的 exact literal 会获得 Keyword 类型、preselect 与 exact sort 优先级；其他被保留的完整 literal 仍按普通 Snippet 候选排序。例如输入 `ss` 时，`SS2`、`SSE`、`SSP`、`SSS` 这一组可以保留，而只匹配末尾单个 `s` 的 `sum`、`sim`、`sub`、`sup` 不再挤进列表；输入单个 `s` 或完整 trigger 时仍按原规则工作。VS Code 仍会合并第三方 Completion Provider，TeXLeaf 只能收紧自己返回的候选。
+![TeXLeaf 行内公式原位编辑演示](media/demo-formula-editing.gif)
 
-1.0.0 也把 `align` / matrix 中的 Tab 和括号推断限制在当前数学列表：自动放大不会跨越未转义的 `&`、`\\`、`\cr`、`\crcr` 或 `\tabularnewline` 配对括号。在当前单元格里确有右侧闭合符时，`Tab` 先跳出该闭合符；没有局部可跳目标时才插入下一列的 ` & `。因此在 `\frac{1}{n^{2}|}` 中第一次 `Tab` 会越过分母右花括号，而不是立即补 ` & `；Tabout 也不会越过行列边界去寻找下一单元格或下一行的括号。
+### Snippet 自动展开与 Tab 占位符
+
+在数学区域输入 `//` 会连续展开为分式片段；随后用 Tab 在分子、分母和最终位置之间移动，离开源码范围后立即恢复排版。
+
+![TeXLeaf Snippet 自动展开和 Tab 占位符演示](media/demo-snippets.gif)
+
+### 定理结构、成对环境边界与多行公式
+
+定理和证明以结构卡片显示；点击“编辑环境”或对应逻辑行会同时显示 `\begin` / `\end`，其中的 `align` 仍可继续原位展开。
+
+![TeXLeaf 定理环境和多行公式编辑演示](media/demo-structure-source.gif)
+
+### 表格可视化编辑
+
+打开结构化表格编辑器后，可以修改环境、浮动位置、宽度、对齐、横线样式、caption、label、行列和单元格；“应用”会把当前模型安全序列化回原 `.tex`。演示把 Accuracy 从 `0.97` 连续修改并回写为 `0.99`。
+
+![TeXLeaf 表格可视化编辑连续演示](media/demo-table-visualization.gif)
+
+### 交换图直接操纵编辑
+
+`tikzcd` 可切换到直接操纵画布：选择节点或箭头后编辑标签、增删行列和箭头，并在应用时只重写交换图正文、保留环境选项。演示把节点 `B` 修改为 `$B_1$` 并回写到主预览。
+
+![TeXLeaf 交换图直接操纵编辑连续演示](media/demo-commutative-diagram.gif)
+
+### 文献引用在可视化与源码之间切换
+
+cite 以作者—年份 chip 显示；点击后编辑准确引用命令，光标移出引用范围后 chip 和文献详情生命周期一起恢复。
+
+![TeXLeaf 文献引用编辑演示](media/demo-citation-editing.gif)
+
+### 文献详情与多行公式引用预览
+
+悬停 citation 会显示项目文献详情；移开鼠标后卡片立即消失。悬停指向 `align` 中第二个 label 的 `\eqref` 时，预览显示完整多行公式，并只高亮被引用的那一行。
+
+![TeXLeaf 文献与多行公式引用预览演示](media/demo-reference-previews.gif)
+
+### AI 问题使用 VS Code 原生 Problems
+
+AI 语言问题与 LaTeX Workshop 编译问题共用 VS Code 原生 Problems，但由各自扩展维护；点击 AI 条目会跳到准确行列并显示应用/忽略操作。
+
+![TeXLeaf AI 原生问题面板演示](media/demo-native-problems.gif)
+
+## 快速开始
+
+1. 安装 VS Code `1.98+`。若需要编译与 PDF，再安装 LaTeX Workshop 和本机 TeX 发行版。
+2. 从 [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=zhangxh-math.texleaf) 安装，或从 [GitHub Releases](https://github.com/zhangxh-math/texleaf/releases) 下载 VSIX 后运行 **Extensions: Install from VSIX...**。
+3. 打开一个已保存的 `.tex`。默认进入 TeXLeaf 可视化编辑器；工具栏“源码”在同一标签页显示完整高亮源码，“原生”打开 VS Code 原生文本编辑器。
+4. 点击公式、定理、标题、引用、表格或交换图即可编辑对应源码或结构模型；按 `Ctrl+Space` 查询 TeXLeaf、LaTeX Workshop 等 Provider 返回的安全补全。
+5. 从工具栏运行编译、PDF 或 SyncTeX。项目引用、Zotero 和 AI 均可按需启用，互不强制依赖。
+
+如果希望 `.tex` 默认使用原生源码编辑器，将 `texleaf.visualEditor.defaultMode` 设为 `source`；需要时运行 **TeXLeaf: 使用可视化编辑器打开**，或使用 **Reopen Editor With...**。
+
+## 可视化编辑器的关键交互
+
+- 点击完整公式、citation、reference、label、标题或结构卡片，显示其真实 LaTeX 范围；光标离开后重新可视化。
+- 鼠标点击被折叠环境的 `\begin{...}` / `\end{...}` 逻辑行，会显示成对环境边界；不会把环境后的下一行错误跳回 `\begin`。
+- `↑` / `↓` 按 LaTeX 逻辑行移动，而不是按软换行后的屏幕行移动。到达普通逻辑行只展开该行；到达多行公式时展开整条公式。
+- `Tab` 依次处理活动 Snippet tabstop、当前局部 Tabout 和 matrix/align 插列。它不会跳出块级环境；唯一例外是已经完成的行内 `$...$` / `\(...\)`。
+- `Enter` 在列表中生成新的 `\item`；对刚生成的空 item 再按一次 Enter 只移除 item 标记并保留环境内的空白行。Enter 不负责跳出环境。
+- `Shift+Enter` 是统一的环境跳出手势：跳到最近的安全结束位置，并保持外层缩进；Tab 和 Enter 不替代它。
+- 自动分式把 `=`、`<`、`>`、`\le` / `\leq`、`\ge` / `\geq` 等关系运算符视为分子边界，不会把关系符吞入分子。
+- 中文 IME composition、候选删除、全角标点和退格都经过范围保护，临时拼音不能删除公式左侧的既有 LaTeX 结构。
+- 长文档公式按可视区分批渲染；快速滚动停止后最终视口优先，旧位置不会长期占住渲染队列。
+
+可视化编辑器还支持：导言区折叠与完整源码编辑、标题/作者/日期预览、document-class-aware 章节和定理编号、文本加粗/斜体/下划线/删除线/颜色工具、表格与 `tikzcd` 结构化编辑、安全本地栅格图片预览、citation/label 补全、跨文件引用返回，以及可视化和源码模式中的主题跟随 LaTeX 高亮。
+
+完整手册见 Wiki 的 [可视化编辑器](https://github.com/zhangxh-math/texleaf/wiki/Visual-Editor)。
+
+## 片段与模板
+
+首次运行会建立当前 VS Code Profile 的 223 条可编辑默认规则。常用示例：
+
+| 输入 | 结果 |
+| --- | --- |
+| `lm` | `\(...\)` |
+| `dm` | `\[...\]` |
+| `//`（数学区域） | 带分子/分母 tabstop 的 `\frac{...}{...}` |
+| `;a`（数学区域） | `\alpha` |
+| `\thm` / `\lem` / `\dfn` | 定理、引理、定义环境 |
+| `article-cn` / `article-en` | 中文或英文 article 整篇模板 |
+| `beamer-cn` / `beamer-en` | 中文或英文 Beamer 整篇模板 |
+
+运行 **TeXLeaf: 管理 Snippet 与模板** 可搜索、增删、复制、筛选、批量替换、撤销草稿和恢复出厂库；高级用户仍可编辑 JSONC。`Ctrl+Alt+L`（macOS 为 `Cmd+Alt+L`）打开完整片段选择器。
+
+详细说明见 [片段与模板](https://github.com/zhangxh-math/texleaf/wiki/Snippets-and-Templates) 和 [Snippet 格式](https://github.com/zhangxh-math/texleaf/wiki/Snippet-Format)。
+
+## 文献、引用与多文件项目
+
+TeXLeaf 的 citation 搜索会合并当前 bibliography 与 Zotero 本地快照，并按 citekey、标题、作者、年份、DOI、ISBN 排序。接受 Zotero 候选时，TeXLeaf 先导出 BibTeX/BibLaTeX，再通过同一份版本校验的工作区编辑写入 bibliography 并插入 citekey。Zotero 连接固定使用 `127.0.0.1`；推荐 Zotero 8+ 与匹配版本的 Better BibTeX。
+
+项目扫描只跟随工作区内可证明的字面 `\input`、`\include`、`\subfile`、`\import` 和 `\subimport`。遇到动态路径、未知条件、循环、重复执行、缺失文件或重名 label 时会 fail closed，不猜一个目标。公式引用预览可显示整条多行公式，并只高亮当前 label 所在行；引用箭头统一位于文本右侧。
+
+详细说明见 [文献与 Zotero](https://github.com/zhangxh-math/texleaf/wiki/References-and-Zotero) 和 [可视化编辑器：项目与引用](https://github.com/zhangxh-math/texleaf/wiki/Visual-Editor#多文件项目与交叉引用)。
 
 ## AI 写作助手
 
-TeXLeaf 1.0.0 提供一套可选的 Grammarly 风格写作工作流，可选择 DeepSeek 官方/自定义的 Chat Completions API，或 OpenAI 官方/自定义的 Responses API：
+AI 功能默认关闭，需要用户自己的 DeepSeek 或 OpenAI API Key；ChatGPT Plus/Pro 或 Codex 用量不能替代 API 额度。TeXLeaf 支持段落/选区检查、整篇分段检查、改写和续写，并把经过本地校验的问题发布到 VS Code 原生 Problems。编辑器内仍提供范围标记、建议卡、Quick Fix、应用/忽略和重新验证后的批量应用。
 
-- 停止键入后局部检查本次改动的正文句子，不清空其他仍有效的问题；
-- 通过编辑器装饰线、TeXLeaf 专用 Hover、灯泡 Quick Fix 和活动栏问题树展示原因；Hover 中的“应用这条建议”、灯泡或问题树都可一键替换，也可在本次会话忽略；AI 问题不会重复发布到 Problems；
-- 在 TeXLeaf 活动栏的“AI 写作问题”列表集中审阅建议与检查状态；点击条目会用主题自适应背景和轮廓突出对应正文，其他问题继续保留下划线；
-- 手动检查当前选区/段落或整篇 `.tex` 文档；
-- 对纯正文选区或当前句执行安全改写；
-- 提供可单独关闭的词语和句子行内补全，也可从 Command Palette 手动触发；
-- 总开关 `texleaf.aiWriting.enabled` 默认是 `false`，关闭时不会向任何 AI 服务发出请求。
+发送前会在本地遮罩注释、citation、label、URL、文件路径、代码和未知 TeX 结构；公式替换为不可编辑的等长语义占位符，因此模型知道此处有 inline/display formula，但不会收到公式内容。API Key 只存入当前扩展环境的 SecretStorage；每个规范化 Provider/Base URL 使用独立 Key 与授权记录。
 
-默认服务商是 DeepSeek，默认模型为低延迟的 `deepseek-v4-flash`，也可选 `deepseek-v4-pro`。DeepSeek 默认 Base URL 为 `https://api.deepseek.com`，请求规范化后的 `POST {Base URL}/chat/completions`。切换到 OpenAI 时默认模型是适合高频、成本敏感工作负载的 [`gpt-5.6-luna`](https://developers.openai.com/api/docs/models/gpt-5.6-luna)，也可以填写其他安全模型 ID；OpenAI 默认 Base URL 为 `https://api.openai.com/v1`，只请求 `POST {Base URL}/responses`、Structured Outputs 和本插件使用的 JSON Schema，不回退到 Chat Completions。两种自定义地址都要求远程 HTTPS；HTTP 只允许 `localhost`、`127.0.0.1` 或 `[::1]` 回环服务；URL 不能带用户名、密码、查询参数或 fragment，路径也不能已经以该 Provider 的 `/chat/completions` 或 `/responses` endpoint 结尾；请求不会跟随 HTTP 重定向。协议说明见 DeepSeek 的 [Create Chat Completion](https://api-docs.deepseek.com/api/create-chat-completion) 和 [JSON Output](https://api-docs.deepseek.com/guides/json_mode/)，以及 OpenAI 的 [Responses 指南](https://developers.openai.com/api/docs/guides/migrate-to-responses) 与 [Structured Outputs 指南](https://developers.openai.com/api/docs/guides/structured-outputs)。
+完整的费用、隐私、可发送范围、offset 校验、持久化和故障说明见 [AI 写作助手](https://github.com/zhangxh-math/texleaf/wiki/AI-Writing)。
 
-全部 14 个 `texleaf.aiWriting.*` 设置都是 VS Code 的 application 级用户/Profile 设置，可以随普通 Settings Sync 同步；工作区、工作区文件夹和 `.vscode/settings.json` 不能开启 AI、重定向接收地址、切换 Provider/模型，或改变防抖与发送长度等费用相关参数。API Key 和每个目标的正文传输确认不属于普通设置，仍需在实际运行扩展的每台设备、Profile、Stable/Insiders 或 Remote 扩展宿主中分别完成。
+## Math Preview 与 LaTeX Workshop
 
-0.8.6 修复了 `language-too-long` 本地配置错误：此前控制器把“按正文语言写作、但用简体中文解释建议”等完整提示误当作 `language` 协议标签，超过客户端的 64 字符安全上限，因此 DeepSeek 与 OpenAI 的自动检查、手动段落/选区检查、整篇检查、改写和行内补全都会在发出 HTTP 请求前被拦截。现在三个用户选项统一映射为短标签 `auto`、`English`、`Chinese`；中文 `message`/`explanation` 与保持正文原语言的要求仍由受控 system prompt 提供，没有被取消。客户端仍会在联网前拒绝真正超长或含换行/控制字符的直接输入。
+原生源码编辑器和可视化编辑器共用 Math Preview：支持 `$...$`、`$$...$$`、`\(...\)`、`\[...\]` 及常见数学环境，提供 Cursor、Hover 或两者组合。`autoAbove`（默认）和 `autoBelow` 会根据可见空间翻转；固定 `above` / `below` 不自动改变方向。连续输入采用 last-known-good 更新，临时无效 TeX 不会让卡片每键闪烁。
 
-0.8.7 修复了“建议已经应用、问题却仍留在界面中”的状态不同步：单条 Quick Fix 和“应用全部”写入成功后会立即消费对应问题，并同步更新装饰线、Hover、活动栏列表与本机缓存。增量保留现在把问题右端点处的词尾插入视为相关编辑；如果当前正文已经由候选的 `original` 加紧邻字符组成完整 `replacement`，例如正文已有 `takes`、候选却只锚定 `take` 并仍建议 `takes`，该截短范围会在在线校验和缓存恢复时被拒绝，避免旧建议重新出现。
+TeXLeaf 只调用 LaTeX Workshop 的公开 build/view/synctex 命令。Problems 中的编译错误由 LaTeX Workshop 发布；TeXLeaf 不复制、不解释也不维护编译诊断队列。关闭 `texleaf.visualEditor.latexWorkshopCompatibility` 后，可随时从“原生”源码编辑器手动运行 LaTeX Workshop。
 
-0.8.8 修复了连续从问题树或灯泡应用建议时的旧命令竞态：一次修改如果只让后续有效问题整体平移，这些问题会保留稳定的 lineage ID，已经显示的树节点或 Quick Fix 仍能在重新核对当前范围与 `original` 后安全应用，不会因为绝对 offset 改变就误报“文档已变化”。真正已经失效的旧节点会触发问题列表刷新，并只在状态栏显示一条短提示，不再弹出通知或播放音效。“应用全部”在确认后也会按稳定 ID 重新解析当前安全问题；等价的内部状态刷新不会让整批操作误失败，确认前捕获的任一建议已移除、失效或无法唯一解析，或者正文已经变化时仍会整批停止。确认后新出现、未被确认的其他建议不会被纳入这一批修改。
+详见 [Math Preview](https://github.com/zhangxh-math/texleaf/wiki/Math-Preview) 和 [可视化编辑器：编译与 PDF](https://github.com/zhangxh-math/texleaf/wiki/Visual-Editor#编译pdf-与-synctex)。
 
-0.8.9 处理了微软拼音中文模式与 VS Code Quick Fix 的快捷键冲突：微软拼音会优先使用 `Ctrl+.` 切换中英文标点，因此按键可能根本不会送达 VS Code。可以先按 `Shift` 切到英文输入模式后再按 `Ctrl+.`，也可以通过 `F1` / Command Palette 或右键运行“快速修复...”、点击灯泡。TeXLeaf 专用 Hover 现在还提供“应用这条建议”链接；它只调用白名单中的 TeXLeaf 内部命令，模型返回的说明和替换文本仍不可执行，后端仍会在实际写入前重新核对文档版本、问题身份、当前范围、exact `original` 与可编辑正文，过期建议不会修改文件。
+## 设置与文档
 
-首次使用请运行 `TeXLeaf: 切换 AI 写作助手`；流程会针对当前服务商和实际目标地址说明正文传输与独立计费，也可事先运行 `TeXLeaf: 设置当前 AI 服务商 API Key`。Key 只写入当前 VS Code 扩展环境的 `SecretStorage`，不会进入 `settings.json`、项目、日志、Git、TeXLeaf 的 Snippet Settings Sync 或普通 VS Code 设置同步。每一个规范化 DeepSeek 或 OpenAI Base URL 都分别保存 Key 和 consent；DeepSeek 官方地址继续兼容此前版本使用的 `v1` Key/consent，切换到任意自定义 DeepSeek 地址时则一定使用新的目标专用记录，绝不会复用官方 Key。OpenAI 官方地址与各个自定义地址同样互相隔离，两种 Provider 之间也不会交叉复用。Key 和 consent 不跨设备、Profile、Stable/Insiders 或本地/Remote 扩展宿主同步，需要逐环境设置。
+在 VS Code Settings 搜索：
 
-ChatGPT Plus/Pro、Codex 使用额度和 OpenAI API 是彼此独立的产品与计费体系；ChatGPT 订阅不能替插件提供 OpenAI API 授权，也不能支付 DeepSeek 或第三方代理费用。OpenAI 请求会明确携带 `store:false`，但对自定义代理，这只是 TeXLeaf 发出的请求参数，代理是否保留、处理或用于训练仍由该服务商的政策决定。涉及未公开论文、保密审稿或敏感研究数据时，使用前应先确认自己有权把相应文字发送给所选服务。
+```text
+@ext:zhangxh-math.texleaf
+```
 
-联网检查只在当前 VS Code 窗口已受信任时，对已经有文件名和路径的本地 `file:` 或 Remote/WSL/Dev Container `vscode-remote:` `.tex` 文档生效；自动检查和补全可能发送当前编辑器中**尚未写入磁盘**的最新正文。`.bib`、untitled、Git/其他虚拟 URI 和未信任窗口不会发送内容。发送前，TeXLeaf 会在本地遮罩注释、引用/标签/URL、文件路径、未知宏参数以及代码和未知环境；只保留普通正文以及明确允许的 `section`、`caption`、`emph` 等正文参数供检查。数学公式会替换成受保护、不可编辑、与源码 UTF-16 等长的语义占位符：模型只知道此处有一个 inline/display formula，不会收到公式内容，也不能把占位符纳入修改范围。这样既维持 offset 一一映射，也能避免把 `Take` 后的行间公式误判为缺少宾语。这个低延迟扫描器不是完整 TeX 编译器，复杂自定义宏附近应优先使用小选区并在应用建议前复核。
+当前有 56 个用户设置，分为五组：片段 22 项、文献 9 项、AI 写作 14 项、可视化编辑器 4 项、预览 7 项。
 
-模型虽然被要求返回零基 UTF-16 offset，但有些模型或兼容接口会改按 Unicode code point、UTF-8 byte，或把 CRLF 当成一个换行计数。TeXLeaf 只在本地尝试有限的坐标解释，并要求非空 `original` 逐字对应到一个**无歧义**的源码范围；如果上报坐标都不吻合，也只会重定位到全文唯一的逐字匹配。它不会做 Unicode、大小写、引号或空白归一化，也不会用模糊相似度猜测重复文本的位置。Review 合约要求简短的 `message` 与 `explanation` 使用简体中文，`replacement` 则保持来源正文的原语言，不会为了中文解释而翻译论文。纯插入必须写成带相邻原文的非空锚点，并在 replacement 中保留该锚点，而不是返回无法定位的零长度范围；本地会严格验证非空锚点和 replacement 安全字符，但不会把每个普通替换都误判为“必须包含 original”。每条建议还要通过正文可编辑区、重叠和 LaTeX 控制字符校验：单条坏建议只会被丢弃，互不依赖且不重叠的有效建议仍可显示；相互重叠的冲突组会全部丢弃，完全相同的重复项则只保留一条，原文不会被自动修改。
+- [Wiki 首页](https://github.com/zhangxh-math/texleaf/wiki)
+- [可视化编辑器](https://github.com/zhangxh-math/texleaf/wiki/Visual-Editor)
+- [片段与模板](https://github.com/zhangxh-math/texleaf/wiki/Snippets-and-Templates)
+- [Snippet 格式](https://github.com/zhangxh-math/texleaf/wiki/Snippet-Format)
+- [文献与 Zotero](https://github.com/zhangxh-math/texleaf/wiki/References-and-Zotero)
+- [AI 写作助手](https://github.com/zhangxh-math/texleaf/wiki/AI-Writing)
+- [Math Preview](https://github.com/zhangxh-math/texleaf/wiki/Math-Preview)
+- [配置参考](https://github.com/zhangxh-math/texleaf/wiki/Configuration)
+- [故障排查](https://github.com/zhangxh-math/texleaf/wiki/Troubleshooting)
+- [开发与发布](https://github.com/zhangxh-math/texleaf/wiki/Development-and-Release)
 
-活动栏的“AI 写作问题”视图会按行号列出类别、真实严重性、`原文 → 替换` 和解释。点击建议会滚动到对应范围，并给该问题叠加主题自适应的背景与轮廓；其他问题继续保留下划线。定位和高亮不移动编辑器主光标、不夺走列表焦点，也不发布原生 Diagnostic 或触发对应音效。选中的问题通过稳定 issue lineage 跟随无关前文编辑造成的安全平移；它被应用、忽略、清除、判定失效或关闭 AI 后，高亮会自动消失。单条建议可以从专用 Hover 的“应用这条建议”、灯泡 Quick Fix 或问题树应用，也可以忽略；视图工具栏与 Command Palette 还提供“显示 AI 写作问题列表”和“应用当前全部 AI 建议”。所有单条入口最终都进入同一套后端复核，不因链接位于 Hover 就跳过版本、身份、范围、原文或正文作用域检查。安全平移的问题保留稳定的操作身份；真正失效的旧节点只会刷新列表并显示短状态栏提示。“应用全部”会先要求确认，再按捕获的稳定 ID 解析当前安全问题，并对文档版本、范围、原文和相互重叠重新做整批校验；等价状态刷新不会误判失败，确认前捕获的任一建议已经过期时仍不会冒险修改。确认后才出现的其他建议不属于这一批。视图还会明确显示检查中、已调度、多少个改动句子等待局部复检、当前仍保留的问题数，以及被安全丢弃建议的汇总。
+## 安全与边界
 
-TeXLeaf 不包含或播放检查音频，也不再把 AI 问题发布为 VS Code 原生 Diagnostic。编辑器中的无音频装饰线只负责标出范围；类别、解释、替换预览与真实严重性由 TeXLeaf 专用 Hover 和活动栏问题树提供，Hover 的白名单“应用这条建议”链接与灯泡 Quick Fix 都会在应用前重新校验。这样不会产生重复的原生诊断 Hover，AI 问题也不会出现在 Problems 或触发 Error/Warning accessibility signal。
+- 可视化编辑器基于 VS Code 正式 `CustomTextEditorProvider` 和 CodeMirror 6，不向 Monaco 私有 DOM 注入未公开部件。
+- Webview、文档编辑、补全、导航、MathJax Worker 和 AI 操作都有版本、范围、大小及过时代次校验；模型文字不能构造可执行命令。
+- 可视化结构和项目上下文是安全静态近似，不执行 class/package 或任意 TeX 宏；最终编号、页码、字体、宏展开和版式以真实 TeX 编译为准。
+- Webview 不是原生 Monaco `TextEditor`。复杂 Completion command、`additionalTextEdits`、Snippet transform、第三方 Hover/Code Action/Inline Suggest 和扩展专属键位需点击“原生”。
+- 未信任工作区不会联网调用 AI、访问 Zotero、创建 bibliography 或加载项目额外片段文件。
 
-例如检查结果提示“42 条可审阅，另安全忽略 20 条”，表示模型候选中有 42 条完成了精确、无歧义的本地映射；另外 20 条因完全重复、范围重叠、无法唯一定位或字段不安全而按 fail-closed 原则丢弃。这不是 API Key、余额或认证错误，被忽略的候选不会修改原文。
+## 开发与验证
 
-自动检查的默认防抖时间为 900 毫秒（可在 500–10000 毫秒范围内调整）。继续键入会取消旧请求并重新计时；本次编辑涉及的句子会进入局部复检队列，而纯光标导航只有在没有改动句子待处理时才选择光标附近句子。中文 `。！？` 即使句间没有空格也会正确分句，句末中英文引号与括号会保留在前句。自动调度每批最多处理 8 个改动句子；同一文档版本、同一句子和相同 AI 配置不会重复请求，每版本最多自动请求 64 个不同句子，达到上限后不会逐出去重记录再产生重复费用。
+```bash
+pnpm install --frozen-lockfile
+pnpm run verify
+```
 
-一次可精确重建的文本事务会计算**旧句子与新句子并集**作为完整复检上下文，但不会因此让整句旧问题全部失效。真正的失效范围只覆盖实际编辑以及累计尚未复检的精确 UTF-16 区域：与它不相交的同句建议，在 `original` 与新正文逐字一致、仍位于可编辑正文且能严格平移时继续保留；自动复检返回后，也只替换命中局部范围或与新建议相交的旧项。插入/删除句号或空行造成的 split/merge、同一事务多处编辑和零宽边界都纳入这一模型；在问题右端点插入词尾会使该旧问题失效，而不会误清同句其他无关建议。保存或其他没有正文变化的空 change 不会清除结果。每个句子成功返回后立即合并并从 pending 队列移除；同批后续 API 请求失败不会回滚已经成功的前句，剩余句子会继续显示为“等待局部复检”。无法无歧义重建的异常事务才会 fail closed 丢弃不再可靠的结果。它仍不是“每按一个键就联网”：防抖、取消和去重会合并连续操作，而真实网络延迟、服务商限额与费用意味着体验只能是近实时。
+`verify` 会运行主扩展和 Webview TypeScript 检查、511 项单元测试、三个生产 bundle 构建，以及 extension/Webview/MathJax Worker 冒烟测试。可视化交互另有隔离 Extension Host 与 CDP 回归，包括 IME、环境边界、引用跳转、逻辑行导航和长文档快速滚动。
 
-已通过校验的问题列表会写入当前 VS Code Profile/扩展宿主的私有 `globalStorage`，因此在通常的单扩展宿主使用中，关闭文档或重启 VS Code 后仍可恢复；它不写工作区、不进入 Settings Sync，也不保存论文全文。缓存只保存文档 URI、全文长度与 SHA-256、必要的单条问题字段及其短原文锚点。只有当前完整源码的 UTF-16 长度与 SHA-256 都和快照完全一致时，才按已验证 offset 逐条恢复；文件被外部修改、hash/长度不匹配，或单条范围、原文、可编辑区及截短 replacement 校验失败时会安全丢弃并要求重检，不跨源搜索相同短语。单文档最多 2048 条、单记录最多 2 MiB；每个 Profile 最多 256 个文档记录、总量最多 32 MiB。写入采用 750 毫秒防抖和同目录临时文件后 rename，是 Profile-local 的 best-effort 快照，不宣称提供多个同时运行窗口之间的事务或强 CAS 保证。pending、正在请求和“本次会话忽略”仍只属于当前扩展宿主会话。
+开发流程与 Release 清单见 [开发与发布](https://github.com/zhangxh-math/texleaf/wiki/Development-and-Release)。
 
-DeepSeek JSON 输出为空或不是合法 JSON 时，TeXLeaf 只会自动重试一次；认证、余额、限流、超时、取消、字段/范围错误和其他结构错误不会重试。兼容模型偶尔返回的恰好一层完整 ```` ```json … ``` ```` 围栏可以被安全剥离，但围栏外有额外文字、嵌套围栏或本地校验失败时仍会拒绝。错误只保留认证、计费、限流、超时、响应无效等安全分类和内部子码，不记录 API Key、论文正文或原始服务端响应。
+## 支持 TeXLeaf
 
-服务商、模型、两个独立 Base URL、自动检查、行内补全、语言、风格、防抖和本次发送长度上限等 14 项 application 级设置集中在 `TeXLeaf · AI 写作`。完整设置、隐私、费用、命令和故障说明见 [docs/configuration.md](docs/configuration.md) 与 Wiki 的 [AI 写作助手](https://github.com/zhangxh-math/texleaf/wiki/AI-Writing)。
+TeXLeaf 是独立维护的 GPL-3.0-only 开源项目。若它对你有帮助，可以通过微信支付、支付宝或 PayPal 支持我喝杯奶茶；赞助不会影响功能开放、Issue 优先级或发布决定。不方便赞助时，Star、可复现的 Issue、文档改进和推荐项目也同样有帮助。
 
-显式检查多段选区或当前 TeX 文档还设有单次最多 32 个正文段的请求上限；每个正文段成功后立即进入列表，后续段失败不会撤销此前结果。达到段数或字符数上限后会停止并提示，其余正文不会发送。这样即使选区或文档由大量极短正文段组成，也不会在一次命令中生成无界数量的付费请求。
+维护者本人没有编程背景，不能独立编写或人工审查代码，主要负责提出真实 LaTeX 使用需求、决定产品取舍、测试和验收；开发实现、功能请求和 PR 审查只能在个人时间允许时借助 AI 辅助完成。一般优先处理可复现的 Bug，不能承诺新增功能、合并 PR、处理时限、定制开发或私人技术支持。项目以个人身份维护和收款，无法开具发票或提供报销、税务抵扣凭证。
 
-## 文献
+[查看赞助方式与隐私说明](SPONSOR.md)
 
-当光标位于 `\cite{...}`（以及配置的其他引用命令）参数中时，TeXLeaf 使用 VS Code 原生 Suggest 展示参考文献：
+## 致谢与许可
 
-- 同时汇总项目 `reference.bib` 中已有的条目，以及 Zotero/Better BibTeX 中尚未写入该 `.bib` 的条目；
-- 可按 citation key、标题、作者、年份、DOI 或 ISBN 搜索；多词查询去重后按 AND 组合，可以跨字段命中；
-- 结果按相关度排序：精确原始 key（保留标点）优先，其后是紧凑 key/前缀、精确 DOI/ISBN、全词/词首和普通子串；相关度相同时才偏好已收录的 bibliography 条目；
-- 原生 Suggest 最多展示 100 条；TeXLeaf 先对全库做本地匹配与排序再截断，继续输入可以找到先前未进入前 100 条的文献；
-- 支持一个 `\cite{...}` 中连续加入多个、逗号分隔的 key；
-- 接受已有条目时只插入 key；接受 Zotero 条目时先导出 BibTeX/BibLaTeX，再以同一个 `WorkspaceEdit` 写入 bibliography 并插入 key；
-- 文献身份按 fail-closed 规则判断：双方有效 DOI 相同才作为强身份，双方有效 DOI 不同则明确冲突；ISBN 不能单独判同，只有标题一致且双方提供的第一作者姓氏与年份不矛盾时才辅助复用现有条目；Zotero 中重复 citation key 的整组候选都会隐藏，不会任意选择其中一条；
-- bibliography 文件名和导出格式均可配置，默认分别是 `reference.bib` 和 BibTeX。
+TeXLeaf 由项目发起人 **zhangxh-math** 与 **OpenAI Codex** 联合开发。片段、预览、可视化编辑和引用体验受到 [Gilles Castel 的 latex-snippets](https://github.com/gillescastel/latex-snippets)、[Obsidian Latex Suite](https://github.com/artisticat1/obsidian-latex-suite)、[Snippetleaf](https://github.com/superle3/snippet-leaf)、[Ultra Math Preview](https://github.com/yfzhao20/vscode-ultra-math-preview)、[Overleaf](https://github.com/overleaf/overleaf)、[CodeMirror 6](https://codemirror.net/)、[LaTeX Workshop](https://github.com/James-Yu/LaTeX-Workshop) 与 [VSCode Zotero](https://github.com/jinvim/vscode-zotero) 等项目启发；这不表示上游项目对 TeXLeaf 的官方认可或功能等价。
 
-TeXLeaf 自己的 Suggest 条目在左侧只显示标题和来源，避免 citation key 挤占宽度；右侧详情按字段显示完整标题、作者、期刊/出版物、年份、`Citation key`、来源与导入状态。原始 key 的标点精确命中与去标点后的紧凑 key 匹配属于不同等级。搜索不包含期刊/出版物、摘要、标签或笔记，也不做拼写纠错。LaTeX/TeX 文档默认关闭 VS Code 的普通文档单词建议。VS Code 不允许一个 Completion Provider 删除另一个扩展的候选，因此 LaTeX Workshop 若同时提供 citation completion，仍由它自己的设置控制。
+TeXLeaf 项目主体采用 [GNU General Public License v3.0 only](LICENSE)。根据 GPLv3 第 7(b) 节允许的合理署名要求，再分发源码、VSIX 或修改版时必须保留 [NOTICE](NOTICE)，并在随附文档或可访问的 About/Credits/Legal Notices 中注明该软件包含或基于 TeXLeaf、原作者为 zhangxh-math，并保留原项目链接。`NOTICE` 同时提供用户文档输出例外：使用 TeXLeaf 的模板、Snippet、编辑、预览或编译功能不会让论文、幻灯片、bibliography 等用户文档自动受 GPL 或署名要求约束。历史上已经按 MIT License 获得的版本继续适用其随附条款；实际随发行包分发的第三方组件继续保留各自许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。完整说明见 [许可证、署名与再分发](https://github.com/zhangxh-math/texleaf/wiki/License-and-Attribution) 与 [致谢与联合开发](https://github.com/zhangxh-math/texleaf/wiki/Acknowledgements-and-Development)。
 
-Zotero 连接固定使用 `127.0.0.1`，不会访问远程 Zotero 账户。优先调用 Better BibTeX JSON-RPC 获取稳定 citekey 和 BibTeX/BibLaTeX；不可用时回退 Zotero 官方 Local API。请在 Zotero 中启用“允许本机其他应用与 Zotero 通信”。Zotero 文献列表默认在内存中缓存 30 秒；每次键入只筛选本地快照，不会逐键请求 Zotero。Zotero 8+ 与当前 Better BibTeX 是推荐组合；使用旧版 Zotero 时请同时核对对应 BBT 版本。
-
-文献设置集中在 `TeXLeaf · 文献`，涵盖功能开关、自动弹出、bibliography 路径、引用命令、Zotero 端口/文库、超时/缓存和 BibTeX/BibLaTeX 格式。完整流程与故障排查见 Wiki 的 [文献与 Zotero](https://github.com/zhangxh-math/texleaf/wiki/References-and-Zotero)。
-
-## 预览
-
-Math Preview 的产品方向受到 Ultra Math Preview 与 hscopes-booster 启发。TeXLeaf 当前使用随扩展提供的 MathJax 4 和 New Computer Modern SVG 字体渲染活动公式，并按文档版本、公式、主题、缩放和宏配置缓存结果，以控制扩展宿主开销。
-
-- 支持 `$...$`、`$$...$$`、`\(...\)`、`\[...\]` 及 equation、align、matrix 等数学环境；
-- 跳过注释、verb/verbatim 和不安全的未闭结构；
-- 行内公式预览随光标所在行移动，默认的 `autoBelow` 优先放在下方；
-- 行间公式预览对齐 opening delimiter；超宽公式保持该对齐，右端可能由编辑器裁切；
-- 位置可选默认的 `autoBelow`（优先下方）、`autoAbove`（优先上方），或固定的 `above` / `below`；两种自动模式会在首选侧空间不足时尝试另一侧，上下都不足时都强制使用上方，并对超高、多行公式采用相同的末尾保留策略；旧设置值 `auto` 仍按 `autoBelow` 运行，但不再显示在设置下拉选项中；
-- 卡片使用不透明、圆角、主题自适应背景，预览内有独立高亮光标；
-- 深色主题使用高对比纯白矢量字形和高精度 SVG 渲染提示；
-- 支持 Cursor、Hover 或两者组合，并提供防抖、长度、缩放、缓存和受限宏配置。
-
-在 `cursor` 和 `both` 模式中，连续输入采用 last-known-good / stale-while-revalidate：防抖和后台渲染期间保留上一张有效预览，再用同一个稳定 decoration 原位换成新帧；临时无效 TeX 或中间渲染失败有 750 ms 宽限，Hover SVG 仅在实际请求 Hover 时写盘。因此持续输入不会再每键先把 cursor 卡片清空。离开公式、关闭总开关、运行“关闭当前 Math Preview”，或停在无效状态超过宽限后仍会清理旧卡片。`hover` 使用 VS Code 原生 Hover，编辑器在输入时仍可能主动关闭它；无闪烁保证针对 cursor decoration，不代表改变了原生 Hover 生命周期。
-
-VS Code 稳定扩展 API 不提供可安全替换编辑器源码行、又能点击在渲染结果与 TeX 之间切换的公开 view-zone/DOM 能力。TeXLeaf 因此专注于保持源码编辑器可预测的活动公式轻量预览，不提供整篇所见即所得替换或内置 PDF 面板。
-
-预览设置集中在 `TeXLeaf · 预览`。渲染方式、定位边界、主题和性能说明见 Wiki 的 [Math Preview](https://github.com/zhangxh-math/texleaf/wiki/Math-Preview)；全部设置的索引见 [配置参考](https://github.com/zhangxh-math/texleaf/wiki/Configuration)。
-
-## 致谢与联合开发
-
-TeXLeaf 由项目发起人 **zhangxh-math** 与 **OpenAI Codex** 联合开发。zhangxh-math 在开始本项目时并不懂如何编写 VS Code 插件，主要负责提出真实的 LaTeX 写作需求、选择功能方向、决定优先级、持续安装测试并反馈验收；Codex 协助完成资料研究、架构设计、代码实现、自动化测试、文档编写与问题定位。最终产品取舍、发布决定和仓库维护仍由项目维护者负责。
-
-片段系统与高速 LaTeX 输入体验感谢以下项目带来的灵感：
-
-- [latex-snippets](https://github.com/gillescastel/latex-snippets)：Gilles Castel 基于 Vim、UltiSnips 与 VimTeX 展示的高效 LaTeX 输入工作流；
-- [Obsidian Latex Suite](https://github.com/artisticat1/obsidian-latex-suite)：可编辑片段格式、上下文触发、自动分式、矩阵、Visual 与 Tabout 等交互；
-- [Snippetleaf](https://github.com/superle3/snippet-leaf)：把片段体验适配到另一种编辑器宿主的实践，以及格式与占位符兼容思路；
-- [VSCode-LaTeX-Inkscape](https://github.com/sleepymalc/VSCode-LaTeX-Inkscape)：把高速 LaTeX/片段工作流带入 VS Code 的实践。
-
-Math Preview 感谢：
-
-- [Ultra Math Preview for VS Code](https://github.com/yfzhao20/vscode-ultra-math-preview)：实时公式预览的产品构思与使用体验；
-- [hscopes-booster（HyperScopes Booster）](https://github.com/yfzhao20/hscopes-booster)：面向 VS Code 扩展的 token 与 TextMate scope 查询思路。
-
-Zotero 与参考文献工作流感谢：
-
-- [Overleaf](https://github.com/overleaf/overleaf)：开源协作式 LaTeX 项目编辑体验；
-- [VSCode Zotero](https://github.com/jinvim/vscode-zotero)：从本地 Zotero 选择文献并把 Bib(La)TeX 条目写入项目 bibliography 的工作流。
-
-这里的“感谢、启发与参考”描述的是对公开产品设计、交互和工作流的学习，不表示这些上游项目对 TeXLeaf 的官方认可、隶属关系或功能等价。更完整的逐项说明、联合开发过程与来源边界见 Wiki 的 [致谢与联合开发](https://github.com/zhangxh-math/texleaf/wiki/Acknowledgements-and-Development)；实际随发行包分发的第三方组件及许可证以 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 为准。
-
----
-
-开发、测试和 Release 流程见 [开发与发布](https://github.com/zhangxh-math/texleaf/wiki/Development-and-Release)；使用问题见 [支持说明](SUPPORT.md) 与 [故障排查](https://github.com/zhangxh-math/texleaf/wiki/Troubleshooting)。项目采用 [MIT License](LICENSE)，MathJax 等第三方组件的许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+报告问题前请阅读 [SUPPORT.md](SUPPORT.md) 和 [故障排查](https://github.com/zhangxh-math/texleaf/wiki/Troubleshooting)；准备提交代码或文档时请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。

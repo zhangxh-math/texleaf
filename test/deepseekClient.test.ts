@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -226,7 +233,10 @@ test('review uses the official Chat Completions JSON contract in non-thinking mo
   const messages = call.body.messages as Array<{ readonly role: string; readonly content: string }>;
   assert.equal(messages[0]?.role, 'system');
   assert.match(messages[0]?.content ?? '', /json only/i);
-  assert.match(messages[0]?.content ?? '', /original must be non-empty/u);
+  assert.match(messages[0]?.content ?? '', /Review the whole\s+supplied sentence/u);
+  assert.match(messages[0]?.content ?? '', /comma or semicolon[\s\S]*continues the same sentence/u);
+  assert.match(messages[0]?.content ?? '', /displayed formula has the sentence\s+punctuation required/u);
+  assert.match(messages[0]?.content ?? '', /zero-width insertion/u);
   assert.match(messages[0]?.content ?? '', /⟦DISPLAYED_FORMULA⟧/u);
   assert.match(messages[0]?.content ?? '', /meaningful noun phrase or object/u);
   assert.match(messages[0]?.content ?? '', /Simplified Chinese/u);
@@ -242,6 +252,63 @@ test('review uses the official Chat Completions JSON contract in non-thinking mo
     language: 'English',
     style: 'concise academic',
     text: source,
+  });
+});
+
+test('review accepts an exact zero-width formula-punctuation insertion', async () => {
+  const marker = '⟦DISPLAYED_FORMULA⟧';
+  const source = `${marker} Therefore the result follows.`;
+  const offset = marker.length;
+  const expectedIssue = {
+    start: offset,
+    end: offset,
+    original: '',
+    replacement: ',',
+    message: '行间公式末尾缺少逗号。',
+    explanation: '后文仍属于同一句，公式后应使用逗号连接。',
+    category: 'punctuation',
+    severity: 'warning',
+  };
+  const mock = fetchQueue(completion(JSON.stringify({ issues: [expectedIssue] })));
+  const client = new DeepSeekClient({ apiKey: 'sk-test', fetch: mock.fetch });
+
+  const result = await client.review(source);
+  assert.deepEqual(result.issues, [expectedIssue]);
+});
+
+test('diagnostic explanations use a bounded, untrusted-data JSON contract', async () => {
+  const mock = fetchQueue(completion(JSON.stringify({
+    explanation: '这条错误表示 TeX 找不到该控制序列。',
+    suggestion: '检查命令拼写，并确认提供该命令的宏包已经加载。',
+  })));
+  const client = new DeepSeekClient({ apiKey: 'sk-test', fetch: mock.fetch });
+
+  assert.deepEqual(await client.explainDiagnostic({
+    message: 'Undefined control sequence.',
+    source: 'LaTeX',
+    code: 'undefined-control-sequence',
+    context: '\\begin{document}\n\\badcommand\n\\end{document}',
+  }, { language: 'zh-CN' }), {
+    explanation: '这条错误表示 TeX 找不到该控制序列。',
+    suggestion: '检查命令拼写，并确认提供该命令的宏包已经加载。',
+    model: 'deepseek-v4-flash-20260801',
+  });
+
+  const call = mock.calls[0]!;
+  assert.equal(call.body.max_tokens, 2_048);
+  const messages = call.body.messages as Array<{
+    readonly role: string;
+    readonly content: string;
+  }>;
+  assert.match(messages[0]?.content ?? '', /untrusted data/u);
+  assert.match(messages[0]?.content ?? '', /Do not invent packages/u);
+  assert.deepEqual(JSON.parse(messages[1]!.content), {
+    task: 'explain-latex-diagnostic',
+    language: 'zh-CN',
+    message: 'Undefined control sequence.',
+    source: 'LaTeX',
+    code: 'undefined-control-sequence',
+    context: '\\begin{document}\n\\badcommand\n\\end{document}',
   });
 });
 
@@ -362,6 +429,15 @@ test('rewrite and completion preserve JSON string whitespace and support the pro
     { type: 'disabled' },
     { type: 'disabled' },
   ]);
+  const completionMessages = mock.calls[1]!.body.messages as Array<{
+    readonly role: string;
+    readonly content: string;
+  }>;
+  assert.match(
+    completionMessages[0]?.content ?? '',
+    /suffix is authoritative text that already exists after the\s+cursor/u,
+  );
+  assert.match(completionMessages[0]?.content ?? '', /Never repeat words/u);
 });
 
 test('a single exact json Markdown fence is stripped before strict validation', async () => {

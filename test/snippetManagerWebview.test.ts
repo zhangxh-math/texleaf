@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -43,6 +50,9 @@ test("integrated manager exposes structured CRUD, search, replace, and CAS messa
     'id="template-content"',
     'id="find-replace"',
     'id="replace-preview"',
+    'id="confirm-panel"',
+    'id="confirm-accept"',
+    'id="confirm-cancel"',
     'id="undo"',
     'send("saveLibrary"',
     'send("saveTemplates"',
@@ -55,6 +65,27 @@ test("integrated manager exposes structured CRUD, search, replace, and CAS messa
   ]) {
     assert.ok(html.includes(expected), `missing manager feature marker: ${expected}`);
   }
+});
+
+test("manager deletion uses a Webview-native confirmation that reaches the draft mutation", () => {
+  const html = renderSnippetManagerWebview("delete-confirmation");
+  assert.doesNotMatch(
+    html,
+    /\bconfirm\s*\(/u,
+    "VS Code Webviews must not rely on the blocked browser confirm dialog",
+  );
+  assert.match(
+    html,
+    /function deleteEntry\(\) \{[\s\S]*requestConfirmation\([\s\S]*pushUndo\("delete:" \+ entry\.id[\s\S]*\.filter\(\(item\) => item\.id !== entry\.id\)[\s\S]*reportDirty\(\)/u,
+  );
+  assert.match(
+    html,
+    /byId\("delete"\)\.addEventListener\("click", deleteEntry\)[\s\S]*byId\("confirm-cancel"\)\.addEventListener\("click", closeConfirmation\)[\s\S]*byId\("confirm-accept"\)\.addEventListener\("click", acceptConfirmation\)/u,
+  );
+  assert.match(
+    html,
+    /if \(event\.key === "Escape" && !byId\("confirm-panel"\)\.hidden\) closeConfirmation\(\)/u,
+  );
 });
 
 test("manager forms keep controls aligned and collapse to one column when narrow", () => {

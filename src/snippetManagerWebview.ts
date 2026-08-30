@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 /**
  * Static, CSP-locked markup for the integrated Snippet/template manager.
  *
@@ -289,6 +296,12 @@ export function renderSnippetManagerWebview(nonce: string): string {
       box-shadow: 0 8px 28px var(--vscode-widget-shadow);
     }
     .replace-card h2 { margin: 0 0 13px; }
+    .confirm-card { width: min(480px, 100%); }
+    .confirm-message {
+      margin: 0 0 16px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
     .scope-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -484,6 +497,17 @@ export function renderSnippetManagerWebview(nonce: string): string {
     </div>
   </section>
 
+  <section id="confirm-panel" class="replace-panel" hidden aria-modal="true" role="alertdialog" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+    <div class="replace-card confirm-card">
+      <h2 id="confirm-title">请确认操作</h2>
+      <p id="confirm-message" class="confirm-message"></p>
+      <div class="replace-actions">
+        <button id="confirm-accept" class="danger">确认</button>
+        <button id="confirm-cancel" class="secondary">取消</button>
+      </div>
+    </div>
+  </section>
+
   <script nonce="${nonce}">
     (() => {
       "use strict";
@@ -507,7 +531,8 @@ export function renderSnippetManagerWebview(nonce: string): string {
         lastUndoAt: 0,
         request: 0,
         reloadArmed: false,
-        pendingAction: new Map()
+        pendingAction: new Map(),
+        confirmation: null
       };
       let readyTimer = null;
       let contentReceived = false;
@@ -534,6 +559,22 @@ export function renderSnippetManagerWebview(nonce: string): string {
         status.textContent = message;
         status.className = tone || "";
       }
+      function closeConfirmation() {
+        byId("confirm-panel").hidden = true;
+        state.confirmation = null;
+      }
+      function requestConfirmation(message, onConfirm) {
+        if (state.busy) return;
+        state.confirmation = onConfirm;
+        byId("confirm-message").textContent = message;
+        byId("confirm-panel").hidden = false;
+        byId("confirm-accept").focus();
+      }
+      function acceptConfirmation() {
+        const onConfirm = state.confirmation;
+        closeConfirmation();
+        if (typeof onConfirm === "function") onConfirm();
+      }
       function libraryDirty() {
         return !!state.library && canonical(state.library) !== state.baselineLibrary;
       }
@@ -550,12 +591,14 @@ export function renderSnippetManagerWebview(nonce: string): string {
       }
       function setBusy(value, message) {
         state.busy = value;
+        if (value && state.confirmation) closeConfirmation();
         if (message) setStatus(message, "");
         refreshButtons();
         document.querySelectorAll("input, textarea, select").forEach((node) => {
           node.disabled = value;
         });
         byId("replace-apply").disabled = value || byId("replace-apply").disabled;
+        byId("confirm-accept").disabled = value;
         if (!value && !byId("replace-panel").hidden) updateReplacePreview();
       }
       function validationForSnippet(snippet) {
@@ -918,18 +961,27 @@ export function renderSnippetManagerWebview(nonce: string): string {
         const entry = state.active === "snippets" ? selectedSnippet() : selectedTemplate();
         if (!entry) return;
         const label = state.active === "snippets" ? entry.trigger : entry.name;
-        if (!confirm("确定删除“" + label + "”吗？保存前仍可通过“撤销编辑”恢复。")) return;
-        pushUndo("delete:" + entry.id, "删除 " + label);
-        if (state.active === "snippets") {
-          state.library.snippets = state.library.snippets.filter((item) => item.id !== entry.id);
-          state.selectedSnippet = null;
-        } else {
-          state.templates.templates = state.templates.templates.filter((item) => item.id !== entry.id);
-          state.selectedTemplate = null;
-        }
-        state.lastUndoKey = "";
-        render();
-        reportDirty();
+        const active = state.active;
+        requestConfirmation("确定删除“" + label + "”吗？\\n保存前仍可通过“撤销编辑”恢复。", () => {
+          if (state.busy || state.active !== active) return;
+          const current = active === "snippets" ? selectedSnippet() : selectedTemplate();
+          if (!current || current.id !== entry.id) {
+            setStatus("所选条目已经变化，未执行删除。", "warning");
+            return;
+          }
+          pushUndo("delete:" + entry.id, "删除 " + label);
+          if (active === "snippets") {
+            state.library.snippets = state.library.snippets.filter((item) => item.id !== entry.id);
+            state.selectedSnippet = null;
+          } else {
+            state.templates.templates = state.templates.templates.filter((item) => item.id !== entry.id);
+            state.selectedTemplate = null;
+          }
+          state.lastUndoKey = "";
+          render();
+          reportDirty();
+          setStatus("已在草稿中删除“" + label + "”；保存后生效。", "success");
+        });
       }
       function requestSave() {
         if (state.busy || !currentDirty()) return;
@@ -978,10 +1030,11 @@ export function renderSnippetManagerWebview(nonce: string): string {
           setBusy(true, "正在恢复默认片段…");
           send("restoreDefaults", { requestId });
         } else {
-          if (!confirm("恢复四个出厂模板？自定义模板和修改后的模板将被替换。")) return;
-          const requestId = nextRequest("restoreTemplates");
-          setBusy(true, "正在恢复默认模板…");
-          send("restoreTemplates", { requestId });
+          requestConfirmation("恢复四个出厂模板？\\n自定义模板和修改后的模板将被替换。", () => {
+            const requestId = nextRequest("restoreTemplates");
+            setBusy(true, "正在恢复默认模板…");
+            send("restoreTemplates", { requestId });
+          });
         }
       }
       function replaceFields() {
@@ -1069,19 +1122,20 @@ export function renderSnippetManagerWebview(nonce: string): string {
         }
         const plan = replacementPlan();
         if (plan.error || !plan.count) return;
-        if (!confirm("确认应用预览中的 " + plan.count + " 处替换？保存前可一键撤销。")) return;
-        pushUndo("bulk-replace:" + Date.now(), "批量查找替换");
-        const entries = state.active === "snippets" ? state.library.snippets : state.templates.templates;
-        const index = new Map(entries.map((entry) => [entry.id, entry]));
-        plan.changes.forEach((change) => {
-          const entry = index.get(change.id);
-          if (entry) entry[change.field] = change.after;
+        requestConfirmation("确认应用预览中的 " + plan.count + " 处替换？\\n保存前可一键撤销。", () => {
+          pushUndo("bulk-replace:" + Date.now(), "批量查找替换");
+          const entries = state.active === "snippets" ? state.library.snippets : state.templates.templates;
+          const index = new Map(entries.map((entry) => [entry.id, entry]));
+          plan.changes.forEach((change) => {
+            const entry = index.get(change.id);
+            if (entry) entry[change.field] = change.after;
+          });
+          state.lastUndoKey = "";
+          byId("replace-panel").hidden = true;
+          render();
+          reportDirty();
+          setStatus("已在草稿中应用 " + plan.count + " 处替换；请检查后保存。", "success");
         });
-        state.lastUndoKey = "";
-        byId("replace-panel").hidden = true;
-        render();
-        reportDirty();
-        setStatus("已在草稿中应用 " + plan.count + " 处替换；请检查后保存。", "success");
       }
       function loadContent(message) {
         if (!message.library || !message.templateCatalog) return;
@@ -1142,13 +1196,16 @@ export function renderSnippetManagerWebview(nonce: string): string {
       byId("find-replace").addEventListener("click", openReplace);
       byId("replace-close").addEventListener("click", () => byId("replace-panel").hidden = true);
       byId("replace-apply").addEventListener("click", applyReplacement);
+      byId("confirm-cancel").addEventListener("click", closeConfirmation);
+      byId("confirm-accept").addEventListener("click", acceptConfirmation);
       ["replace-find", "replace-with"].forEach((id) => byId(id).addEventListener("input", updateReplacePreview));
       ["replace-case", "replace-regex"].forEach((id) => byId(id).addEventListener("change", updateReplacePreview));
       document.addEventListener("keydown", (event) => {
         if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "s") {
           event.preventDefault(); requestSave();
         }
-        if (event.key === "Escape" && !byId("replace-panel").hidden) byId("replace-panel").hidden = true;
+        if (event.key === "Escape" && !byId("confirm-panel").hidden) closeConfirmation();
+        else if (event.key === "Escape" && !byId("replace-panel").hidden) byId("replace-panel").hidden = true;
       });
       window.addEventListener("message", (event) => {
         const message = event.data;

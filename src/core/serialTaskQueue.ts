@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 /** A failure-tolerant FIFO queue that assigns a monotonic epoch to each task. */
 export class SerialTaskQueue {
   private tail: Promise<void> = Promise.resolve();

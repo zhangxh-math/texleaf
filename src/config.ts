@@ -1,5 +1,13 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import * as vscode from "vscode";
 import {
+  DEFAULT_CITATION_COMMANDS,
   isAIWritingSourceUri,
   isTeXLeafSourceUri,
   sanitizeMathPreviewConfiguredMacros,
@@ -49,6 +57,8 @@ export interface TeXLeafConfig {
   readonly zoteroRequestTimeoutMs: number;
   readonly zoteroCacheSeconds: number;
   readonly bibliographyFormat: BibliographyFormat;
+  /** Workspace-relative explicit TeX root; empty enables bounded auto-detection. */
+  readonly projectRootFile: string;
   readonly mathPreviewEnabled: boolean;
   readonly mathPreviewPresentation: MathPreviewPresentation;
   readonly mathPreviewPlacement: MathPreviewPlacement;
@@ -75,19 +85,6 @@ export interface TeXLeafConfig {
 }
 
 const DEFAULT_LANGUAGE_IDS = ["latex", "tex", "bibtex"] as const;
-const DEFAULT_CITATION_COMMANDS = [
-  "cite",
-  "citep",
-  "citet",
-  "Cite",
-  "Citet",
-  "autocite",
-  "parencite",
-  "textcite",
-  "footcite",
-  "supercite",
-] as const;
-
 export function readConfig(uri?: vscode.Uri): TeXLeafConfig {
   const config = vscode.workspace.getConfiguration("texleaf", uri);
   const manual = config.get<string>("manualTrigger", "tab");
@@ -171,11 +168,12 @@ export function readConfig(uri?: vscode.Uri): TeXLeafConfig {
       [],
     ),
     autoFractionBreakingCharacters: decodeControlCharacters(
-      config.get<string>("autoFractionBreakingCharacters", "+-=,;:&"),
+      config.get<string>("autoFractionBreakingCharacters", "+-=,;:&<>≤≥"),
     ),
     autoEnlargeTriggers: cleanStringArray(
       config.get<readonly string[]>("autoEnlargeTriggers", [
         "\\frac",
+        "\\binom",
         "\\sum",
         "\\prod",
         "\\int",
@@ -222,12 +220,13 @@ export function readConfig(uri?: vscode.Uri): TeXLeafConfig {
       3_600,
     ),
     bibliographyFormat: readBibliographyFormat(config),
+    projectRootFile: config.get<string>("project.rootFile", "").trim(),
     mathPreviewEnabled: config.get<boolean>("mathPreview.enabled", true),
     mathPreviewPresentation: readMathPreviewPresentation(
       config.get<string>("mathPreview.presentation", "cursor"),
     ),
     mathPreviewPlacement: normalizeMathPreviewPlacement(
-      config.get<string>("mathPreview.placement", "autoBelow"),
+      config.get<string>("mathPreview.placement", "autoAbove"),
     ),
     mathPreviewDebounceMs: clamp(
       config.get<number>("mathPreview.debounceMs", 120),

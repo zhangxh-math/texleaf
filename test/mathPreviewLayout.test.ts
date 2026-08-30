@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -38,20 +45,21 @@ test("Math Preview placement normalization preserves formal values and migrates 
     assert.equal(normalizeMathPreviewPlacement(placement), placement);
   }
   assert.equal(normalizeMathPreviewPlacement("auto"), "autoBelow");
-  assert.equal(normalizeMathPreviewPlacement("unknown"), "autoBelow");
+  assert.equal(normalizeMathPreviewPlacement("unknown"), "autoAbove");
 });
 
 test("inline preview stays below and aligns with its opening delimiter on the start line", () => {
   const result = plan();
 
-  assert.equal(result.requiredVisibleLines, 2);
+  assert.equal(result.requiredVisibleLines, 3);
+  assert.equal(result.gapPx, 10.5);
   assert.equal(result.side, "below");
   assert.deepEqual(result.anchor, { line: 12, character: 8 });
   assert.equal(result.hostTextDecoration, "none");
   assert.match(result.attachmentTextDecoration, /position:\s*absolute/iu);
   assert.match(
     result.attachmentTextDecoration,
-    /top:\s*calc\(100% \+ 0\.35em\)/iu,
+    /top:\s*calc\(100% \+ 10\.5px\)/iu,
   );
   assert.doesNotMatch(result.attachmentTextDecoration, /\bbottom\s*:/iu);
 });
@@ -65,12 +73,12 @@ test("autoBelow moves an inline preview above when its preferred lower side is t
     visibleRanges: [{ startLine: 10, endLine: 30 }],
   });
 
-  assert.equal(result.requiredVisibleLines, 2);
+  assert.equal(result.requiredVisibleLines, 3);
   assert.equal(result.side, "above");
   assert.deepEqual(result.anchor, { line: 29, character: 6 });
   assert.match(
     result.attachmentTextDecoration,
-    /bottom:\s*calc\(100% \+ 0\.35em\)/iu,
+    /bottom:\s*calc\(100% \+ 10\.5px\)/iu,
   );
   assert.doesNotMatch(result.attachmentTextDecoration, /\btop\s*:/iu);
 });
@@ -89,30 +97,30 @@ test("autoAbove falls below when only the lower side can fit", () => {
     placement: "autoAbove",
   });
 
-  assert.equal(result.requiredVisibleLines, 2);
+  assert.equal(result.requiredVisibleLines, 3);
   assert.equal(result.side, "below");
   assert.deepEqual(result.anchor, { line: 1, character: 6 });
 });
 
 test("automatic placement treats exactly the required visible lines as sufficient", () => {
   const aboveExact = plan({
-    formulaStart: { line: 2, character: 6 },
-    formulaEnd: { line: 2, character: 17 },
-    cursorLine: 2,
+    formulaStart: { line: 3, character: 6 },
+    formulaEnd: { line: 3, character: 17 },
+    cursorLine: 3,
     visibleRanges: [{ startLine: 0, endLine: 10 }],
     placement: "autoAbove",
   });
   const belowExact = plan({
-    formulaStart: { line: 8, character: 6 },
-    formulaEnd: { line: 8, character: 17 },
-    cursorLine: 8,
+    formulaStart: { line: 7, character: 6 },
+    formulaEnd: { line: 7, character: 17 },
+    cursorLine: 7,
     visibleRanges: [{ startLine: 0, endLine: 10 }],
     placement: "autoBelow",
   });
 
-  assert.equal(aboveExact.requiredVisibleLines, 2);
+  assert.equal(aboveExact.requiredVisibleLines, 3);
   assert.equal(aboveExact.side, "above");
-  assert.equal(belowExact.requiredVisibleLines, 2);
+  assert.equal(belowExact.requiredVisibleLines, 3);
   assert.equal(belowExact.side, "below");
 });
 
@@ -228,7 +236,7 @@ test("autoBelow keeps its below preference when both sides have enough visible s
     visibleRanges: [{ startLine: 0, endLine: 30 }],
   });
 
-  assert.equal(result.requiredVisibleLines, 2);
+  assert.equal(result.requiredVisibleLines, 3);
   assert.equal(result.side, "below");
 });
 
@@ -278,7 +286,7 @@ test("an oversized multiline preview preserves its bottom and the last three sou
   assert.deepEqual(result.anchor, { line: 38, character: 4 });
   assert.match(
     result.attachmentTextDecoration,
-    /bottom:\s*calc\(100% \+ 0\.35em\)/iu,
+    /bottom:\s*calc\(100% \+ 50px\)/iu,
   );
 
   const aboveFirst = plan({
@@ -428,7 +436,7 @@ test("the layout planner receives the full displayed height of a tall preview", 
     lineHeightPx: 21,
   });
 
-  assert.equal(result.requiredVisibleLines, 21);
+  assert.equal(result.requiredVisibleLines, 23);
   assert.equal(result.side, "above");
   assert.deepEqual(result.anchor, { line: 28, character: 4 });
 });
@@ -445,7 +453,7 @@ test("space in a different visible range cannot override the range containing th
     ],
   });
 
-  assert.equal(result.requiredVisibleLines, 2);
+  assert.equal(result.requiredVisibleLines, 3);
   assert.equal(result.side, "above");
   assert.deepEqual(result.anchor, { line: 29, character: 8 });
 });
@@ -471,7 +479,7 @@ test("invalid preview dimensions use finite defaults", () => {
     lineHeightPx: Number.NaN,
   });
 
-  assert.equal(result.requiredVisibleLines, 1);
+  assert.equal(result.requiredVisibleLines, 2);
   assert.equal(result.side, "below");
   assert.deepEqual(result.anchor, {
     line: baseRequest.cursorLine,
@@ -499,23 +507,25 @@ test("layout CSS is fixed, non-interactive, and contains no executable payload s
     "none",
   );
   assert.equal(anotherAbove.hostTextDecoration, above.hostTextDecoration);
+  assert.equal(above.gapPx, 10.5);
+  assert.equal(anotherAbove.gapPx, 50);
   assert.equal(
     above.attachmentTextDecoration,
     "none; position: absolute; display: inline-block; " +
       "transform: translateX(0); " +
-      "bottom: calc(100% + 0.35em); z-index: 10; pointer-events: none; " +
+      "bottom: calc(100% + 10.5px); z-index: 10; pointer-events: none; " +
       "opacity: 1; overflow: visible; background-repeat: no-repeat; " +
       "background-size: 100% 100%;",
   );
-  assert.equal(
+  assert.match(
     anotherAbove.attachmentTextDecoration,
-    above.attachmentTextDecoration,
+    /bottom:\s*calc\(100% \+ 50px\)/iu,
   );
   assert.equal(
     below.attachmentTextDecoration,
     "none; position: absolute; display: inline-block; " +
       "transform: translateX(0); " +
-      "top: calc(100% + 0.35em); z-index: 10; pointer-events: none; " +
+      "top: calc(100% + 10.5px); z-index: 10; pointer-events: none; " +
       "opacity: 1; overflow: visible; background-repeat: no-repeat; " +
       "background-size: 100% 100%;",
   );

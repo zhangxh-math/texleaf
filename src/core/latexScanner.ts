@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import {
   LatexContext,
   LatexDelimiterFrame,
@@ -5,9 +12,12 @@ import {
   LatexMathRegion,
   LatexMathMode,
   LatexPendingSnippetSuppression,
+  LatexPendingTextArgument,
   LatexScanState,
   LatexSnippetSuppressionCommand,
   LatexSnippetSuppressionFrame,
+  LatexTextArgumentCommand,
+  LatexTextArgumentFrame,
 } from './types';
 
 const BLOCK_MATH_ENVIRONMENTS = new Set([
@@ -51,7 +61,86 @@ const MATRIX_ENVIRONMENTS = new Set([
   'cases',
 ]);
 
-const VERBATIM_ENVIRONMENTS = new Set(['verbatim', 'Verbatim', 'lstlisting', 'minted']);
+const VERBATIM_ENVIRONMENTS = new Set([
+  'verbatim',
+  'verbatim*',
+  'Verbatim',
+  'Verbatim*',
+  'lstlisting',
+  'minted',
+  'comment',
+  'filecontents',
+  'filecontents*',
+]);
+
+/**
+ * Match the physical closing syntax of an opaque LaTeX environment.
+ *
+ * Opaque bodies do not recursively parse nested `\\begin` text. The base
+ * verbatim/filecontents implementations and the common verbatim packages use
+ * the first exact `\\end{name}` marker. The comment package is stricter: its
+ * marker must occupy a physical line by itself, with no leading or trailing
+ * characters. Keeping that distinction here prevents literal body text from
+ * becoming source-authoritative formulas, labels, or project includes.
+ */
+export function isLatexOpaqueEnvironmentEndAt(
+  text: string,
+  offset: number,
+  environment: string,
+): boolean {
+  const marker = `\\end{${environment}}`;
+  if (!text.startsWith(marker, offset)) {
+    return false;
+  }
+  if (environment !== 'comment') {
+    return true;
+  }
+  const before = offset === 0 ? undefined : text[offset - 1];
+  const afterOffset = offset + marker.length;
+  const after = afterOffset >= text.length ? undefined : text[afterOffset];
+  return (before === undefined || before === '\n' || before === '\r') &&
+    (after === undefined || after === '\n' || after === '\r');
+}
+
+export function findLatexOpaqueEnvironmentEnd(
+  text: string,
+  from: number,
+  limit: number,
+  environment: string,
+): number | undefined {
+  const marker = `\\end{${environment}}`;
+  let candidate = text.indexOf(marker, Math.max(0, from));
+  while (candidate >= 0 && candidate < limit) {
+    const end = candidate + marker.length;
+    if (end <= limit && isLatexOpaqueEnvironmentEndAt(text, candidate, environment)) {
+      return end;
+    }
+    candidate = text.indexOf(marker, candidate + 1);
+  }
+  return undefined;
+}
+
+// These commands are known to parse their mandatory argument in text mode.
+// Keep this as an exact allowlist: custom commands and math alphabet commands
+// can have unrelated argument semantics and must retain the ambient mode.
+const TEXT_ARGUMENT_COMMANDS = new Set<LatexTextArgumentCommand>([
+  'text',
+  'textrm',
+  'textsf',
+  'texttt',
+  'textnormal',
+  'textbf',
+  'textmd',
+  'textit',
+  'textsl',
+  'textsc',
+  'textup',
+  'emph',
+  'mbox',
+  'hbox',
+  'intertext',
+  'shortintertext',
+]);
 
 interface MutableLatexScanState {
   environments: LatexEnvironmentFrame[];
@@ -61,6 +150,8 @@ interface MutableLatexScanState {
   verbatimEnvironment: string | undefined;
   pendingSnippetSuppression: LatexPendingSnippetSuppression | undefined;
   snippetSuppression: LatexSnippetSuppressionFrame | undefined;
+  pendingTextArgument: LatexPendingTextArgument | undefined;
+  textArguments: LatexTextArgumentFrame[];
 }
 
 export function createLatexScanState(): LatexScanState {
@@ -72,6 +163,8 @@ export function createLatexScanState(): LatexScanState {
     verbatimEnvironment: undefined,
     pendingSnippetSuppression: undefined,
     snippetSuppression: undefined,
+    pendingTextArgument: undefined,
+    textArguments: [],
   };
 }
 
@@ -91,6 +184,14 @@ function mutableCopy(state: LatexScanState | undefined): MutableLatexScanState {
       source.snippetSuppression === undefined
         ? undefined
         : { ...source.snippetSuppression },
+    pendingTextArgument:
+      source.pendingTextArgument === undefined
+        ? undefined
+        : { ...source.pendingTextArgument },
+    textArguments: source.textArguments.map((frame) => ({
+      ...frame,
+      delimiter: frame.delimiter === undefined ? undefined : { ...frame.delimiter },
+    })),
   };
 }
 
@@ -109,11 +210,25 @@ function freezeState(state: MutableLatexScanState): LatexScanState {
       state.snippetSuppression === undefined
         ? undefined
         : { ...state.snippetSuppression },
+    pendingTextArgument:
+      state.pendingTextArgument === undefined
+        ? undefined
+        : { ...state.pendingTextArgument },
+    textArguments: state.textArguments.map((frame) => ({
+      ...frame,
+      delimiter: frame.delimiter === undefined ? undefined : { ...frame.delimiter },
+    })),
   };
 }
 
 function snippetSuppressionCommand(command: string): LatexSnippetSuppressionCommand | undefined {
   return command === 'label' || command === 'tag' ? command : undefined;
+}
+
+function textArgumentCommand(command: string): LatexTextArgumentCommand | undefined {
+  return TEXT_ARGUMENT_COMMANDS.has(command as LatexTextArgumentCommand)
+    ? (command as LatexTextArgumentCommand)
+    : undefined;
 }
 
 function normalizeEnvironmentName(name: string): string {
@@ -122,6 +237,40 @@ function normalizeEnvironmentName(name: string): string {
 
 function environmentIs(name: string, set: ReadonlySet<string>): boolean {
   return set.has(name) || set.has(normalizeEnvironmentName(name));
+}
+
+function delimiterMathMode(delimiter: LatexDelimiterFrame | undefined): LatexMathMode | undefined {
+  if (delimiter?.kind === 'dollar-inline' || delimiter?.kind === 'paren') {
+    return 'inline';
+  }
+  return delimiter === undefined ? undefined : 'block';
+}
+
+function activeTextArgument(
+  state: Pick<LatexScanState, 'textArguments'>,
+): LatexTextArgumentFrame | undefined {
+  return state.textArguments[state.textArguments.length - 1];
+}
+
+function mathModeFromState(
+  state: Pick<LatexScanState, 'delimiter' | 'environments' | 'textArguments'>,
+): LatexMathMode {
+  const textArgument = activeTextArgument(state);
+  if (textArgument !== undefined) {
+    return delimiterMathMode(textArgument.delimiter) ?? 'text';
+  }
+
+  const delimiterMode = delimiterMathMode(state.delimiter);
+  if (delimiterMode !== undefined) {
+    return delimiterMode;
+  }
+  if (state.environments.some((frame) => environmentIs(frame.name, BLOCK_MATH_ENVIRONMENTS))) {
+    return 'block';
+  }
+  if (state.environments.some((frame) => environmentIs(frame.name, INLINE_MATH_ENVIRONMENTS))) {
+    return 'inline';
+  }
+  return 'text';
 }
 
 function readCommand(text: string, slashOffset: number): { command: string; end: number } {
@@ -169,15 +318,39 @@ function openDelimiter(
   kind: LatexDelimiterFrame['kind'],
   startOffset: number,
 ): void {
+  const frameIndex = state.textArguments.length - 1;
+  const frame = state.textArguments[frameIndex];
+  if (frame !== undefined) {
+    if (frame.delimiter === undefined) {
+      state.textArguments[frameIndex] = {
+        ...frame,
+        delimiter: { kind, startOffset },
+      };
+    }
+    return;
+  }
   if (state.delimiter === undefined) {
     state.delimiter = { kind, startOffset };
   }
 }
 
 function closeDelimiter(state: MutableLatexScanState, kind: LatexDelimiterFrame['kind']): void {
+  const frameIndex = state.textArguments.length - 1;
+  const frame = state.textArguments[frameIndex];
+  if (frame !== undefined) {
+    if (frame.delimiter?.kind === kind) {
+      state.textArguments[frameIndex] = { ...frame, delimiter: undefined };
+    }
+    return;
+  }
   if (state.delimiter?.kind === kind) {
     state.delimiter = undefined;
   }
+}
+
+function currentDelimiter(state: MutableLatexScanState): LatexDelimiterFrame | undefined {
+  return activeTextArgument(state)?.delimiter ??
+    (state.textArguments.length === 0 ? state.delimiter : undefined);
 }
 
 /**
@@ -197,7 +370,7 @@ export function scanLatexSegment(
 
     if (state.verbatimEnvironment !== undefined) {
       const endToken = `\\end{${state.verbatimEnvironment}}`;
-      if (text.startsWith(endToken, index)) {
+      if (isLatexOpaqueEnvironmentEndAt(text, index, state.verbatimEnvironment)) {
         closeEnvironment(state, state.verbatimEnvironment);
         state.verbatimEnvironment = undefined;
         index += endToken.length;
@@ -297,6 +470,32 @@ export function scanLatexSegment(
       state.pendingSnippetSuppression = undefined;
     }
 
+    // A closed set of text-producing commands locally leaves ambient math
+    // mode for its mandatory argument. Whitespace and comments may separate
+    // the command from `{`; any other token cancels the pending argument.
+    if (state.pendingTextArgument !== undefined) {
+      if (/\s/.test(char!)) {
+        index += 1;
+        continue;
+      }
+      if (char === '%') {
+        state.inComment = true;
+        index += 1;
+        continue;
+      }
+      if (char === '{') {
+        state.textArguments.push({
+          command: state.pendingTextArgument.command,
+          braceDepth: 1,
+          delimiter: undefined,
+        });
+        state.pendingTextArgument = undefined;
+        index += 1;
+        continue;
+      }
+      state.pendingTextArgument = undefined;
+    }
+
     if (char === '%') {
       state.inComment = true;
       index += 1;
@@ -313,6 +512,13 @@ export function scanLatexSegment(
           command: suppressedCommand,
           starConsumed: false,
         };
+        index = end;
+        continue;
+      }
+
+      const textCommand = textArgumentCommand(command);
+      if (textCommand !== undefined && mathModeFromState(state) !== 'text') {
+        state.pendingTextArgument = { command: textCommand };
         index = end;
         continue;
       }
@@ -375,20 +581,44 @@ export function scanLatexSegment(
       continue;
     }
 
+    const textArgumentIndex = state.textArguments.length - 1;
+    const textArgument = state.textArguments[textArgumentIndex];
+    if (textArgument !== undefined && char === '{') {
+      state.textArguments[textArgumentIndex] = {
+        ...textArgument,
+        braceDepth: textArgument.braceDepth + 1,
+      };
+      index += 1;
+      continue;
+    }
+    if (textArgument !== undefined && char === '}') {
+      if (textArgument.braceDepth === 1) {
+        state.textArguments.pop();
+      } else {
+        state.textArguments[textArgumentIndex] = {
+          ...textArgument,
+          braceDepth: textArgument.braceDepth - 1,
+        };
+      }
+      index += 1;
+      continue;
+    }
+
     if (char === '$') {
       const isDouble = text[index + 1] === '$';
       const absoluteOffset = baseOffset + index;
+      const delimiter = currentDelimiter(state);
       if (isDouble) {
-        if (state.delimiter?.kind === 'dollar-block') {
-          state.delimiter = undefined;
-        } else if (state.delimiter === undefined) {
+        if (delimiter?.kind === 'dollar-block') {
+          closeDelimiter(state, 'dollar-block');
+        } else if (delimiter === undefined) {
           openDelimiter(state, 'dollar-block', absoluteOffset);
         }
         index += 2;
       } else {
-        if (state.delimiter?.kind === 'dollar-inline') {
-          state.delimiter = undefined;
-        } else if (state.delimiter === undefined) {
+        if (delimiter?.kind === 'dollar-inline') {
+          closeDelimiter(state, 'dollar-inline');
+        } else if (delimiter === undefined) {
           openDelimiter(state, 'dollar-inline', absoluteOffset);
         }
         index += 1;
@@ -403,23 +633,16 @@ export function scanLatexSegment(
 }
 
 export function latexContextFromState(state: LatexScanState): LatexContext {
-  let mathMode: LatexMathMode = 'text';
-  if (state.delimiter?.kind === 'dollar-inline' || state.delimiter?.kind === 'paren') {
-    mathMode = 'inline';
-  } else if (state.delimiter !== undefined) {
-    mathMode = 'block';
-  } else if (state.environments.some((frame) => environmentIs(frame.name, BLOCK_MATH_ENVIRONMENTS))) {
-    mathMode = 'block';
-  } else if (state.environments.some((frame) => environmentIs(frame.name, INLINE_MATH_ENVIRONMENTS))) {
-    mathMode = 'inline';
-  }
+  const mathMode = mathModeFromState(state);
 
   let matrixEnvironment: string | undefined;
-  for (let index = state.environments.length - 1; index >= 0; index -= 1) {
-    const frame = state.environments[index];
-    if (frame !== undefined && environmentIs(frame.name, MATRIX_ENVIRONMENTS)) {
-      matrixEnvironment = frame.name;
-      break;
+  if (mathMode !== 'text' && state.textArguments.length === 0) {
+    for (let index = state.environments.length - 1; index >= 0; index -= 1) {
+      const frame = state.environments[index];
+      if (frame !== undefined && environmentIs(frame.name, MATRIX_ENVIRONMENTS)) {
+        matrixEnvironment = frame.name;
+        break;
+      }
     }
   }
 
@@ -427,6 +650,7 @@ export function latexContextFromState(state: LatexScanState): LatexContext {
     mathMode,
     inComment: state.inComment,
     inVerbatim: state.verbatimDelimiter !== undefined || state.verbatimEnvironment !== undefined,
+    inTextCommandArgument: state.textArguments.length > 0,
     inSnippetSuppressedArgument: state.snippetSuppression !== undefined,
     snippetSuppressionCommand: state.snippetSuppression?.command,
     environments: state.environments.map((frame) => frame.name),
@@ -482,6 +706,10 @@ export function scanLatexRegions(text: string): readonly LatexMathRegion[] {
   const regions: LatexMathRegion[] = [];
   const environments: RegionEnvironmentFrame[] = [];
   let delimiter: RegionDelimiterFrame | undefined;
+  let pendingSnippetSuppression: LatexPendingSnippetSuppression | undefined;
+  let snippetSuppression: LatexSnippetSuppressionFrame | undefined;
+  let pendingTextArgument: LatexPendingTextArgument | undefined;
+  const textArguments: LatexTextArgumentFrame[] = [];
   let inComment = false;
   let verbatimDelimiter: string | undefined;
   let verbatimEnvironment: string | undefined;
@@ -502,12 +730,59 @@ export function scanLatexRegions(text: string): readonly LatexMathRegion[] {
     delimiter = undefined;
   };
 
+  const effectiveRegionMathMode = (): LatexMathMode => {
+    const textArgument = textArguments[textArguments.length - 1];
+    if (textArgument !== undefined) {
+      return delimiterMathMode(textArgument.delimiter) ?? 'text';
+    }
+    if (delimiter !== undefined) {
+      return delimiter.mode;
+    }
+    for (let frameIndex = environments.length - 1; frameIndex >= 0; frameIndex -= 1) {
+      const mode = environments[frameIndex]?.mode;
+      if (mode !== undefined) {
+        return mode;
+      }
+    }
+    return 'text';
+  };
+
+  const openLocalDelimiter = (
+    kind: LatexDelimiterFrame['kind'],
+    startOffset: number,
+  ): boolean => {
+    const frameIndex = textArguments.length - 1;
+    const frame = textArguments[frameIndex];
+    if (frame === undefined) {
+      return false;
+    }
+    if (frame.delimiter === undefined) {
+      textArguments[frameIndex] = {
+        ...frame,
+        delimiter: { kind, startOffset },
+      };
+    }
+    return true;
+  };
+
+  const closeLocalDelimiter = (kind: LatexDelimiterFrame['kind']): boolean => {
+    const frameIndex = textArguments.length - 1;
+    const frame = textArguments[frameIndex];
+    if (frame === undefined) {
+      return false;
+    }
+    if (frame.delimiter?.kind === kind) {
+      textArguments[frameIndex] = { ...frame, delimiter: undefined };
+    }
+    return true;
+  };
+
   while (index < text.length) {
     const char = text[index];
 
     if (verbatimEnvironment !== undefined) {
       const endToken = `\\end{${verbatimEnvironment}}`;
-      if (text.startsWith(endToken, index)) {
+      if (isLatexOpaqueEnvironmentEndAt(text, index, verbatimEnvironment)) {
         for (let frameIndex = environments.length - 1; frameIndex >= 0; frameIndex -= 1) {
           if (environments[frameIndex]?.name === verbatimEnvironment) {
             environments.splice(frameIndex, 1);
@@ -538,6 +813,91 @@ export function scanLatexRegions(text: string): readonly LatexMathRegion[] {
       continue;
     }
 
+    if (snippetSuppression !== undefined) {
+      if (char === '%') {
+        inComment = true;
+        index += 1;
+        continue;
+      }
+      if (char === '\\') {
+        const { end } = readCommand(text, index);
+        index = Math.max(index + 1, end);
+        continue;
+      }
+      if (char === '{') {
+        snippetSuppression = {
+          ...snippetSuppression,
+          braceDepth: snippetSuppression.braceDepth + 1,
+        };
+        index += 1;
+        continue;
+      }
+      if (char === '}') {
+        const braceDepth = snippetSuppression.braceDepth - 1;
+        snippetSuppression = braceDepth === 0
+          ? undefined
+          : { ...snippetSuppression, braceDepth };
+        index += 1;
+        continue;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (pendingSnippetSuppression !== undefined) {
+      if (/\s/.test(char!)) {
+        index += 1;
+        continue;
+      }
+      if (char === '%') {
+        inComment = true;
+        index += 1;
+        continue;
+      }
+      if (
+        char === '*' &&
+        pendingSnippetSuppression.command === 'tag' &&
+        !pendingSnippetSuppression.starConsumed
+      ) {
+        pendingSnippetSuppression = { command: 'tag', starConsumed: true };
+        index += 1;
+        continue;
+      }
+      if (char === '{') {
+        snippetSuppression = {
+          command: pendingSnippetSuppression.command,
+          braceDepth: 1,
+        };
+        pendingSnippetSuppression = undefined;
+        index += 1;
+        continue;
+      }
+      pendingSnippetSuppression = undefined;
+    }
+
+    if (pendingTextArgument !== undefined) {
+      if (/\s/.test(char!)) {
+        index += 1;
+        continue;
+      }
+      if (char === '%') {
+        inComment = true;
+        index += 1;
+        continue;
+      }
+      if (char === '{') {
+        textArguments.push({
+          command: pendingTextArgument.command,
+          braceDepth: 1,
+          delimiter: undefined,
+        });
+        pendingTextArgument = undefined;
+        index += 1;
+        continue;
+      }
+      pendingTextArgument = undefined;
+    }
+
     if (char === '%') {
       inComment = true;
       index += 1;
@@ -547,7 +907,28 @@ export function scanLatexRegions(text: string): readonly LatexMathRegion[] {
     if (char === '\\') {
       const { command, end } = readCommand(text, index);
 
+      const suppressedCommand = snippetSuppressionCommand(command);
+      if (suppressedCommand !== undefined) {
+        pendingSnippetSuppression = {
+          command: suppressedCommand,
+          starConsumed: false,
+        };
+        index = end;
+        continue;
+      }
+
+      const textCommand = textArgumentCommand(command);
+      if (textCommand !== undefined && effectiveRegionMathMode() !== 'text') {
+        pendingTextArgument = { command: textCommand };
+        index = end;
+        continue;
+      }
+
       if (command === '(') {
+        if (openLocalDelimiter('paren', index)) {
+          index = end;
+          continue;
+        }
         if (delimiter === undefined) {
           delimiter = {
             kind: 'paren',
@@ -560,6 +941,10 @@ export function scanLatexRegions(text: string): readonly LatexMathRegion[] {
         continue;
       }
       if (command === ')') {
+        if (closeLocalDelimiter('paren')) {
+          index = end;
+          continue;
+        }
         if (delimiter?.kind === 'paren') {
           closeDelimiterRegion(index, end);
         }
@@ -567,6 +952,10 @@ export function scanLatexRegions(text: string): readonly LatexMathRegion[] {
         continue;
       }
       if (command === '[') {
+        if (openLocalDelimiter('bracket', index)) {
+          index = end;
+          continue;
+        }
         if (delimiter === undefined) {
           delimiter = {
             kind: 'bracket',
@@ -579,6 +968,10 @@ export function scanLatexRegions(text: string): readonly LatexMathRegion[] {
         continue;
       }
       if (command === ']') {
+        if (closeLocalDelimiter('bracket')) {
+          index = end;
+          continue;
+        }
         if (delimiter?.kind === 'bracket') {
           closeDelimiterRegion(index, end);
         }
@@ -647,8 +1040,50 @@ export function scanLatexRegions(text: string): readonly LatexMathRegion[] {
       continue;
     }
 
+    const textArgumentIndex = textArguments.length - 1;
+    const textArgument = textArguments[textArgumentIndex];
+    if (textArgument !== undefined && char === '{') {
+      textArguments[textArgumentIndex] = {
+        ...textArgument,
+        braceDepth: textArgument.braceDepth + 1,
+      };
+      index += 1;
+      continue;
+    }
+    if (textArgument !== undefined && char === '}') {
+      if (textArgument.braceDepth === 1) {
+        textArguments.pop();
+      } else {
+        textArguments[textArgumentIndex] = {
+          ...textArgument,
+          braceDepth: textArgument.braceDepth - 1,
+        };
+      }
+      index += 1;
+      continue;
+    }
+
     if (char === '$') {
       const isDouble = text[index + 1] === '$';
+      const localDelimiter = textArguments[textArguments.length - 1]?.delimiter;
+      if (textArguments.length > 0) {
+        if (isDouble) {
+          if (localDelimiter?.kind === 'dollar-block') {
+            closeLocalDelimiter('dollar-block');
+          } else if (localDelimiter === undefined) {
+            openLocalDelimiter('dollar-block', index);
+          }
+          index += 2;
+        } else {
+          if (localDelimiter?.kind === 'dollar-inline') {
+            closeLocalDelimiter('dollar-inline');
+          } else if (localDelimiter === undefined) {
+            openLocalDelimiter('dollar-inline', index);
+          }
+          index += 1;
+        }
+        continue;
+      }
       if (isDouble) {
         if (delimiter?.kind === 'dollar-block') {
           closeDelimiterRegion(index, index + 2);

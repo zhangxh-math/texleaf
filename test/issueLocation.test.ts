@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -7,6 +14,21 @@ test('keeps an exact ASCII UTF-16 range', () => {
   assert.deepEqual(
     resolveIssueLocation('This are wrong.', 5, 8, 'are'),
     { ok: true, start: 5, end: 8 },
+  );
+});
+
+test('accepts only an exact zero-width UTF-16 insertion for an empty original', () => {
+  assert.deepEqual(
+    resolveIssueLocation('formula, then prose', 7, 7, ''),
+    { ok: true, start: 7, end: 7 },
+  );
+  assert.deepEqual(
+    resolveIssueLocation('formula, then prose', 7, 8, ''),
+    { ok: false, code: 'invalid-issue-offset' },
+  );
+  assert.deepEqual(
+    resolveIssueLocation('formula, then prose', 99, 99, ''),
+    { ok: false, code: 'invalid-issue-offset' },
   );
 });
 

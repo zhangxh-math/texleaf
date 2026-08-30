@@ -1,6 +1,16 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import { FractionNumeratorOptions, FractionNumeratorPlan } from './types';
 
-const DEFAULT_BREAKING_CHARACTERS = '+-=,;:&\t';
+const DEFAULT_BREAKING_CHARACTERS = '+-=,;:&<>≤≥\t';
+
+/** Relation control words which must stay outside an automatically built fraction. */
+const RELATION_CONTROL_WORD = /\\(?:leq?|geq?)$/u;
 
 // TeX ignores the single delimiter space after a control word. Snippet Leaf's
 // upstream fraction finder consequently treats this space as part of a Greek
@@ -87,6 +97,19 @@ function isGreekDelimiterSpace(text: string, offset: number, lowerBound: number)
   return text[offset] === ' ' && GREEK_CONTROL_WORD.test(text.slice(lowerBound, offset));
 }
 
+function relationControlWordStart(
+  text: string,
+  endExclusive: number,
+  lowerBound: number,
+): number | undefined {
+  const match = RELATION_CONTROL_WORD.exec(text.slice(lowerBound, endExclusive));
+  if (match === null) {
+    return undefined;
+  }
+  const start = lowerBound + match.index;
+  return isEscaped(text, start) ? undefined : start;
+}
+
 /**
  * Locate the numerator immediately before a just-typed slash. The routine is
  * deliberately independent of editor state; callers normally pass the current
@@ -118,6 +141,14 @@ export function findFractionNumerator(
       sourceStart = openOffset;
       index = openOffset - 1;
       continue;
+    }
+
+    // A relation written as a TeX control word is a semantic boundary just
+    // like a literal '=', '<', or '>'.  Stop before the whole command so
+    // `\\leq1/2` becomes `\\leq\\frac{1}{2}`, never
+    // `\\frac{\\leq1}{2}`.
+    if (relationControlWordStart(text, index + 1, lowerBound) !== undefined) {
+      break;
     }
 
     if (!isEscaped(text, index) && boundaryCharacters.has(char)) {

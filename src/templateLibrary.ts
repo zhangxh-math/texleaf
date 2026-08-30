@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 export const TEMPLATE_LIBRARY_STATE_KEY = "texleaf.templateLibrary.v1";
 /**
  * One-time, synchronisable acknowledgement for the 1.0 article trigger rename.

@@ -1,5 +1,13 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import { createHash } from "node:crypto";
 import * as vscode from "vscode";
+import { visualDiagnosticCode } from "./problemDiagnostics";
 import {
   DEEPSEEK_API_BASE_URL,
   DEEPSEEK_SECRET_KEY_PREFIX,
@@ -13,10 +21,12 @@ import {
   deepSeekProviderIdentityFor,
   normalizeOpenAIModel,
   openAIProviderIdentityFor,
+  type DeepSeekDiagnosticResult,
   type DeepSeekUsage,
 } from "./ai";
 import {
   advanceAiDirtyReviewProgress,
+  aiProseCompletionContextAtOffset,
   aiIssueMatchesCapturedIdentity,
   aiIssueRangesOverlap,
   aiIssueReplacementAlreadyPresent,
@@ -32,6 +42,7 @@ import {
   choosePendingAiAutomaticReviewTarget,
   planAiIssueRetention,
   planAiProseIssues,
+  removeAiCompletionSuffixOverlap,
   restorePersistedAiIssues,
   selectAiProseSentenceSegmentsForRanges,
   selectAiProseSegmentsForDocumentReview,
@@ -52,6 +63,7 @@ import type {
   AiIssuesTreeSnapshot,
   AiIssuesTreeSource,
 } from "./aiIssuesTree";
+import { VISUAL_EDITOR_REVEAL_RANGE_COMMAND } from "./visualEditorProtocol";
 
 const MAX_IGNORED_FINGERPRINTS = 1_024;
 const MAX_AUTOMATIC_REVIEW_KEYS_PER_VERSION = 64;
@@ -62,11 +74,25 @@ const MAX_STORED_ISSUES_PER_DOCUMENT = 2_048;
 const INTERNAL_APPLY_COMMAND = "texleaf.aiWriting.applyIssue";
 const INTERNAL_IGNORE_COMMAND = "texleaf.aiWriting.ignoreIssue";
 const INTERNAL_REVEAL_COMMAND = "texleaf.aiWriting.revealIssue";
-const AI_ISSUES_FOCUS_COMMAND = "texleaf.aiIssues.focus";
-const TEXLEAF_VIEW_CONTAINER_COMMAND = "workbench.view.extension.texleaf";
+export const TEXLEAF_AI_DIAGNOSTIC_SOURCE = "TeXLeaf AI";
+const AI_PROBLEM_DOCUMENT_SCHEME = "texleaf-ai-problem";
+/**
+ * Keep the Problems resource visually named after the source file without
+ * letting a `*.tex` custom-editor association claim the transient mirror.
+ * U+2063 is an invisible separator: it is part of the virtual basename for
+ * glob matching, but contributes no visible glyph to the Problems tree/tab.
+ */
+const AI_PROBLEM_DOCUMENT_NAME_GUARD = "\u2063";
+const AI_PROBLEM_NAVIGATION_SETTLE_MS = 20;
+const AI_PROBLEM_NAVIGATION_RETRY_COUNT = 20;
+const AI_PROBLEM_NAVIGATION_COOLDOWN_MS = 500;
 const AI_SELECTOR: vscode.DocumentSelector = [
   { language: "latex", pattern: "**/*.tex" },
   { language: "tex", pattern: "**/*.tex" },
+];
+const AI_CODE_ACTION_SELECTOR: vscode.DocumentSelector = [
+  ...AI_SELECTOR,
+  { scheme: AI_PROBLEM_DOCUMENT_SCHEME },
 ];
 
 interface StoredIssue {
@@ -87,6 +113,12 @@ interface StoredIssue {
 interface DocumentIssues {
   readonly version: number;
   readonly issues: readonly StoredIssue[];
+}
+
+export interface AiDiagnosticInsight {
+  readonly explanation: string;
+  readonly suggestion: string;
+  readonly model: string;
 }
 
 interface SelectedIssue {
@@ -120,7 +152,10 @@ interface ReadyClient {
   readonly secretFingerprint: string;
 }
 
-type AIWritingClient = Pick<DeepSeekClient, "review" | "rewrite" | "complete">;
+type AIWritingClient = Pick<
+  DeepSeekClient,
+  "review" | "rewrite" | "complete" | "explainDiagnostic"
+>;
 
 interface ProviderContextBase {
   readonly label: "DeepSeek" | "OpenAI";
@@ -193,24 +228,9 @@ export class AIWritingController
     AiIssuesTreeSource
 {
   private readonly disposables: vscode.Disposable[] = [];
-  /**
-   * AI issues use an editor decoration instead of a DiagnosticCollection.
-   *
-   * VS Code always renders a diagnostic's built-in hover before extension
-   * hover providers. Publishing the same issue as both a diagnostic and our
-   * richer TeXLeaf hover therefore duplicated the message. A decoration keeps
-   * the visible problem marker while the dedicated issue tree remains the
-   * canonical list and our HoverProvider is the only detailed hover card.
-   */
-  private readonly issueDecoration =
-    vscode.window.createTextEditorDecorationType({
-      rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
-      borderWidth: "0 0 1px 0",
-      borderStyle: "none none dotted none",
-      borderColor: new vscode.ThemeColor("editorInfo.foreground"),
-      overviewRulerColor: new vscode.ThemeColor("editorInfo.foreground"),
-      overviewRulerLane: vscode.OverviewRulerLane.Right,
-    });
+  /** Native diagnostics make the AI queue available in VS Code's Problems view. */
+  private readonly issueDiagnostics =
+    vscode.languages.createDiagnosticCollection("texleaf-ai");
   /**
    * The tree's current issue gets a separate, silent overlay. An outline is
    * used instead of another border so the normal dotted issue marker remains
@@ -230,6 +250,15 @@ export class AIWritingController
   );
   private readonly issueListEmitter = new vscode.EventEmitter<void>();
   public readonly onDidChange = this.issueListEmitter.event;
+  /**
+   * Problems cannot reveal a range inside a custom text editor directly. AI
+   * diagnostics therefore live on a read-only mirror URI. Opening that URI is
+   * observable as an ordinary text-editor selection, which we immediately
+   * route back to the real visual-editor document.
+   */
+  private readonly problemDocumentEmitter = new vscode.EventEmitter<vscode.Uri>();
+  private readonly problemSourceByProxy = new Map<string, string>();
+  private readonly problemProxyBySource = new Map<string, vscode.Uri>();
   private readonly issueState = new Map<string, DocumentIssues>();
   private selectedIssue: SelectedIssue | undefined;
   /** Monotonic token which makes the most recent Tree reveal request win. */
@@ -243,6 +272,11 @@ export class AIWritingController
   >();
   private readonly reviewSummaries = new Map<string, ReviewSummary>();
   private readonly ignored = new Set<string>();
+  private readonly diagnosticInsightCache = new Map<string, AiDiagnosticInsight>();
+  private readonly diagnosticInsightRequests = new Map<
+    string,
+    Promise<AiDiagnosticInsight | undefined>
+  >();
   private readonly automaticTimers = new Map<
     string,
     ReturnType<typeof setTimeout>
@@ -261,6 +295,20 @@ export class AIWritingController
   private globalRestoreEpoch = 0;
   private gateRevision = 0;
   private statusGeneration = 0;
+  /**
+   * Problems opens AI diagnostics through a short-lived read-only mirror.
+   * VS Code reports that transition through several independent events
+   * (document open, tab activation, visible editors, and selection).  Keep one
+   * debounced hand-off per mirror instead of allowing those expected events to
+   * invalidate one another through a single global epoch.
+   */
+  private readonly problemNavigationTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+  private readonly problemNavigationInFlight = new Set<string>();
+  /** Suppress late activation/visibility events after a mirror was consumed. */
+  private readonly problemNavigationCooldowns = new Map<string, number>();
 
   public constructor(
     private readonly context: vscode.ExtensionContext,
@@ -273,15 +321,26 @@ export class AIWritingController
 
   public register(): void {
     for (const document of vscode.workspace.textDocuments) {
+      if (this.isProblemDocument(document)) {
+        continue;
+      }
       this.rememberDocumentSource(document);
       void this.restoreDocumentIssues(document);
     }
     this.disposables.push(
-      this.issueDecoration,
+      this.issueDiagnostics,
       this.selectedIssueDecoration,
       this.status,
       this.issueListEmitter,
-      vscode.languages.registerCodeActionsProvider(AI_SELECTOR, this, {
+      this.problemDocumentEmitter,
+      vscode.workspace.registerTextDocumentContentProvider(
+        AI_PROBLEM_DOCUMENT_SCHEME,
+        {
+          onDidChange: this.problemDocumentEmitter.event,
+          provideTextDocumentContent: (uri) => this.problemDocumentContent(uri),
+        },
+      ),
+      vscode.languages.registerCodeActionsProvider(AI_CODE_ACTION_SELECTOR, this, {
         providedCodeActionKinds: [
           vscode.CodeActionKind.QuickFix,
           vscode.CodeActionKind.RefactorRewrite,
@@ -346,8 +405,17 @@ export class AIWritingController
         this.scheduleAutomaticReview(document, offset);
       }),
       vscode.workspace.onDidOpenTextDocument((document) => {
+        if (this.isProblemDocument(document)) {
+          // Problems may create the read-only mirror before it makes the
+          // corresponding text editor active.  Activation/selection events
+          // normally perform the hand-off, while this extra hook covers VS
+          // Code builds which deliver the open event last.
+          this.scheduleProblemNavigationForUri(document.uri);
+          return;
+        }
         this.rememberDocumentSource(document);
         void this.restoreDocumentIssues(document);
+        this.issueListEmitter.fire();
         if (document === vscode.window.activeTextEditor?.document) {
           this.scheduleAutomaticReview(document, 0);
         }
@@ -356,6 +424,10 @@ export class AIWritingController
         this.forgetDocument(document),
       ),
       vscode.window.onDidChangeActiveTextEditor((editor) => {
+        if (editor !== undefined && this.isProblemDocument(editor.document)) {
+          this.scheduleProblemNavigation(editor);
+          return;
+        }
         // Do not clear the Tree-selected overlay here. `showTextDocument` with
         // `preserveFocus` may still emit active-editor changes, and an older
         // reveal request must not erase a newer selection. The overlay's own
@@ -370,10 +442,34 @@ export class AIWritingController
           );
         }
       }),
+      vscode.window.tabGroups.onDidChangeTabs(() => {
+        this.issueListEmitter.fire();
+        this.scheduleActiveProblemNavigation();
+      }),
+      vscode.window.tabGroups.onDidChangeTabGroups(() => {
+        this.issueListEmitter.fire();
+        this.scheduleActiveProblemNavigation();
+      }),
       vscode.window.onDidChangeVisibleTextEditors(() => {
         this.refreshIssueDecorations();
+        // A Problems click can make a virtual text editor visible without
+        // delivering an active-editor event to an extension host which was
+        // busy resolving the custom editor.  Treat visibility as a third,
+        // idempotent hand-off signal so the transient mirror can never strand
+        // the user outside the visual editor.
+        for (const editor of vscode.window.visibleTextEditors) {
+          if (this.isProblemDocument(editor.document)) {
+            this.scheduleProblemNavigation(editor);
+          }
+        }
       }),
       vscode.window.onDidChangeTextEditorSelection((event) => {
+        if (this.isProblemDocument(event.textEditor.document)) {
+          if (event.textEditor === vscode.window.activeTextEditor) {
+            this.scheduleProblemNavigation(event.textEditor);
+          }
+          return;
+        }
         if (
           event.textEditor === vscode.window.activeTextEditor &&
           event.selections.length > 0
@@ -395,6 +491,7 @@ export class AIWritingController
         this.gateRevision += 1;
         this.cancelAllAutomaticReviews();
         this.automaticReviewKeys.clear();
+        this.diagnosticInsightCache.clear();
         this.abortAll();
         this.clearAllDiagnostics();
         void this.updateStatus(vscode.window.activeTextEditor);
@@ -417,6 +514,7 @@ export class AIWritingController
         this.gateRevision += 1;
         this.cancelAllAutomaticReviews();
         this.automaticReviewKeys.clear();
+        this.diagnosticInsightCache.clear();
         this.abortAll();
         this.clearAllDiagnostics();
         void this.updateStatus(vscode.window.activeTextEditor);
@@ -463,6 +561,14 @@ export class AIWritingController
         clearTimeout(timer);
       }
       this.automaticTimers.clear();
+      for (const timer of this.problemNavigationTimers.values()) {
+        clearTimeout(timer);
+      }
+      this.problemNavigationTimers.clear();
+      this.problemNavigationInFlight.clear();
+      this.problemNavigationCooldowns.clear();
+      this.diagnosticInsightCache.clear();
+      this.diagnosticInsightRequests.clear();
       this.issueListEmitter.fire();
       for (const disposable of this.disposables.splice(0)) {
         disposable.dispose();
@@ -472,8 +578,14 @@ export class AIWritingController
   }
 
   public snapshot(): AiIssuesTreeSnapshot {
-    const editor = vscode.window.activeTextEditor;
-    if (editor === undefined || editor.document.isClosed) {
+    return this.snapshotForDocument(this.activeDocumentForProblems());
+  }
+
+  /** Read-only snapshot used by the text-backed visual editor. */
+  public snapshotForDocument(
+    document: vscode.TextDocument | undefined,
+  ): AiIssuesTreeSnapshot {
+    if (document === undefined || document.isClosed) {
       return {
         enabled: false,
         supported: false,
@@ -481,6 +593,7 @@ export class AIWritingController
         scheduled: false,
         pendingReviewCount: 0,
         issues: [],
+        diagnostics: [],
         rejectedIssueCount: 0,
         rejectedIssueCodes: [],
         documentLabel: "",
@@ -488,7 +601,6 @@ export class AIWritingController
         version: null,
       };
     }
-    const document = editor.document;
     const config = readConfig(document.uri);
     const supported = this.isStaticScope(document);
     const issuesVisible = supported &&
@@ -529,6 +641,9 @@ export class AIWritingController
         category: issue.category,
         severity: issue.severity,
       })),
+      // Compilation diagnostics belong to LaTeX Workshop's native Problems
+      // contribution. TeXLeaf publishes only its own language issues there.
+      diagnostics: [],
       rejectedIssueCount: issuesVisible && summary?.version === document.version
         ? summary.rejectedIssueCount
         : 0,
@@ -541,23 +656,571 @@ export class AIWritingController
     };
   }
 
+  private activeDocumentForProblems(): vscode.TextDocument | undefined {
+    const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+    let uri: vscode.Uri | undefined;
+    if (input instanceof vscode.TabInputCustom) {
+      uri = input.uri;
+    } else if (input instanceof vscode.TabInputText) {
+      uri = input.uri;
+    }
+    if (uri === undefined && typeof input === "object" && input !== null) {
+      const candidate = (input as { readonly uri?: unknown }).uri;
+      if (candidate instanceof vscode.Uri) {
+        uri = candidate;
+      }
+    }
+    if (uri !== undefined) {
+      uri = this.sourceUriForProblemDocument(uri) ?? uri;
+      const uriText = uri.toString();
+      const document = vscode.workspace.textDocuments.find(
+        (candidate) => candidate.uri.toString() === uriText,
+      );
+      if (document !== undefined) {
+        return document;
+      }
+    }
+    const activeDocument = vscode.window.activeTextEditor?.document;
+    return activeDocument === undefined
+      ? undefined
+      : this.sourceDocumentFor(activeDocument);
+  }
+
+  private isProblemDocument(document: vscode.TextDocument): boolean {
+    return document.uri.scheme === AI_PROBLEM_DOCUMENT_SCHEME;
+  }
+
+  private problemUriForSource(sourceUri: vscode.Uri): vscode.Uri {
+    const sourceText = sourceUri.toString();
+    const existing = this.problemProxyBySource.get(sourceText);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const key = createHash("sha256").update(sourceText).digest("hex").slice(0, 24);
+    const normalizedPath = sourceUri.path.replaceAll("\\", "/");
+    const guardedPath = `${normalizedPath}${AI_PROBLEM_DOCUMENT_NAME_GUARD}`;
+    const proxyUri = vscode.Uri.from({
+      scheme: AI_PROBLEM_DOCUMENT_SCHEME,
+      authority: "problems",
+      // VS Code can surface Windows document URIs whose `path` is still in
+      // drive-letter form. A URI with an authority must use an absolute slash
+      // path, otherwise `Uri.from` throws before Problems can open the mirror.
+      path: guardedPath.startsWith("/") ? guardedPath : `/${guardedPath}`,
+      query: `source=${key}`,
+    });
+    this.problemProxyBySource.set(sourceText, proxyUri);
+    this.problemSourceByProxy.set(proxyUri.toString(), sourceText);
+    return proxyUri;
+  }
+
+  private sourceUriForProblemDocument(uri: vscode.Uri): vscode.Uri | undefined {
+    if (uri.scheme !== AI_PROBLEM_DOCUMENT_SCHEME) {
+      return undefined;
+    }
+    let sourceText = this.problemSourceByProxy.get(uri.toString());
+    if (sourceText === undefined) {
+      // VS Code may canonicalize a virtual URI while opening it from Problems
+      // (notably drive-letter casing and escaped path characters on Windows),
+      // so an exact URI-string lookup is not a sufficient identity. The query
+      // contains a bounded digest of the real resource; recover against only
+      // documents already known to this controller and heal both maps.
+      const key = /^source=([a-f\d]{24})$/iu.exec(uri.query)?.[1]?.toLowerCase();
+      if (key !== undefined) {
+        const candidates = new Set<string>([
+          ...this.documentSources.keys(),
+          ...this.problemProxyBySource.keys(),
+          ...vscode.workspace.textDocuments
+            .filter((document) => !this.isProblemDocument(document))
+            .map((document) => document.uri.toString()),
+        ]);
+        sourceText = [...candidates].find((candidate) =>
+          createHash("sha256").update(candidate).digest("hex").slice(0, 24) === key
+        );
+        if (sourceText !== undefined) {
+          this.problemSourceByProxy.set(uri.toString(), sourceText);
+          this.problemProxyBySource.set(sourceText, uri);
+        }
+      }
+    }
+    if (sourceText === undefined) {
+      return undefined;
+    }
+    try {
+      return vscode.Uri.parse(sourceText, true);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private sourceDocumentFor(
+    document: vscode.TextDocument,
+  ): vscode.TextDocument | undefined {
+    if (!this.isProblemDocument(document)) {
+      return document;
+    }
+    const sourceUri = this.sourceUriForProblemDocument(document.uri);
+    if (sourceUri === undefined) {
+      return undefined;
+    }
+    const sourceText = sourceUri.toString();
+    return vscode.workspace.textDocuments.find((candidate) =>
+      !candidate.isClosed && candidate.uri.toString() === sourceText
+    );
+  }
+
+  private problemDocumentContent(uri: vscode.Uri): string {
+    const sourceUri = this.sourceUriForProblemDocument(uri);
+    if (sourceUri === undefined) {
+      return "";
+    }
+    const sourceText = sourceUri.toString();
+    return vscode.workspace.textDocuments.find((candidate) =>
+      !candidate.isClosed && candidate.uri.toString() === sourceText
+    )?.getText() ?? this.documentSources.get(sourceText)?.source ?? "";
+  }
+
+  private removeProblemDocumentForSource(sourceUri: vscode.Uri): void {
+    const sourceText = sourceUri.toString();
+    const proxyUri = this.problemProxyBySource.get(sourceText);
+    if (proxyUri === undefined) {
+      return;
+    }
+    this.issueDiagnostics.delete(proxyUri);
+    this.problemDocumentEmitter.fire(proxyUri);
+    this.problemProxyBySource.delete(sourceText);
+    this.problemSourceByProxy.delete(proxyUri.toString());
+  }
+
+  /**
+   * Make an explicit source-editor request the final focus-changing operation
+   * after a native Problems click.  Activating the visual custom editor is
+   * observable slightly before its range reveal/flash acknowledgement has
+   * completed, so merely waiting for the visual tab to become active leaves a
+   * narrow race in which that older reveal can steal focus back from source
+   * mode.  Cancel queued mirror hand-offs and wait for the one already in
+   * flight before the caller opens the real text editor.
+   */
+  public async settleProblemNavigationBeforeSource(
+    sourceUri: vscode.Uri,
+  ): Promise<void> {
+    const sourceText = sourceUri.toString();
+    const proxyUriTexts = new Set<string>();
+    const directProxy = this.problemProxyBySource.get(sourceText);
+    if (directProxy !== undefined) {
+      proxyUriTexts.add(directProxy.toString());
+    }
+    for (const [proxyText, candidateSource] of this.problemSourceByProxy) {
+      if (candidateSource === sourceText) {
+        proxyUriTexts.add(proxyText);
+      }
+    }
+    if (proxyUriTexts.size === 0) {
+      return;
+    }
+
+    for (const proxyText of proxyUriTexts) {
+      const timer = this.problemNavigationTimers.get(proxyText);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        this.problemNavigationTimers.delete(proxyText);
+      }
+      this.problemNavigationCooldowns.set(
+        proxyText,
+        Date.now() + AI_PROBLEM_NAVIGATION_COOLDOWN_MS,
+      );
+    }
+
+    const deadline = Date.now() + 1_000;
+    while (
+      Date.now() < deadline &&
+      [...proxyUriTexts].some((proxyText) =>
+        this.problemNavigationInFlight.has(proxyText)
+      )
+    ) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, AI_PROBLEM_NAVIGATION_SETTLE_MS);
+      });
+    }
+
+    // The in-flight reveal may have consumed most of the first cooldown while
+    // awaiting the webview acknowledgement.  Start a fresh bounded tail after
+    // it settles so VS Code's late visibility/selection events remain inert.
+    for (const proxyText of proxyUriTexts) {
+      this.problemNavigationCooldowns.set(
+        proxyText,
+        Date.now() + AI_PROBLEM_NAVIGATION_COOLDOWN_MS,
+      );
+    }
+  }
+
+  private scheduleActiveProblemNavigation(): void {
+    const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+    const uri = input instanceof vscode.TabInputText ||
+        input instanceof vscode.TabInputCustom
+      ? input.uri
+      : typeof input === "object" && input !== null &&
+          (input as { readonly uri?: unknown }).uri instanceof vscode.Uri
+        ? (input as { readonly uri: vscode.Uri }).uri
+        : undefined;
+    if (uri?.scheme === AI_PROBLEM_DOCUMENT_SCHEME) {
+      this.scheduleProblemNavigationForUri(uri);
+    }
+  }
+
+  private scheduleProblemNavigationForUri(
+    uri: vscode.Uri,
+    retry = 0,
+  ): void {
+    if (this.disposed || uri.scheme !== AI_PROBLEM_DOCUMENT_SCHEME) {
+      return;
+    }
+    const uriText = uri.toString();
+    if (this.problemNavigationIsCoolingDown(uriText)) {
+      return;
+    }
+    const editor = vscode.window.visibleTextEditors.find((candidate) =>
+      candidate.document.uri.toString() === uriText
+    );
+    if (editor !== undefined) {
+      this.scheduleProblemNavigation(editor);
+      return;
+    }
+    if (retry >= AI_PROBLEM_NAVIGATION_RETRY_COUNT) {
+      this.output.debug("AI 问题代理标签未形成可见文本编辑器；已停止等待跳转。");
+      return;
+    }
+    const previous = this.problemNavigationTimers.get(uriText);
+    if (previous !== undefined) {
+      clearTimeout(previous);
+    }
+    const timer = setTimeout(() => {
+      if (this.problemNavigationTimers.get(uriText) === timer) {
+        this.problemNavigationTimers.delete(uriText);
+      }
+      this.scheduleProblemNavigationForUri(uri, retry + 1);
+    }, AI_PROBLEM_NAVIGATION_SETTLE_MS);
+    this.problemNavigationTimers.set(uriText, timer);
+  }
+
+  private scheduleProblemNavigation(editor: vscode.TextEditor): void {
+    if (this.disposed || !this.isProblemDocument(editor.document)) {
+      return;
+    }
+    const uriText = editor.document.uri.toString();
+    if (this.problemNavigationIsCoolingDown(uriText)) {
+      return;
+    }
+    const previous = this.problemNavigationTimers.get(uriText);
+    if (previous !== undefined) {
+      clearTimeout(previous);
+    }
+    const timer = setTimeout(() => {
+      if (this.problemNavigationTimers.get(uriText) === timer) {
+        this.problemNavigationTimers.delete(uriText);
+      }
+      void this.routeProblemNavigation(editor).catch((error: unknown) => {
+        this.output.warn(
+          `无法将 AI 问题跳转送回可视化编辑器：${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }, AI_PROBLEM_NAVIGATION_SETTLE_MS);
+    this.problemNavigationTimers.set(uriText, timer);
+  }
+
+  private async routeProblemNavigation(editor: vscode.TextEditor): Promise<void> {
+    if (this.disposed || !this.isProblemDocument(editor.document)) {
+      return;
+    }
+    const problemUri = editor.document.uri;
+    const problemUriText = problemUri.toString();
+    // Activation, visibility and selection events can each schedule a hand-off
+    // for the same click. A timer which fires after the mirror tab has already
+    // closed must not steal focus from an explicit source-mode action.
+    if (
+      this.problemNavigationIsCoolingDown(problemUriText) ||
+      !this.problemDocumentIsVisible(problemUri)
+    ) {
+      return;
+    }
+    if (this.problemNavigationInFlight.has(problemUriText)) {
+      return;
+    }
+    this.problemNavigationInFlight.add(problemUriText);
+    try {
+      const sourceUri = this.sourceUriForProblemDocument(problemUri);
+      if (sourceUri === undefined) {
+        this.output.debug("AI 问题代理无法恢复原始文档 URI；本次跳转已取消。");
+        return;
+      }
+      let sourceDocument = this.sourceDocumentFor(editor.document);
+      if (sourceDocument === undefined) {
+        try {
+          sourceDocument = await vscode.workspace.openTextDocument(sourceUri);
+        } catch {
+          this.output.debug("AI 问题代理对应的原始文档无法打开；本次跳转已取消。");
+          return;
+        }
+      }
+      if (!this.canExposeIssues(sourceDocument)) {
+        this.output.debug("AI 问题在跳转前已经失效或被关闭；问题列表将按当前状态刷新。");
+        return;
+      }
+
+      for (let retry = 0; retry <= AI_PROBLEM_NAVIGATION_RETRY_COUNT; retry += 1) {
+        if (this.disposed) {
+          return;
+        }
+        const selection = editor.selection;
+        const diagnostics = vscode.languages.getDiagnostics(problemUri)
+          .filter((diagnostic) => diagnostic.source === TEXLEAF_AI_DIAGNOSTIC_SOURCE);
+        const selectedDiagnostic = diagnostics.find((diagnostic) =>
+          diagnostic.range.contains(selection.active) ||
+          (!selection.isEmpty && diagnostic.range.intersection(selection) !== undefined)
+        );
+        if (selectedDiagnostic !== undefined || diagnostics.length === 1) {
+          await this.routeProblemDiagnostic(
+            editor,
+            sourceDocument,
+            selectedDiagnostic ?? diagnostics[0]!,
+          );
+          return;
+        }
+        if (!this.problemDocumentIsVisible(problemUri)) {
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, AI_PROBLEM_NAVIGATION_SETTLE_MS);
+        });
+      }
+      this.output.debug("AI 问题代理未收到唯一诊断选区；已停止等待跳转。");
+    } finally {
+      this.problemNavigationInFlight.delete(problemUriText);
+    }
+  }
+
+  private problemDocumentIsVisible(uri: vscode.Uri): boolean {
+    const uriText = uri.toString();
+    return vscode.window.visibleTextEditors.some((editor) =>
+      editor.document.uri.toString() === uriText
+    ) || vscode.window.tabGroups.all.some((group) =>
+      group.tabs.some((tab) => {
+        const input = tab.input;
+        const candidate = input instanceof vscode.TabInputText ||
+            input instanceof vscode.TabInputCustom
+          ? input.uri
+          : typeof input === "object" && input !== null &&
+              (input as { readonly uri?: unknown }).uri instanceof vscode.Uri
+            ? (input as { readonly uri: vscode.Uri }).uri
+            : undefined;
+        return candidate?.toString() === uriText;
+      })
+    );
+  }
+
+  private async routeProblemDiagnostic(
+    editor: vscode.TextEditor,
+    sourceDocument: vscode.TextDocument,
+    selectedDiagnostic: vscode.Diagnostic,
+  ): Promise<void> {
+    const source = sourceDocument.getText();
+    const issues = currentSafeIssues(
+      sourceDocument,
+      this.issueState.get(sourceDocument.uri.toString()),
+    ).filter((issue) => storedIssueMatchesCurrentSource(sourceDocument, source, issue));
+    const issue = issues.find((candidate) => {
+      const diagnostic = aiIssueDiagnostic(sourceDocument, candidate);
+      return diagnostic.message === selectedDiagnostic.message &&
+        diagnostic.range.isEqual(selectedDiagnostic.range);
+    }) ?? issues.find((candidate) =>
+      decorationRangeForIssue(sourceDocument, candidate.range).isEqual(
+        selectedDiagnostic.range,
+      )
+    );
+    if (issue === undefined) {
+      return;
+    }
+
+    // Close the selectable mirror before focusing the custom editor.  If the
+    // order is reversed, VS Code can make the visual-editor tab active while
+    // still reporting the mirror as `activeTextEditor`; the transient text
+    // editor then survives the Problems click and a later source-mode command
+    // can be redirected a second time.  The diagnostic/issue identity has
+    // already been captured above, so closing first is both safe and
+    // deterministic.
+    await this.closeProblemDocumentTab(editor.document.uri);
+    await this.revealIssue(sourceDocument.uri.toString(), issue.id, {
+      center: true,
+      flash: true,
+    });
+  }
+
+  private async closeProblemDocumentTab(problemUri: vscode.Uri): Promise<void> {
+    const uriText = problemUri.toString();
+    const pending = this.problemNavigationTimers.get(uriText);
+    if (pending !== undefined) {
+      clearTimeout(pending);
+      this.problemNavigationTimers.delete(uriText);
+    }
+    const tabs = vscode.window.tabGroups.all.flatMap((group) =>
+      group.tabs.filter((tab) => {
+        const input = tab.input;
+        const uri = input instanceof vscode.TabInputText ||
+            input instanceof vscode.TabInputCustom
+          ? input.uri
+          : typeof input === "object" && input !== null &&
+              (input as { readonly uri?: unknown }).uri instanceof vscode.Uri
+            ? (input as { readonly uri: vscode.Uri }).uri
+            : undefined;
+        return uri?.toString() === uriText;
+      })
+    );
+    if (tabs.length > 0) {
+      await vscode.window.tabGroups.close(tabs, true);
+    }
+    // VS Code emits a short tail of active-editor/selection/visibility events
+    // after `tabGroups.close` resolves.  Ignore only that consumed click; a
+    // later Problems click is accepted after the bounded cooldown.
+    this.problemNavigationCooldowns.set(
+      uriText,
+      Date.now() + AI_PROBLEM_NAVIGATION_COOLDOWN_MS,
+    );
+  }
+
+  private problemNavigationIsCoolingDown(uriText: string): boolean {
+    const until = this.problemNavigationCooldowns.get(uriText);
+    if (until === undefined) {
+      return false;
+    }
+    if (until > Date.now()) {
+      return true;
+    }
+    this.problemNavigationCooldowns.delete(uriText);
+    return false;
+  }
+
+  /** Apply one opaque, revalidated suggestion from the visual editor. */
+  public applyVisualIssue(
+    document: vscode.TextDocument,
+    issueId: string,
+  ): Promise<void> {
+    return this.applyIssue(document.uri.toString(), issueId);
+  }
+
+  /** Ignore one opaque suggestion for this VS Code session. */
+  public ignoreVisualIssue(document: vscode.TextDocument, issueId: string): void {
+    this.ignoreIssue(document.uri.toString(), issueId);
+  }
+
+  public explainDiagnostic(
+    document: vscode.TextDocument,
+    diagnostic: vscode.Diagnostic,
+    token?: vscode.CancellationToken,
+  ): Promise<AiDiagnosticInsight | undefined> {
+    // Compiler and linter diagnostics remain owned by their original provider
+    // (notably LaTeX Workshop).  TeXLeaf no longer sends those messages to an
+    // AI provider or adds a second explanation layer on top of them.
+    if (diagnostic.source !== TEXLEAF_AI_DIAGNOSTIC_SOURCE) {
+      return Promise.resolve(undefined);
+    }
+    const key = diagnosticInsightKey(document, diagnostic);
+    const cached = this.diagnosticInsightCache.get(key);
+    if (cached !== undefined) {
+      return Promise.resolve(cached);
+    }
+    const pending = this.diagnosticInsightRequests.get(key);
+    if (pending !== undefined) {
+      return pending;
+    }
+    const request = this.explainDiagnosticCore(document, diagnostic, token)
+      .then((insight) => {
+        if (insight !== undefined) {
+          if (this.diagnosticInsightCache.size >= 256) {
+            const oldest = this.diagnosticInsightCache.keys().next().value as
+              | string
+              | undefined;
+            if (oldest !== undefined) {
+              this.diagnosticInsightCache.delete(oldest);
+            }
+          }
+          this.diagnosticInsightCache.set(key, insight);
+        }
+        return insight;
+      })
+      .finally(() => {
+        this.diagnosticInsightRequests.delete(key);
+      });
+    this.diagnosticInsightRequests.set(key, request);
+    return request;
+  }
+
+  private async explainDiagnosticCore(
+    document: vscode.TextDocument,
+    diagnostic: vscode.Diagnostic,
+    token?: vscode.CancellationToken,
+  ): Promise<AiDiagnosticInsight | undefined> {
+    const ready = await this.readyClient(document, false);
+    if (ready === undefined || token?.isCancellationRequested === true) {
+      return undefined;
+    }
+    const controller = new AbortController();
+    const cancellation = token?.onCancellationRequested(() => controller.abort());
+    try {
+      const result: DeepSeekDiagnosticResult = await ready.client.explainDiagnostic(
+        {
+          message: diagnostic.message,
+          context: diagnosticContext(document, diagnostic.range),
+          ...(diagnostic.source === undefined ? {} : { source: diagnostic.source }),
+          ...(diagnosticCodeText(diagnostic.code) === undefined
+            ? {}
+            : { code: diagnosticCodeText(diagnostic.code)! }),
+        },
+        {
+          language: "zh-CN",
+          style: writingStyle(ready.config),
+          signal: controller.signal,
+        },
+      );
+      if (
+        controller.signal.aborted ||
+        !(await this.runtimeGateStillOpen(document, ready, "manual"))
+      ) {
+        return undefined;
+      }
+      return {
+        explanation: result.explanation,
+        suggestion: result.suggestion,
+        model: result.model,
+      };
+    } catch (error: unknown) {
+      this.reportError(error, false, ready.provider);
+      return undefined;
+    } finally {
+      cancellation?.dispose();
+    }
+  }
+
   public provideCodeActions(
     document: vscode.TextDocument,
     range: vscode.Range | vscode.Selection,
     _context: vscode.CodeActionContext,
     token: vscode.CancellationToken,
   ): vscode.CodeAction[] | undefined {
-    if (token.isCancellationRequested || !this.canExposeIssues(document)) {
+    const sourceDocument = this.sourceDocumentFor(document);
+    if (
+      token.isCancellationRequested ||
+      sourceDocument === undefined ||
+      !this.canExposeIssues(sourceDocument)
+    ) {
       return undefined;
     }
-    const state = this.issueState.get(document.uri.toString());
-    const source = document.getText();
+    const state = this.issueState.get(sourceDocument.uri.toString());
+    const source = sourceDocument.getText();
     const actions: vscode.CodeAction[] = [];
-    if (state?.version === document.version) {
+    if (state?.version === sourceDocument.version) {
       for (const issue of state.issues) {
         if (
           !editorRangeTouchesIssue(range, issue.range) ||
-          !storedIssueMatchesCurrentSource(document, source, issue)
+          !storedIssueMatchesCurrentSource(sourceDocument, source, issue)
         ) {
           continue;
         }
@@ -571,7 +1234,7 @@ export class AIWritingController
         fix.command = {
           command: INTERNAL_APPLY_COMMAND,
           title: "应用 AI 建议",
-          arguments: [document.uri.toString(), issue.id],
+          arguments: [sourceDocument.uri.toString(), issue.id],
         };
         fix.isPreferred = issue.category === "spelling" || issue.category === "grammar";
         actions.push(fix);
@@ -583,7 +1246,7 @@ export class AIWritingController
         ignore.command = {
           command: INTERNAL_IGNORE_COMMAND,
           title: "忽略 AI 建议",
-          arguments: [document.uri.toString(), issue.id],
+          arguments: [sourceDocument.uri.toString(), issue.id],
         };
         actions.push(ignore);
       }
@@ -592,7 +1255,8 @@ export class AIWritingController
     if (
       range instanceof vscode.Selection &&
       !range.isEmpty &&
-      readConfig(document.uri).aiWritingEnabled
+      !this.isProblemDocument(document) &&
+      readConfig(sourceDocument.uri).aiWritingEnabled
     ) {
       const rewrite = new vscode.CodeAction(
         "TeXLeaf AI：改写所选正文",
@@ -607,49 +1271,55 @@ export class AIWritingController
     return actions.length === 0 ? undefined : actions;
   }
 
-  public provideHover(
+  public async provideHover(
     document: vscode.TextDocument,
     position: vscode.Position,
     token: vscode.CancellationToken,
-  ): vscode.Hover | undefined {
+  ): Promise<vscode.Hover | undefined> {
     if (token.isCancellationRequested || !this.canExposeIssues(document)) {
       return undefined;
     }
     const state = this.issueState.get(document.uri.toString());
-    if (state?.version !== document.version) {
-      return undefined;
-    }
     const source = document.getText();
-    const issue = state.issues.find((candidate) =>
-      issueRangeContainsPosition(candidate.range, position) &&
-      storedIssueMatchesCurrentSource(document, source, candidate)
-    );
-    if (issue === undefined) {
-      return undefined;
+    const issue = state?.version === document.version
+      ? state.issues.find((candidate) =>
+          issueRangeContainsPosition(candidate.range, position) &&
+          storedIssueMatchesCurrentSource(document, source, candidate)
+        )
+      : undefined;
+    if (issue !== undefined) {
+      const markdown = new vscode.MarkdownString(undefined, false);
+      // Keep model-provided Markdown untrusted while allowing only the two fixed,
+      // extension-owned actions. Both commands still resolve an opaque issue ID
+      // against current controller state before changing or dismissing anything.
+      markdown.isTrusted = {
+        enabledCommands: [INTERNAL_APPLY_COMMAND, INTERNAL_IGNORE_COMMAND],
+      };
+      markdown.supportThemeIcons = true;
+      const applyCommandUri = `command:${INTERNAL_APPLY_COMMAND}?${encodeURIComponent(
+        JSON.stringify([document.uri.toString(), issue.id]),
+      )}`;
+      const ignoreCommandUri = `command:${INTERNAL_IGNORE_COMMAND}?${encodeURIComponent(
+        JSON.stringify([document.uri.toString(), issue.id]),
+      )}`;
+      markdown.appendMarkdown(
+        `**TeXLeaf AI · ${escapeMarkdown(categoryLabel(issue.category))}**\n\n`,
+      );
+      markdown.appendMarkdown(`${escapeMarkdown(issue.message)}\n\n`);
+      if (issue.explanation.length > 0) {
+        markdown.appendMarkdown(`${escapeMarkdown(issue.explanation)}\n\n`);
+      }
+      markdown.appendMarkdown("建议：");
+      markdown.appendCodeblock(issue.replacement || "（删除）", "text");
+      markdown.appendMarkdown(
+        `[$(check) 应用修改](${applyCommandUri})　` +
+          `[$(close) 忽略建议](${ignoreCommandUri})\n\n` +
+          "应用前会再次核对当前原文；忽略仅对本次 VS Code 会话生效。",
+      );
+      return new vscode.Hover(markdown, issue.range);
     }
-    const markdown = new vscode.MarkdownString(undefined, false);
-    // Keep model-provided Markdown untrusted while allowing this one fixed,
-    // extension-owned command link. The URI and opaque issue ID are encoded as
-    // JSON query arguments, and applyIssue still revalidates the live document
-    // version, range, source text, and replacement before changing anything.
-    markdown.isTrusted = { enabledCommands: [INTERNAL_APPLY_COMMAND] };
-    const applyCommandUri = `command:${INTERNAL_APPLY_COMMAND}?${encodeURIComponent(
-      JSON.stringify([document.uri.toString(), issue.id]),
-    )}`;
-    markdown.appendMarkdown(
-      `**TeXLeaf AI · ${escapeMarkdown(categoryLabel(issue.category))}**\n\n`,
-    );
-    markdown.appendMarkdown(`${escapeMarkdown(issue.message)}\n\n`);
-    if (issue.explanation.length > 0) {
-      markdown.appendMarkdown(`${escapeMarkdown(issue.explanation)}\n\n`);
-    }
-    markdown.appendMarkdown("建议：");
-    markdown.appendCodeblock(issue.replacement || "（删除）", "text");
-    markdown.appendMarkdown(
-      `[应用这条建议](${applyCommandUri}) · ` +
-        "中文输入法可能占用 Ctrl + .；也可以先按 Esc 关闭悬浮框、切到英文输入法后再按。应用前会再次核对原文。",
-    );
-    return new vscode.Hover(markdown, issue.range);
+
+    return undefined;
   }
 
   public async provideInlineCompletionItems(
@@ -661,7 +1331,38 @@ export class AIWritingController
     if (context.selectedCompletionInfo !== undefined) {
       return undefined;
     }
-    const ready = await this.readyClient(document, false);
+    return this.provideInlineCompletionCore(
+      document,
+      position,
+      context.triggerKind,
+      token,
+      false,
+    );
+  }
+
+  /** Explicit visual-editor completion with the same consent/key prompts. */
+  public provideVisualInlineCompletion(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.InlineCompletionItem[] | undefined> {
+    return this.provideInlineCompletionCore(
+      document,
+      position,
+      vscode.InlineCompletionTriggerKind.Invoke,
+      token,
+      true,
+    );
+  }
+
+  private async provideInlineCompletionCore(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    triggerKind: vscode.InlineCompletionTriggerKind,
+    token: vscode.CancellationToken,
+    interactive: boolean,
+  ): Promise<vscode.InlineCompletionItem[] | undefined> {
+    const ready = await this.readyClient(document, interactive);
     if (
       ready === undefined ||
       !ready.config.aiWritingInlineCompletions ||
@@ -675,26 +1376,19 @@ export class AIWritingController
     const source = document.getText();
     const prose = extractAiProseDocument(source);
     const sourceOffset = document.offsetAt(position);
-    const segment = prose.segments.find((candidate) =>
-      sourceOffset >= candidate.sourceStart &&
-      sourceOffset <= candidate.sourceEnd,
-    );
-    if (segment === undefined) {
+    const completionContext = aiProseCompletionContextAtOffset(prose, sourceOffset);
+    if (completionContext === undefined) {
       return undefined;
     }
-    const relative = sourceOffset - segment.sourceStart;
+    const { segment, segmentOffset: relative, prefix, suffix } = completionContext;
     if (!isEditableInsertion(segment, relative)) {
       return undefined;
     }
-    const prefixStart = Math.max(0, relative - 2_000);
-    const suffixEnd = Math.min(segment.text.length, relative + 1_000);
-    const prefix = segment.text.slice(prefixStart, relative);
-    const suffix = segment.text.slice(relative, suffixEnd);
     if (!completionContextIsUseful(prefix)) {
       return undefined;
     }
 
-    if (context.triggerKind === vscode.InlineCompletionTriggerKind.Automatic) {
+    if (triggerKind === vscode.InlineCompletionTriggerKind.Automatic) {
       const completedDelay = await cancellationDelay(
         ready.config.aiWritingCompletionDelayMs,
         token,
@@ -739,7 +1433,7 @@ export class AIWritingController
       ) {
         return undefined;
       }
-      const completion = result.completion;
+      const completion = removeAiCompletionSuffixOverlap(result.completion, suffix);
       if (!safePlainText(completion, 1_024, true) || completion.length === 0) {
         return undefined;
       }
@@ -751,7 +1445,7 @@ export class AIWritingController
         ),
       ];
     } catch (error: unknown) {
-      this.reportError(error, false, ready.provider);
+      this.reportError(error, interactive, ready.provider);
       return undefined;
     } finally {
       cancellation.dispose();
@@ -759,8 +1453,9 @@ export class AIWritingController
     }
   }
 
-  private async toggle(): Promise<void> {
-    const resource = vscode.window.activeTextEditor?.document.uri;
+  private async toggle(
+    resource = vscode.window.activeTextEditor?.document.uri,
+  ): Promise<void> {
     const config = readConfig(resource);
     if (config.aiWritingEnabled) {
       await this.updateEnabledSetting(false, resource);
@@ -802,8 +1497,9 @@ export class AIWritingController
     );
   }
 
-  private async setApiKey(): Promise<void> {
-    const resource = vscode.window.activeTextEditor?.document.uri;
+  private async setApiKey(
+    resource = vscode.window.activeTextEditor?.document.uri,
+  ): Promise<void> {
     const config = readConfig(resource);
     let provider: ProviderContext;
     try {
@@ -864,28 +1560,66 @@ export class AIWritingController
     void vscode.window.showInformationMessage(`${provider.label} API Key 已清除。`);
   }
 
+  /**
+   * Review the paragraph at, or prose covered by, an explicitly supplied
+   * document selection.  The visual editor uses this entry point so checking
+   * prose never has to manufacture and focus a native TextEditor first.
+   */
+  public async reviewDocumentSelection(
+    document: vscode.TextDocument,
+    selection: vscode.Selection,
+  ): Promise<void> {
+    await this.reviewParagraphOrSelection(document, selection);
+  }
+
+  /** Review an explicitly supplied document without changing editor focus. */
+  public async reviewDocumentInPlace(
+    document: vscode.TextDocument,
+  ): Promise<void> {
+    await this.reviewWholeDocument(document);
+  }
+
+  /**
+   * Rewrite prose selected in an explicitly supplied document. Custom
+   * editors use this entry point so the operation never has to manufacture a
+   * native TextEditor merely to provide a document and selection.
+   */
+  public async rewriteDocumentSelection(
+    document: vscode.TextDocument,
+    selection: vscode.Selection,
+  ): Promise<void> {
+    await this.rewriteDocumentSelectionOrSentence(document, selection);
+  }
+
   private async reviewCurrentParagraph(): Promise<void> {
     const editor = await this.requireActiveEditor();
     if (editor === undefined) {
       return;
     }
-    const ready = await this.readyClient(editor.document, true);
+    await this.reviewParagraphOrSelection(editor.document, editor.selection);
+  }
+
+  private async reviewParagraphOrSelection(
+    document: vscode.TextDocument,
+    selection: vscode.Selection,
+  ): Promise<void> {
+    const ready = await this.readyClient(document, true);
     if (ready === undefined) {
       return;
     }
-    this.cancelAutomaticReview(editor.document.uri);
-    const snapshot = this.captureReviewSnapshot(editor.document);
+    this.cancelAutomaticReview(document.uri);
+    const snapshot = this.captureReviewSnapshot(document);
     const prose = extractAiProseDocument(snapshot.source);
-    const selectionIsEmpty = editor.selection.isEmpty;
+    const selectionIsEmpty = selection.isEmpty;
     const rawSegments = selectionIsEmpty
       ? paragraphSegmentsAt(
           prose.segments,
-          editor.document.offsetAt(editor.selection.active),
+          document.offsetAt(selection.active),
         )
       : sliceSegmentsForRange(
           prose.segments,
-          editor.document.offsetAt(editor.selection.start),
-          editor.document.offsetAt(editor.selection.end),
+          document.offsetAt(selection.start),
+          document.offsetAt(selection.end),
         );
     const boundedSelection = selectionIsEmpty
       ? undefined
@@ -925,12 +1659,12 @@ export class AIWritingController
         progress.report({
           message: `${ready.provider.label} · 不会发送数学与受保护 TeX`,
         });
-        const review = await this.reviewSegments(editor.document, segments, ready, {
+        const review = await this.reviewSegments(document, segments, ready, {
           interactive: true,
           operation: "paragraph",
         }, snapshot, token);
         if (review.reviewedSegments.length > 0) {
-          this.scheduleNextDirtyReview(editor.document, snapshot.version);
+          this.scheduleNextDirtyReview(document, snapshot.version);
         }
       },
     );
@@ -941,12 +1675,18 @@ export class AIWritingController
     if (editor === undefined) {
       return;
     }
-    const ready = await this.readyClient(editor.document, true);
+    await this.reviewWholeDocument(editor.document);
+  }
+
+  private async reviewWholeDocument(
+    document: vscode.TextDocument,
+  ): Promise<void> {
+    const ready = await this.readyClient(document, true);
     if (ready === undefined) {
       return;
     }
-    this.cancelAutomaticReview(editor.document.uri);
-    const snapshot = this.captureReviewSnapshot(editor.document);
+    this.cancelAutomaticReview(document.uri);
+    const snapshot = this.captureReviewSnapshot(document);
     const prose = extractAiProseDocument(snapshot.source);
     const selection = selectAiProseSegmentsForDocumentReview(
       prose.segments,
@@ -968,7 +1708,7 @@ export class AIWritingController
         cancellable: true,
       },
       async (progress, token) => {
-        const review = await this.reviewSegments(editor.document, selected, ready, {
+        const review = await this.reviewSegments(document, selected, ready, {
           interactive: true,
           operation: "document",
           onProgress: (completed, totalSegments) => {
@@ -979,7 +1719,7 @@ export class AIWritingController
           },
         }, snapshot, token);
         if (review.reviewedSegments.length > 0) {
-          this.scheduleNextDirtyReview(editor.document, snapshot.version);
+          this.scheduleNextDirtyReview(document, snapshot.version);
         }
       },
     );
@@ -995,11 +1735,21 @@ export class AIWritingController
     if (editor === undefined) {
       return;
     }
-    const ready = await this.readyClient(editor.document, true);
+    await this.rewriteDocumentSelectionOrSentence(
+      editor.document,
+      editor.selection,
+    );
+  }
+
+  private async rewriteDocumentSelectionOrSentence(
+    document: vscode.TextDocument,
+    selection: vscode.Selection,
+  ): Promise<void> {
+    const ready = await this.readyClient(document, true);
     if (ready === undefined) {
       return;
     }
-    const target = rewriteTarget(editor);
+    const target = rewriteTarget(document, selection);
     if (target === undefined) {
       void vscode.window.showWarningMessage(
         "请选择一段连续纯正文，或把光标放在不含受保护 TeX 标记的句子中。",
@@ -1010,30 +1760,30 @@ export class AIWritingController
       void vscode.window.showWarningMessage("所选正文超过单段发送上限。");
       return;
     }
-    const version = editor.document.version;
-    const generation = this.generation(editor.document.uri);
+    const version = document.version;
+    const generation = this.generation(document.uri);
     const instruction = await chooseRewriteInstruction(ready.provider.label);
     if (instruction === undefined) {
       return;
     }
     if (
-      editor.document.version !== version ||
-      this.generation(editor.document.uri) !== generation ||
-      editor.document.getText(target.range) !== target.text ||
+      document.version !== version ||
+      this.generation(document.uri) !== generation ||
+      document.getText(target.range) !== target.text ||
       !(await this.runtimeGateStillOpen(
-        editor.document,
+        document,
         ready,
         "manual",
       )) ||
-      editor.document.version !== version ||
-      this.generation(editor.document.uri) !== generation
+      document.version !== version ||
+      this.generation(document.uri) !== generation
     ) {
       void vscode.window.showInformationMessage(
         "文档或 AI 设置已变化，本次改写已取消。",
       );
       return;
     }
-    const requestKey = requestKeyFor(editor.document.uri, "rewrite");
+    const requestKey = requestKeyFor(document.uri, "rewrite");
     const controller = this.startRequest(requestKey);
     try {
       const result = await vscode.window.withProgress(
@@ -1049,11 +1799,11 @@ export class AIWritingController
           try {
             if (
               controller.signal.aborted ||
-              editor.document.version !== version ||
-              this.generation(editor.document.uri) !== generation ||
-              editor.document.getText(target.range) !== target.text ||
+              document.version !== version ||
+              this.generation(document.uri) !== generation ||
+              document.getText(target.range) !== target.text ||
               !(await this.runtimeGateStillOpen(
-                editor.document,
+                document,
                 ready,
                 "manual",
               ))
@@ -1075,11 +1825,11 @@ export class AIWritingController
       }
       if (
         controller.signal.aborted ||
-        editor.document.version !== version ||
-        this.generation(editor.document.uri) !== generation ||
-        editor.document.getText(target.range) !== target.text ||
+        document.version !== version ||
+        this.generation(document.uri) !== generation ||
+        document.getText(target.range) !== target.text ||
         !(await this.runtimeGateStillOpen(
-          editor.document,
+          document,
           ready,
           "manual",
         ))
@@ -1100,7 +1850,7 @@ export class AIWritingController
         return;
       }
       const edit = new vscode.WorkspaceEdit();
-      edit.replace(editor.document.uri, target.range, result.replacement);
+      edit.replace(document.uri, target.range, result.replacement);
       if (!(await vscode.workspace.applyEdit(edit))) {
         void vscode.window.showErrorMessage("无法应用 AI 改写，原文保持不变。");
         return;
@@ -1122,39 +1872,7 @@ export class AIWritingController
   }
 
   private async showIssues(): Promise<void> {
-    const commands = await vscode.commands.getCommands(true);
-    if (commands.includes(AI_ISSUES_FOCUS_COMMAND)) {
-      try {
-        await vscode.commands.executeCommand(AI_ISSUES_FOCUS_COMMAND);
-        return;
-      } catch {
-        this.output.warn(
-          "AI 写作问题视图的焦点命令不可用，改为打开 TeXLeaf 侧栏。",
-        );
-      }
-    }
-
-    // A VSIX can finish updating the extension host while an already-open
-    // renderer still has the preceding version's static view contributions.
-    // In that split state the container exists, but VS Code has not generated
-    // the new `<viewId>.focus` command yet. Avoid surfacing its raw internal
-    // command error and give the user the one operation that reloads the
-    // manifest as well as the extension code.
-    if (commands.includes(TEXLEAF_VIEW_CONTAINER_COMMAND)) {
-      try {
-        await vscode.commands.executeCommand(TEXLEAF_VIEW_CONTAINER_COMMAND);
-      } catch {
-        // The reload prompt below is the safe recovery path even when the
-        // renderer cannot open the already-contributed container.
-      }
-    }
-    const action = await vscode.window.showWarningMessage(
-      "TeXLeaf 已更新，但当前 VS Code 窗口尚未载入新的“AI 写作问题”视图。请重新加载窗口，使新版视图清单生效。",
-      "重新加载窗口",
-    );
-    if (action === "重新加载窗口") {
-      await vscode.commands.executeCommand("workbench.action.reloadWindow");
-    }
+    await vscode.commands.executeCommand("workbench.actions.view.problems");
   }
 
   private clearCurrentDiagnostics(): void {
@@ -1437,7 +2155,11 @@ export class AIWritingController
     this.setIssueState(uri, state.version, remaining);
   }
 
-  private async revealIssue(uriText: string, issueId: string): Promise<void> {
+  private async revealIssue(
+    uriText: string,
+    issueId: string,
+    focusOptions?: { readonly center?: boolean; readonly flash?: boolean },
+  ): Promise<void> {
     const revealEpoch = ++this.revealIssueEpoch;
     let uri: vscode.Uri;
     try {
@@ -1473,6 +2195,20 @@ export class AIWritingController
           "TeXLeaf AI：这条建议已经过期；问题列表已刷新。",
           5_000,
         );
+        return;
+      }
+      const visualHandled = await vscode.commands.executeCommand<boolean>(
+        VISUAL_EDITOR_REVEAL_RANGE_COMMAND,
+        document.uri,
+        document.offsetAt(liveIssue.range.start),
+        document.offsetAt(liveIssue.range.end),
+        focusOptions,
+      );
+      if (revealEpoch !== this.revealIssueEpoch) {
+        return;
+      }
+      if (visualHandled === true) {
+        this.refreshIssueDecorations();
         return;
       }
       const editor = await vscode.window.showTextDocument(document, {
@@ -1532,7 +2268,10 @@ export class AIWritingController
   }
 
   private documentChanged(event: vscode.TextDocumentChangeEvent): void {
-    if (!event.document.uri.path.toLowerCase().endsWith(".tex")) {
+    if (
+      this.isProblemDocument(event.document) ||
+      !event.document.uri.path.toLowerCase().endsWith(".tex")
+    ) {
       return;
     }
     const uriText = event.document.uri.toString();
@@ -2059,9 +2798,43 @@ export class AIWritingController
     }
   }
 
-  /** Refresh the editor-only issue marker without creating a native hover. */
+  /** Publish the safe AI queue to Problems and refresh its selected overlay. */
   private refreshIssueDecorations(uri?: vscode.Uri): void {
     const requested = uri?.toString();
+    const documents = vscode.workspace.textDocuments.filter((document) =>
+      !document.isClosed &&
+      !this.isProblemDocument(document) &&
+      (requested === undefined || document.uri.toString() === requested)
+    );
+    if (requested === undefined) {
+      this.issueDiagnostics.clear();
+    } else if (documents.length === 0) {
+      this.issueDiagnostics.delete(uri!);
+      this.removeProblemDocumentForSource(uri!);
+    }
+    for (const document of documents) {
+      const state = this.issueState.get(document.uri.toString());
+      const source = document.getText();
+      const issues = this.canExposeIssues(document) &&
+          state?.version === document.version
+        ? state.issues.filter((issue) =>
+          storedIssueMatchesCurrentSource(document, source, issue)
+        )
+        : [];
+      // Problems must open an ordinary text editor to expose its selected
+      // diagnostic range.  The real `.tex` resource is associated with the
+      // TeXLeaf custom editor, whose API does not receive that range.  Publish
+      // on a read-only mirror instead, then immediately route the selected
+      // range back to the real visual document and close the transient mirror.
+      const problemUri = this.problemUriForSource(document.uri);
+      this.issueDiagnostics.delete(document.uri);
+      this.issueDiagnostics.set(
+        problemUri,
+        issues.map((issue) => aiIssueDiagnostic(document, issue)),
+      );
+      this.problemDocumentEmitter.fire(problemUri);
+    }
+
     for (const editor of vscode.window.visibleTextEditors) {
       if (
         requested !== undefined &&
@@ -2078,12 +2851,6 @@ export class AIWritingController
             storedIssueMatchesCurrentSource(editor.document, source, issue)
           )
         : [];
-      editor.setDecorations(
-        this.issueDecoration,
-        issues.map((issue) =>
-          decorationRangeForIssue(editor.document, issue.range)
-        ),
-      );
       const selected = this.selectedIssue?.uriText ===
           editor.document.uri.toString()
         ? issues.filter((issue) => issue.id === this.selectedIssue?.issueId)
@@ -2148,7 +2915,7 @@ export class AIWritingController
           "开启",
         );
         if (enable === "开启") {
-          await this.toggle();
+          await this.toggle(document.uri);
         }
       }
       return undefined;
@@ -2173,7 +2940,7 @@ export class AIWritingController
     }
     if (apiKey === undefined) {
       if (interactive) {
-        await this.setApiKey();
+        await this.setApiKey(document.uri);
       }
       return undefined;
     }
@@ -2790,6 +3557,9 @@ export class AIWritingController
   }
 
   private forgetDocument(document: vscode.TextDocument): void {
+    if (this.isProblemDocument(document)) {
+      return;
+    }
     const uriText = document.uri.toString();
     this.invalidateRestore(document.uri);
     // A close event removes only in-memory UI state. Flush the last queued
@@ -2973,7 +3743,7 @@ export class AIWritingController
       : 0;
     if (!config.aiWritingEnabled) {
       this.status.text = "$(circle-slash) TeXLeaf AI";
-      this.status.tooltip = "AI 写作助手已关闭；点击打开 AI 写作问题列表。";
+      this.status.tooltip = "AI 写作助手已关闭；点击仍可查看当前文档的编译问题。";
     } else if (!vscode.workspace.isTrusted) {
       this.status.text = "$(shield) TeXLeaf AI";
       this.status.tooltip = "未信任工作区中 AI 写作被强制停用。";
@@ -3259,6 +4029,25 @@ function decorationRangeForIssue(
   return range;
 }
 
+function aiIssueDiagnostic(
+  document: vscode.TextDocument,
+  issue: StoredIssue,
+): vscode.Diagnostic {
+  const range = decorationRangeForIssue(document, issue.range);
+  const diagnostic = new vscode.Diagnostic(
+    range,
+    `[${categoryLabel(issue.category)}] ${issue.message}`,
+    issue.severity,
+  );
+  diagnostic.source = TEXLEAF_AI_DIAGNOSTIC_SOURCE;
+  diagnostic.code = visualDiagnosticCode(
+    categoryLabel(issue.category),
+    document.uri,
+    range,
+  );
+  return diagnostic;
+}
+
 function paragraphSegmentsAt(
   segments: readonly AiProseSegment[],
   offset: number,
@@ -3288,6 +4077,9 @@ function sliceSegmentsForRange(
         end: Math.min(range.end, relativeEnd) - relativeStart,
       }))
       .filter((range) => range.start < range.end);
+    const editableInsertionOffsets = segment.editableInsertionOffsets
+      ?.filter((offset) => offset >= relativeStart && offset <= relativeEnd)
+      .map((offset) => offset - relativeStart);
     const text = segment.text.slice(relativeStart, relativeEnd);
     if (!/[\p{L}\p{N}]/u.test(text)) {
       continue;
@@ -3298,34 +4090,39 @@ function sliceSegmentsForRange(
       sourceStart: start,
       sourceEnd: end,
       editableRanges,
+      ...(editableInsertionOffsets === undefined
+        ? {}
+        : { editableInsertionOffsets }),
     });
   }
   return result;
 }
 
-function rewriteTarget(editor: vscode.TextEditor): RewriteTarget | undefined {
-  const document = editor.document;
+function rewriteTarget(
+  document: vscode.TextDocument,
+  selection: vscode.Selection,
+): RewriteTarget | undefined {
   const source = document.getText();
   const prose = extractAiProseDocument(source);
   let sourceStart: number;
   let sourceEnd: number;
   let segment: AiProseSegment | undefined;
-  if (editor.selection.isEmpty) {
-    const selection = findAiProseSentenceAtOffset(
+  if (selection.isEmpty) {
+    const sentence = findAiProseSentenceAtOffset(
       prose,
-      document.offsetAt(editor.selection.active),
+      document.offsetAt(selection.active),
     );
-    if (selection === undefined) {
+    if (sentence === undefined) {
       return undefined;
     }
-    sourceStart = selection.sourceStart;
-    sourceEnd = selection.sourceEnd;
+    sourceStart = sentence.sourceStart;
+    sourceEnd = sentence.sourceEnd;
     segment = prose.segments.find((candidate) =>
-      candidate.id === selection.segmentId
+      candidate.id === sentence.segmentId
     );
   } else {
-    sourceStart = document.offsetAt(editor.selection.start);
-    sourceEnd = document.offsetAt(editor.selection.end);
+    sourceStart = document.offsetAt(selection.start);
+    sourceEnd = document.offsetAt(selection.end);
     segment = prose.segments.find((candidate) =>
       sourceStart >= candidate.sourceStart && sourceEnd <= candidate.sourceEnd
     );
@@ -3592,6 +4389,44 @@ function cancellationDelay(
 
 function stableHash(value: string): string {
   return sha256Hex(`texleaf-ai-cache-v1\u0000${value}`);
+}
+
+function diagnosticInsightKey(
+  document: vscode.TextDocument,
+  diagnostic: vscode.Diagnostic,
+): string {
+  return createHash("sha256").update([
+    "texleaf-diagnostic-insight-v1",
+    document.uri.toString(),
+    document.version,
+    document.offsetAt(diagnostic.range.start),
+    document.offsetAt(diagnostic.range.end),
+    diagnostic.severity,
+    diagnostic.source ?? "",
+    diagnosticCodeText(diagnostic.code) ?? "",
+    diagnostic.message,
+    diagnosticContext(document, diagnostic.range),
+  ].join("\u0000")).digest("hex");
+}
+
+function diagnosticContext(
+  document: vscode.TextDocument,
+  range: vscode.Range,
+): string {
+  const startLine = Math.max(0, range.start.line - 6);
+  const endLine = Math.min(document.lineCount - 1, range.end.line + 6);
+  const contextRange = new vscode.Range(
+    document.lineAt(startLine).range.start,
+    document.lineAt(endLine).rangeIncludingLineBreak.end,
+  );
+  return document.getText(contextRange).slice(0, 16_384);
+}
+
+function diagnosticCodeText(code: vscode.Diagnostic["code"]): string | undefined {
+  if (typeof code === "string" || typeof code === "number") {
+    return String(code);
+  }
+  return code === undefined ? undefined : String(code.value);
 }
 
 function previewText(value: string, maximum: number): string {

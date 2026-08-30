@@ -1,11 +1,20 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  createMathPreviewMacroEnvironment,
   createMathPreviewCursorRenderInput,
   createMathPreviewRenderInput,
   findSafeMathPreviewCursorOffset,
   findMathPreviewFormulaAt,
   scanMathPreviewDocument,
+  mathPreviewMacroEnvironmentAtOffset,
   toMathJaxMacroOptions,
 } from "../src/core";
 import { createMathPreviewSvgDataUri } from "../src/mathPreviewDataUri";
@@ -72,6 +81,12 @@ test("comments, verb commands and verbatim environments never create previews", 
 \begin{verbatim}
 \[hidden\]
 \end{verbatim}
+\begin{comment}
+$commentHidden$
+\end{comment}
+\begin{filecontents*}{generated.tex}
+$fileHidden$
+\end{filecontents*}
 $visible$`;
   const snapshot = scanMathPreviewDocument(text);
   assert.equal(snapshot.formulas.length, 1);
@@ -129,6 +144,70 @@ r&=\frac{a}{b}
   assert.match(input.tex, /^\\begin\{align\}/u);
   assert.match(input.tex, /x\\mathord\{\|\}\+y/u);
   assert.match(input.tex, /\\end\{align\}$/u);
+});
+
+test("split align delimiters, substack rows, and labels keep preview input available", () => {
+  const text = String.raw`\begin{align}
+C(\mathbf{d}) & =\sum_{j=1}^{n}\frac{2d_{j}+1}{\chi(\mathbf{d})-1}C(d_{1},\dots,d_{j}+d_{0},\dots,d_{n})+\sum_{\substack{a,b\geq0\\a+b=d_{0}-1}}\left(\frac{2}{\chi(\mathbf{d})-1}C(a,b,d_{1},\dots,d_{n})\right.\label{eq:bgw-recursion-linear}\\
+&\left.+\sum_{I\sqcup J=\{ 1,\dots n \}}\frac{(\chi(a,\mathbf{d}_{I})-1)!(\chi(b,\mathbf{d}_{J})-1)!}{(\chi(d)-1)!}C(a.\mathbf{d}_{I})C(b,\mathbf{d}_{J})\right).\label{eq:bgw-recursion-quadric}
+\end{align}`;
+  const snapshot = scanMathPreviewDocument(text);
+  const formula = snapshot.formulas[0];
+  assert.ok(formula);
+  assert.equal(snapshot.formulas.length, 1);
+  assert.equal(formula.environmentName, "align");
+
+  const plain = createMathPreviewRenderInput(
+    text,
+    formula,
+    snapshot,
+    text.indexOf("quadric"),
+  );
+  assert.ok(plain);
+  assert.equal(
+    plain.tex,
+    `\\begin{align}${text.slice(formula.bodyRange.start, formula.bodyRange.end).trim()}\\end{align}`,
+  );
+
+  const marker = String.raw`\mathord{\color{#ffb454}\rule[-0.2em]{0.07em}{1.2em}}`;
+  const cursorOffsets = [
+    text.indexOf(String.raw`a,b\geq0`) + "a,b".length,
+    text.indexOf("recursion-linear") + "recursion".length,
+    text.indexOf(String.raw`\label{eq:bgw-recursion-linear}`) + String.raw`\label{eq:bgw-recursion-linear}`.length,
+    text.indexOf(String.raw`&\left.`) + 1,
+    text.indexOf("recursion-quadric") + "recursion".length,
+    text.indexOf("}\n\\end{align}") + 1,
+  ];
+  assert.equal(
+    cursorOffsets.every(
+      (offset) =>
+        offset >= formula.bodyRange.start && offset <= formula.bodyRange.end,
+    ),
+    true,
+    "every regression cursor must resolve to a real position inside the align body",
+  );
+  for (const cursorOffset of cursorOffsets) {
+    assert.equal(findMathPreviewFormulaAt(snapshot, cursorOffset), formula);
+    const marked = createMathPreviewCursorRenderInput(
+      text,
+      formula,
+      snapshot,
+      cursorOffset,
+      marker,
+    );
+    assert.ok(marked, `cursor preview input at offset ${cursorOffset}`);
+    assert.match(marked.tex, /^\\begin\{align\}/u);
+    assert.match(marked.tex, /\\end\{align\}$/u);
+    assert.equal(marked.tex.split(marker).length, 2);
+    const markerOffset = marked.tex.indexOf(marker);
+    for (const label of marked.tex.matchAll(/\\label\{[^}]*\}/gu)) {
+      assert.ok(label.index !== undefined);
+      assert.ok(
+        markerOffset <= label.index || markerOffset >= label.index + label[0].length,
+        "the visual caret marker must not enter a label argument that will be removed before rendering",
+      );
+    }
+  }
 });
 
 test("cursor planner never splits commands or steals fraction arguments", () => {
@@ -289,7 +368,14 @@ $\pair{y}\subset\RR$
       abs: String.raw`\left|#1\right|`,
     },
   });
-  assert.equal(snapshot.macros.RR?.replacement, String.raw`\mathbb{R}`);
+  assert.equal(
+    mathPreviewMacroEnvironmentAtOffset(
+      snapshot,
+      text.indexOf(String.raw`\renewcommand`),
+    ).macros.RR?.replacement,
+    String.raw`\mathbb{R}`,
+  );
+  assert.equal(snapshot.macros.RR?.replacement, "ignored-after-document");
   assert.equal(snapshot.macros.fromConfig?.replacement, "configured");
   assert.equal(snapshot.macros.abs?.argumentCount, 1);
   assert.deepEqual(snapshot.macros.pair, {
@@ -301,6 +387,12 @@ $\pair{y}\subset\RR$
   assert.equal(
     snapshot.macros.argmax?.replacement,
     String.raw`\operatorname*{arg\,max}`,
+  );
+  const formula = snapshot.formulas[0];
+  assert.ok(formula);
+  assert.equal(
+    createMathPreviewRenderInput(text, formula, snapshot)?.macros.RR?.replacement,
+    "ignored-after-document",
   );
 
   const options = toMathJaxMacroOptions(snapshot.macros);
@@ -371,4 +463,424 @@ test("starred command definitions work and starred verbatim stays inert", () => 
   assert.equal(snapshot.macros.visible?.replacement, String.raw`\mathbf{#1}`);
   assert.equal(snapshot.macros.visible?.argumentCount, 1);
   assert.equal(snapshot.formulas.length, 1);
+});
+
+test("opaque formula scanning requires exact physical closing markers", () => {
+  const text = String.raw`\begin{comment}
+prefix \end{comment} $ghostComment$
+\end{comment}
+$liveAfterComment$
+\begin{verbatim}
+\begin{verbatim}
+\end{verbatim}
+$liveAfterLiteralBegin$
+\begin{verbatim}
+\end {verbatim}
+$ghostAfterSpacedEnd$
+\end{verbatim}
+$liveAfterExactEnd$`;
+  const snapshot = scanMathPreviewDocument(text, { fragmentKind: "body" });
+
+  assert.deepEqual(
+    snapshot.formulas.map((formula) => text.slice(formula.bodyRange.start, formula.bodyRange.end)),
+    ["liveAfterComment", "liveAfterLiteralBegin", "liveAfterExactEnd"],
+  );
+});
+
+test("project macro environments are canonical, detached, immutable, and bounded", () => {
+  const source = {
+    beta: {
+      name: "beta",
+      replacement: String.raw`\mathbf{#1}`,
+      argumentCount: 1,
+    },
+    alpha: {
+      name: String.raw`\alpha`,
+      replacement: "#1+#2",
+      argumentCount: 0,
+    },
+  };
+  const environment = createMathPreviewMacroEnvironment(source);
+  const reordered = createMathPreviewMacroEnvironment({
+    alpha: source.alpha,
+    beta: source.beta,
+  });
+
+  assert.equal(environment.macroFingerprint, reordered.macroFingerprint);
+  assert.equal(Object.getPrototypeOf(environment.macros), null);
+  assert.equal(Object.isFrozen(environment), true);
+  assert.equal(Object.isFrozen(environment.macros), true);
+  assert.equal(Object.isFrozen(environment.macros.alpha), true);
+  assert.equal(environment.macros.alpha?.name, "alpha");
+  assert.equal(environment.macros.alpha?.argumentCount, 2);
+  source.alpha.replacement = "mutated-after-copy";
+  assert.equal(environment.macros.alpha?.replacement, "#1+#2");
+
+  const oversized = createMathPreviewMacroEnvironment(
+    Object.fromEntries(
+      Array.from({ length: 160 }, (_, index) => {
+        const name = `macro${String.fromCharCode(65 + Math.floor(index / 26))}${String.fromCharCode(65 + index % 26)}`;
+        return [name, { name, replacement: "x", argumentCount: 0 }];
+      }),
+    ),
+  );
+  assert.ok(Object.keys(oversized.macros).length <= 128);
+  assert.ok(JSON.stringify(toMathJaxMacroOptions(oversized.macros)).length <= 16_384);
+});
+
+test("configured, inherited, and local macros merge in project order", () => {
+  const inherited = createMathPreviewMacroEnvironment({
+    shared: { name: "shared", replacement: "project", argumentCount: 0 },
+    localWins: {
+      name: "localWins",
+      replacement: "project",
+      argumentCount: 0,
+    },
+    projectOnly: {
+      name: "projectOnly",
+      replacement: "project-only",
+      argumentCount: 0,
+    },
+  });
+  const text = String.raw`\providecommand{\shared}{provided-must-not-win}
+\renewcommand{\localWins}{local}
+\begin{document}
+$\shared+\localWins$
+\newcommand{\bodyDefined}{body}
+\end{document}`;
+  const snapshot = scanMathPreviewDocument(text, {
+    fragmentKind: "preamble",
+    configuredMacros: {
+      shared: "configured",
+      localWins: "configured",
+      configuredOnly: "configured-only",
+    },
+    inheritedMacroEnvironment: inherited,
+  });
+
+  assert.equal(snapshot.formulas.length, 0);
+  assert.equal(snapshot.macros.shared?.replacement, "project");
+  assert.equal(snapshot.macros.localWins?.replacement, "local");
+  assert.equal(snapshot.macros.configuredOnly?.replacement, "configured-only");
+  assert.equal(snapshot.macros.projectOnly?.replacement, "project-only");
+  assert.equal(snapshot.macros.bodyDefined?.replacement, "body");
+  assert.equal(Object.getPrototypeOf(snapshot.macros), null);
+  assert.equal(Object.isFrozen(snapshot.macros), true);
+});
+
+test("a static ThuThesis-shaped preamble snapshot can directly seed a body file", () => {
+  const preamble = scanMathPreviewDocument(
+    String.raw`\providecommand{\uppi}{\mathrm{\pi}}
+\newcommand{\symup}[1]{\mathrm{#1}}
+\newcommand{\symbf}[1]{\mathbf{#1}}
+\newcommand{\symbfsf}[1]{\mathbf{\mathsf{#1}}}
+\newcommand{\increment}{\mathop{\Delta}}
+\newcommand{\dif}{\mathop{}\!\mathrm{d}}`,
+    { fragmentKind: "preamble" },
+  );
+  assert.equal(preamble.formulas.length, 0);
+
+  const bodyText = String.raw`$\increment f=\symbf{x}+\symbfsf{y}+\symup{i}+\uppi+\dif x$`;
+  const body = scanMathPreviewDocument(bodyText, {
+    fragmentKind: "body",
+    inheritedMacroEnvironment: preamble,
+  });
+  const formula = body.formulas[0];
+  assert.ok(formula);
+  const input = createMathPreviewRenderInput(bodyText, formula, body);
+  assert.ok(input);
+  for (const name of ["uppi", "symup", "symbf", "symbfsf", "increment", "dif"]) {
+    assert.ok(input.macros[name], `inherited ${name}`);
+  }
+  assert.equal(input.macroFingerprint, preamble.macroFingerprint);
+});
+
+test("dynamic source definitions fail closed without shadowing capability fallbacks", () => {
+  const inherited = createMathPreviewMacroEnvironment({
+    dif: {
+      name: "dif",
+      replacement: String.raw`\mathop{}\!\mathrm{d}`,
+      argumentCount: 0,
+    },
+    indirect: { name: "indirect", replacement: "I", argumentCount: 0 },
+    reader: { name: "reader", replacement: "R", argumentCount: 0 },
+    defines: { name: "defines", replacement: "D", argumentCount: 0 },
+    safe: { name: "safe", replacement: "project-safe", argumentCount: 1 },
+  });
+  const text = String.raw`\newcommand\dif{\ifthu@math@style@TeX \mathrm{d}\else \mathop{}\!\mathrm{d}\fi}
+\newcommand{\indirect}{\csname hidden\endcsname}
+\newcommand{\reader}{\input{secret}$hidden-definition$}
+\newcommand{\defines}{\def\inner{bad}\inner}
+\renewcommand{\safe}[1]{\mathbf{#1}}
+$\dif x+\indirect+\reader+\defines+\safe{x}$`;
+  const snapshot = scanMathPreviewDocument(text, {
+    fragmentKind: "body",
+    inheritedMacroEnvironment: inherited,
+  });
+  assert.equal(snapshot.formulas.length, 1);
+  const formula = snapshot.formulas[0];
+  assert.ok(formula);
+  const input = createMathPreviewRenderInput(text, formula, snapshot);
+  assert.ok(input);
+  assert.equal(input.macros.dif?.replacement, String.raw`\mathop{}\!\mathrm{d}`);
+  assert.equal(input.macros.indirect?.replacement, "I");
+  assert.equal(input.macros.reader?.replacement, "R");
+  assert.equal(input.macros.defines?.replacement, "D");
+  assert.equal(input.macros.safe?.replacement, String.raw`\mathbf{#1}`);
+
+  const rejectedEnvironment = createMathPreviewMacroEnvironment({
+    unsafe: {
+      name: "unsafe",
+      replacement: String.raw`\csname dynamically-built\endcsname`,
+      argumentCount: 0,
+    },
+  });
+  assert.equal(rejectedEnvironment.macros.unsafe, undefined);
+});
+
+test("box-register macro definitions do not shadow double-angle preview fallbacks", () => {
+  const inherited = createMathPreviewMacroEnvironment({
+    llangle: {
+      name: "llangle",
+      replacement: String.raw`\langle\!\langle`,
+      argumentCount: 0,
+    },
+    rrangle: {
+      name: "rrangle",
+      replacement: String.raw`\rangle\!\rangle`,
+      argumentCount: 0,
+    },
+  });
+  const text = String.raw`\renewcommand{\llangle}[1][]{\savebox{\@brx}{\(#1\langle\)}\mathopen{\copy\@brx\kern-0.5\wd\@brx\usebox{\@brx}}}
+\renewcommand{\rrangle}[1][]{\savebox{\@brx}{\(#1\rangle\)}\mathclose{\copy\@brx\kern-0.5\wd\@brx\usebox{\@brx}}}
+$\llangle\tau_n(P)\rrangle_0$`;
+  const snapshot = scanMathPreviewDocument(text, {
+    fragmentKind: "body",
+    inheritedMacroEnvironment: inherited,
+  });
+  const formula = snapshot.formulas[0];
+  assert.ok(formula);
+  const input = createMathPreviewRenderInput(text, formula, snapshot);
+  assert.ok(input);
+  assert.equal(input.macros.llangle?.replacement, String.raw`\langle\!\langle`);
+  assert.equal(input.macros.rrangle?.replacement, String.raw`\rangle\!\rangle`);
+});
+
+test("fragment kinds separate standalone documents, body files, and preambles", () => {
+  const text = String.raw`$before$
+\newcommand{\wrapped}{$hidden-definition$}
+\begin{document}$inside$\end{document}
+$after$`;
+  const bodies = (fragmentKind: "standalone" | "body" | "preamble") =>
+    scanMathPreviewDocument(text, { fragmentKind }).formulas.map((formula) =>
+      text.slice(formula.bodyRange.start, formula.bodyRange.end),
+    );
+
+  assert.deepEqual(bodies("standalone"), ["inside"]);
+  assert.deepEqual(bodies("body"), ["before", "inside", "after"]);
+  assert.deepEqual(bodies("preamble"), []);
+});
+
+test("body fragments resolve a bounded macro timeline per formula", () => {
+  const inherited = createMathPreviewMacroEnvironment({
+    foo: { name: "foo", replacement: "project", argumentCount: 0 },
+  });
+  const text = String.raw`$\foo$
+\providecommand{\foo}{ignored}
+$\foo$
+\renewcommand{\foo}{local}
+$\foo$
+\newcommand{\late}{after}
+$\foo+\late$`;
+  const snapshot = scanMathPreviewDocument(text, {
+    fragmentKind: "body",
+    configuredMacros: { foo: "configured" },
+    inheritedMacroEnvironment: {
+      macros: inherited.macros,
+      macroFingerprint: "forged-stale-fingerprint",
+    },
+  });
+  assert.equal(snapshot.formulas.length, 4);
+  assert.ok(snapshot.macroEnvironments);
+  assert.equal(snapshot.macroEnvironments.length, 3);
+  assert.ok(snapshot.macroEnvironments.length <= 129);
+
+  const inputs = snapshot.formulas.map((formula) => {
+    const input = createMathPreviewRenderInput(text, formula, snapshot);
+    assert.ok(input);
+    return input;
+  });
+  assert.equal(inputs[0]?.macros.foo?.replacement, "project");
+  assert.equal(inputs[1]?.macros.foo?.replacement, "project");
+  assert.equal(inputs[2]?.macros.foo?.replacement, "local");
+  assert.equal(inputs[3]?.macros.foo?.replacement, "local");
+  assert.equal(inputs[3]?.macros.late?.replacement, "after");
+  assert.equal(inputs[0]?.macroFingerprint, inputs[1]?.macroFingerprint);
+  assert.notEqual(inputs[1]?.macroFingerprint, inputs[2]?.macroFingerprint);
+  assert.notEqual(inputs[2]?.macroFingerprint, inputs[3]?.macroFingerprint);
+  assert.notEqual(inputs[0]?.macroFingerprint, "forged-stale-fingerprint");
+  assert.equal(snapshot.macros.foo?.replacement, "local");
+  assert.equal(snapshot.macros.late?.replacement, "after");
+
+  const thirdFormula = snapshot.formulas[2];
+  assert.ok(thirdFormula);
+  const cursorInput = createMathPreviewCursorRenderInput(
+    text,
+    thirdFormula,
+    snapshot,
+    thirdFormula.bodyRange.end,
+    String.raw`\mathord{|}`,
+  );
+  assert.ok(cursorInput);
+  assert.equal(cursorInput.macros.foo?.replacement, "local");
+  assert.equal(cursorInput.macroFingerprint, inputs[2]?.macroFingerprint);
+});
+
+test("standalone body macros remain position-sensitive after the preamble", () => {
+  const inherited = createMathPreviewMacroEnvironment({
+    foo: { name: "foo", replacement: "project", argumentCount: 0 },
+  });
+  const text = String.raw`$\foo$\renewcommand{\foo}{local}$\foo$`;
+  const snapshot = scanMathPreviewDocument(text, {
+    inheritedMacroEnvironment: inherited,
+  });
+  const first = snapshot.formulas[0];
+  const second = snapshot.formulas[1];
+  assert.ok(first);
+  assert.ok(second);
+  const firstInput = createMathPreviewRenderInput(text, first, snapshot);
+  const secondInput = createMathPreviewRenderInput(text, second, snapshot);
+  assert.ok(firstInput);
+  assert.ok(secondInput);
+  assert.equal(firstInput.macros.foo?.replacement, "project");
+  assert.equal(secondInput.macros.foo?.replacement, "local");
+  assert.notEqual(first.macroEnvironmentIndex, undefined);
+  assert.ok(snapshot.macroEnvironments);
+  assert.equal(
+    mathPreviewMacroEnvironmentAtOffset(snapshot, first.outerRange.start)
+      .macros.foo?.replacement,
+    "project",
+  );
+  assert.equal(
+    mathPreviewMacroEnvironmentAtOffset(snapshot, second.outerRange.start)
+      .macros.foo?.replacement,
+    "local",
+  );
+});
+
+test("local groups and literal false branches cannot leak Math Preview macros", () => {
+  const text = String.raw`{\newcommand{\local}{inside}$\local$}
+$\local$
+\iffalse
+\newcommand{\dead}{never}
+$\dead$
+\fi
+\iftrue
+\newcommand{\conditional}{unproven}
+$\conditional$
+\fi
+$x$`;
+  const snapshot = scanMathPreviewDocument(text, { fragmentKind: "body" });
+
+  assert.deepEqual(
+    snapshot.formulas.map((formula) =>
+      text.slice(formula.bodyRange.start, formula.bodyRange.end)
+    ),
+    [String.raw`\local`, String.raw`\local`, "x"],
+  );
+  for (const formula of snapshot.formulas) {
+    const input = createMathPreviewRenderInput(text, formula, snapshot);
+    assert.ok(input);
+    assert.equal(input.macros.local, undefined);
+    assert.equal(input.macros.dead, undefined);
+    assert.equal(input.macros.conditional, undefined);
+  }
+});
+
+test("newif targets are declarations and custom conditional macros stay inactive", () => {
+  const text = String.raw`\newif\ifdraft
+\newcommand{\beforebranch}{B}
+\ifdraft
+\newcommand{\conditional}{unsafe}
+$\conditional$
+\fi
+\newcommand{\afterbranch}{A}
+$\beforebranch+\afterbranch$`;
+  const snapshot = scanMathPreviewDocument(text, { fragmentKind: "body" });
+
+  assert.deepEqual(
+    snapshot.formulas.map((formula) =>
+      text.slice(formula.bodyRange.start, formula.bodyRange.end)
+    ),
+    [String.raw`\beforebranch+\afterbranch`],
+  );
+  const formula = snapshot.formulas[0];
+  assert.ok(formula);
+  const environment = mathPreviewMacroEnvironmentAtOffset(
+    snapshot,
+    formula.outerRange.start,
+  );
+  assert.equal(environment.macros.beforebranch?.replacement, "B");
+  assert.equal(environment.macros.afterbranch?.replacement, "A");
+  assert.equal(environment.macros.conditional, undefined);
+});
+
+test("function-style conditional branches never publish formulas or macros", () => {
+  const text = String.raw`\IfFileExists{choice.tex}{
+  \newcommand{\branch}{A}$a$
+}{
+  \newcommand{\branch}{B}$b$
+}
+\newcommand{\after}{safe}
+$\after$`;
+  const snapshot = scanMathPreviewDocument(text, { fragmentKind: "body" });
+
+  assert.deepEqual(
+    snapshot.formulas.map((formula) =>
+      text.slice(formula.bodyRange.start, formula.bodyRange.end)
+    ),
+    [String.raw`\after`],
+  );
+  const formula = snapshot.formulas[0];
+  assert.ok(formula);
+  const environment = mathPreviewMacroEnvironmentAtOffset(
+    snapshot,
+    formula.outerRange.start,
+  );
+  assert.equal(environment.macros.branch, undefined);
+  assert.equal(environment.macros.after?.replacement, "safe");
+});
+
+test("ordinary LaTeX environments cannot leak local Math Preview macros", () => {
+  const text = String.raw`\newcommand{\body}{B}
+\begin{table}
+\newcommand{\local}{L}
+$\local+\body$
+\end{table}
+$\local+\body$`;
+  const snapshot = scanMathPreviewDocument(text, { fragmentKind: "body" });
+  assert.equal(snapshot.formulas.length, 2);
+  for (const formula of snapshot.formulas) {
+    const environment = mathPreviewMacroEnvironmentAtOffset(
+      snapshot,
+      formula.outerRange.start,
+    );
+    assert.equal(environment.macros.body?.replacement, "B");
+    assert.equal(environment.macros.local, undefined);
+  }
+});
+
+test("mismatched environments fail closed for later Math Preview macros", () => {
+  const text = String.raw`\begin{table}
+\end{figure}
+\newcommand{\uncertain}{bad}
+$\uncertain$`;
+  const snapshot = scanMathPreviewDocument(text, { fragmentKind: "body" });
+  const formula = snapshot.formulas[0];
+  assert.ok(formula);
+  assert.equal(
+    mathPreviewMacroEnvironmentAtOffset(snapshot, formula.outerRange.start)
+      .macros.uncertain,
+    undefined,
+  );
 });

@@ -1,4 +1,11 @@
-import { parentPort } from "node:worker_threads";
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
+import { parentPort, workerData } from "node:worker_threads";
 import { MathJaxNewcmFont } from "@mathjax/mathjax-newcm-font/cjs/svg.js";
 import { mathjax } from "@mathjax/src/cjs/mathjax.js";
 import { liteAdaptor } from "@mathjax/src/cjs/adaptors/liteAdaptor.js";
@@ -10,9 +17,9 @@ import "@mathjax/src/cjs/input/tex/color/ColorConfiguration.js";
 import "@mathjax/src/cjs/input/tex/configmacros/ConfigMacrosConfiguration.js";
 import "@mathjax/src/cjs/input/tex/mathtools/MathtoolsConfiguration.js";
 import "@mathjax/src/cjs/input/tex/newcommand/NewcommandConfiguration.js";
-import "@mathjax/src/cjs/input/tex/noundefined/NoUndefinedConfiguration.js";
 import { SVG } from "@mathjax/src/cjs/output/svg.js";
 import type {
+  MathPreviewCursorGeometry,
   MathPreviewWorkerRequest,
   MathPreviewWorkerResponse,
 } from "./mathPreviewProtocol";
@@ -21,6 +28,13 @@ const HARD_MAX_SOURCE_LENGTH = 32_768;
 const HARD_MAX_MACRO_COUNT = 128;
 const HARD_MAX_MACRO_TEXT = 16_384;
 const HARD_MAX_SVG_LENGTH = 4_000_000;
+const DEFAULT_ENGINE_CACHE_LIMIT = 12;
+const configuredEngineCacheLimit = typeof workerData === "object" &&
+    workerData !== null &&
+    Number.isSafeInteger((workerData as { readonly engineCacheLimit?: unknown }).engineCacheLimit)
+  ? Number((workerData as { readonly engineCacheLimit: number }).engineCacheLimit)
+  : DEFAULT_ENGINE_CACHE_LIMIT;
+const ENGINE_CACHE_LIMIT = Math.max(1, Math.min(16, configuredEngineCacheLimit));
 
 type DynamicFontLoader = () => Promise<unknown>;
 
@@ -95,6 +109,32 @@ interface Engine {
   readonly document: RenderDocument;
 }
 
+// Creating TeX, SVG and MathDocument instances is substantially more expensive
+// than converting one incremental preview. Keep a small per-worker LRU keyed by
+// the effective macro environment, then reset the TeX input state before each
+// use so formula-local definitions, tags and labels never leak between requests.
+const engineCache = new Map<string, Engine>();
+
+// A preview is intentionally detached from the document-wide equation
+// counter/reference graph.  MathJax's AMS label handler can retry or reject a
+// standalone align conversion when more than one row carries a \label, even
+// though labels have no visible output.  Reserve the standard command as a
+// one-argument no-op inside this isolated renderer so labels never suppress an
+// otherwise valid preview.  Put it after request macros: document/configured
+// macros must not turn metadata into visible or stateful preview content.
+const PREVIEW_FALLBACK_MACROS = {
+  llangle: String.raw`\langle\!\langle`,
+  rrangle: String.raw`\rangle\!\rangle`,
+};
+
+const PREVIEW_INTERNAL_MACROS = {
+  label: ["", 1] as const,
+  // amsthm places the end-of-proof mark at the surrounding proof level.
+  // A detached formula preview has no proof list to mutate, so retaining the
+  // command only makes an otherwise valid align/align* fail in MathJax.
+  qedhere: "",
+};
+
 let renderQueue: Promise<void> = Promise.resolve();
 
 parentPort?.on("message", (value: unknown) => {
@@ -114,7 +154,7 @@ async function renderMessage(value: unknown): Promise<MathPreviewWorkerResponse>
   }
 
   try {
-    const engine = createEngine(request.macros);
+    const engine = acquireEngine(request);
     const container = await engine.document.convertPromise(request.tex, {
       display: request.display,
       em: 16,
@@ -125,6 +165,9 @@ async function renderMessage(value: unknown): Promise<MathPreviewWorkerResponse>
     if (svgNode === undefined) {
       throw new Error("MathJax did not return an SVG node.");
     }
+    const cursor = request.cursorMarkerColor === undefined
+      ? undefined
+      : tagAndMeasureCursor(svgNode, request.cursorMarkerColor);
     const source = adaptor.serializeXML(svgNode);
     if (source.length > HARD_MAX_SVG_LENGTH) {
       throw new Error("MathJax SVG exceeded the safe output limit.");
@@ -136,6 +179,7 @@ async function renderMessage(value: unknown): Promise<MathPreviewWorkerResponse>
       svg: rendered.svg,
       widthEm: rendered.widthEm,
       heightEm: rendered.heightEm,
+      ...(cursor === undefined ? {} : { cursor }),
     };
   } catch (error: unknown) {
     return {
@@ -144,6 +188,45 @@ async function renderMessage(value: unknown): Promise<MathPreviewWorkerResponse>
       message: normalizeError(error),
     };
   }
+}
+
+function acquireEngine(request: MathPreviewWorkerRequest): Engine {
+  if (requestMayMutateEngine(request.tex)) {
+    // TeX definition commands mutate the parser's macro map beyond the normal
+    // per-conversion reset. Render these uncommon formulas in an isolated
+    // engine so a local \def can never change a later preview.
+    return createEngine(request.macros);
+  }
+  const key = engineCacheKey(request);
+  const cached = engineCache.get(key);
+  if (cached !== undefined) {
+    engineCache.delete(key);
+    engineCache.set(key, cached);
+    cached.document.reset({ inputJax: [0] });
+    return cached;
+  }
+  const engine = createEngine(request.macros);
+  engineCache.set(key, engine);
+  while (engineCache.size > ENGINE_CACHE_LIMIT) {
+    const oldestKey = engineCache.keys().next().value as string | undefined;
+    if (oldestKey === undefined) {
+      break;
+    }
+    engineCache.delete(oldestKey);
+  }
+  return engine;
+}
+
+function requestMayMutateEngine(tex: string): boolean {
+  return /\\(?:def|edef|gdef|xdef|let|futurelet|global|globaldefs|newcommand|renewcommand|providecommand|newenvironment|renewenvironment|newtheorem|DeclareMathOperator|DeclarePairedDelimiter(?:X|XPP)?|definecolor|colorlet)\*?\b/u.test(
+    tex,
+  );
+}
+
+function engineCacheKey(request: MathPreviewWorkerRequest): string {
+  // Include the serialized macro payload as a collision guard even though the
+  // host fingerprint is already deterministic for normal requests.
+  return `${request.macroFingerprint}\u0000${JSON.stringify(request.macros)}`;
 }
 
 function createEngine(macros: MathPreviewWorkerRequest["macros"]): Engine {
@@ -156,9 +239,12 @@ function createEngine(macros: MathPreviewWorkerRequest["macros"]): Engine {
       "configmacros",
       "mathtools",
       "newcommand",
-      "noundefined",
     ],
-    macros,
+    macros: {
+      ...PREVIEW_FALLBACK_MACROS,
+      ...macros,
+      ...PREVIEW_INTERNAL_MACROS,
+    },
     maxBuffer: 32_768,
     maxMacros: 1_000,
     formatError: (_jax: unknown, error: Error): never => {
@@ -196,6 +282,9 @@ function parseRequest(value: unknown): MathPreviewWorkerRequest | undefined {
     !Number.isFinite(candidate.scale) ||
     candidate.scale < 0.5 ||
     candidate.scale > 3 ||
+    (candidate.cursorMarkerColor !== undefined &&
+      (typeof candidate.cursorMarkerColor !== "string" ||
+        !/^#[0-9A-Fa-f]{6}$/u.test(candidate.cursorMarkerColor))) ||
     typeof candidate.macros !== "object" ||
     candidate.macros === null ||
     Array.isArray(candidate.macros)
@@ -214,6 +303,239 @@ function parseRequest(value: unknown): MathPreviewWorkerRequest | undefined {
     return undefined;
   }
   return candidate as MathPreviewWorkerRequest;
+}
+
+type SvgNode = ReturnType<typeof adaptor.tags>[number];
+
+interface SvgMatrix {
+  readonly a: number;
+  readonly b: number;
+  readonly c: number;
+  readonly d: number;
+  readonly e: number;
+  readonly f: number;
+}
+
+const IDENTITY_SVG_MATRIX: SvgMatrix = {
+  a: 1,
+  b: 0,
+  c: 0,
+  d: 1,
+  e: 0,
+  f: 0,
+};
+
+/**
+ * Locate the deliberately unique coloured rule inserted by the cursor
+ * planner. MathJax already knows the exact layout, including nested fractions,
+ * scripts and aligned rows; walking its emitted SVG transforms lets both the
+ * native and Webview previews follow that real geometry without estimating a
+ * glyph position from source-character ratios.
+ */
+function tagAndMeasureCursor(
+  svg: SvgNode,
+  markerColor: string,
+): MathPreviewCursorGeometry | undefined {
+  const normalizedColor = markerColor.toUpperCase();
+  for (const rect of adaptor.tags(svg, "rect")) {
+    if (
+      stringAttribute(rect, "fill").toUpperCase() !== normalizedColor ||
+      stringAttribute(rect, "data-bgcolor") !== "true" ||
+      !cursorRuleAncestorMatches(rect, svg, normalizedColor)
+    ) {
+      continue;
+    }
+    const x = finiteAttribute(rect, "x", 0);
+    const y = finiteAttribute(rect, "y", 0);
+    const width = finiteAttribute(rect, "width", Number.NaN);
+    const height = finiteAttribute(rect, "height", Number.NaN);
+    if (!(width > 0) || !(height > 0)) {
+      continue;
+    }
+    adaptor.setAttribute(rect, "data-texleaf-preview-caret", "true");
+    const matrix = transformToRoot(rect, svg);
+    const points = [
+      transformPoint(matrix, x, y),
+      transformPoint(matrix, x + width, y),
+      transformPoint(matrix, x, y + height),
+      transformPoint(matrix, x + width, y + height),
+    ];
+    const xs = points.map((point) => point.x);
+    const ys = points.map((point) => point.y);
+    const left = Math.min(...xs);
+    const right = Math.max(...xs);
+    const top = Math.min(...ys);
+    const bottom = Math.max(...ys);
+    if (![left, right, top, bottom].every(Number.isFinite)) {
+      return undefined;
+    }
+    return {
+      x: left,
+      y: top,
+      width: Math.max(1, right - left),
+      height: Math.max(1, bottom - top),
+    };
+  }
+  return undefined;
+}
+
+function cursorRuleAncestorMatches(
+  node: SvgNode,
+  svg: SvgNode,
+  normalizedColor: string,
+): boolean {
+  let current: SvgNode | undefined = node;
+  while (current !== undefined) {
+    const latex = stringAttribute(current, "data-latex");
+    if (
+      latex.includes(String.raw`\rule[-0.2em]{0.09em}{1.2em}`) &&
+      latex.toUpperCase().includes(normalizedColor)
+    ) {
+      return true;
+    }
+    if (current === svg) {
+      break;
+    }
+    current = adaptor.parent(current);
+  }
+  return false;
+}
+
+function transformToRoot(node: SvgNode, svg: SvgNode): SvgMatrix {
+  let result = IDENTITY_SVG_MATRIX;
+  let current: SvgNode | undefined = node;
+  while (current !== undefined && current !== svg) {
+    result = multiplySvgMatrices(
+      parseSvgTransform(stringAttribute(current, "transform")),
+      result,
+    );
+    current = adaptor.parent(current);
+  }
+  return result;
+}
+
+function parseSvgTransform(value: string): SvgMatrix {
+  let result = IDENTITY_SVG_MATRIX;
+  for (const match of value.matchAll(/([A-Za-z]+)\s*\(([^)]*)\)/gu)) {
+    const name = (match[1] ?? "").toLowerCase();
+    const values = (match[2] ?? "")
+      .trim()
+      .split(/[\s,]+/u)
+      .filter((part) => part.length > 0)
+      .map((part) => Number.parseFloat(part));
+    if (values.some((part) => !Number.isFinite(part))) {
+      continue;
+    }
+    const operation = svgTransformOperation(name, values);
+    if (operation !== undefined) {
+      // SVG transform lists use the written order, represented by
+      // post-multiplying each local operation.
+      result = multiplySvgMatrices(result, operation);
+    }
+  }
+  return result;
+}
+
+function svgTransformOperation(
+  name: string,
+  values: readonly number[],
+): SvgMatrix | undefined {
+  if (name === "matrix" && values.length >= 6) {
+    return {
+      a: values[0]!,
+      b: values[1]!,
+      c: values[2]!,
+      d: values[3]!,
+      e: values[4]!,
+      f: values[5]!,
+    };
+  }
+  if (name === "translate" && values.length >= 1) {
+    return {
+      ...IDENTITY_SVG_MATRIX,
+      e: values[0]!,
+      f: values[1] ?? 0,
+    };
+  }
+  if (name === "scale" && values.length >= 1) {
+    return {
+      ...IDENTITY_SVG_MATRIX,
+      a: values[0]!,
+      d: values[1] ?? values[0]!,
+    };
+  }
+  if (name === "rotate" && values.length >= 1) {
+    const radians = (values[0]! * Math.PI) / 180;
+    const rotation: SvgMatrix = {
+      a: Math.cos(radians),
+      b: Math.sin(radians),
+      c: -Math.sin(radians),
+      d: Math.cos(radians),
+      e: 0,
+      f: 0,
+    };
+    if (values.length < 3) {
+      return rotation;
+    }
+    const cx = values[1]!;
+    const cy = values[2]!;
+    return multiplySvgMatrices(
+      multiplySvgMatrices(
+        { ...IDENTITY_SVG_MATRIX, e: cx, f: cy },
+        rotation,
+      ),
+      { ...IDENTITY_SVG_MATRIX, e: -cx, f: -cy },
+    );
+  }
+  if (name === "skewx" && values.length >= 1) {
+    return {
+      ...IDENTITY_SVG_MATRIX,
+      c: Math.tan((values[0]! * Math.PI) / 180),
+    };
+  }
+  if (name === "skewy" && values.length >= 1) {
+    return {
+      ...IDENTITY_SVG_MATRIX,
+      b: Math.tan((values[0]! * Math.PI) / 180),
+    };
+  }
+  return undefined;
+}
+
+function multiplySvgMatrices(left: SvgMatrix, right: SvgMatrix): SvgMatrix {
+  return {
+    a: left.a * right.a + left.c * right.b,
+    b: left.b * right.a + left.d * right.b,
+    c: left.a * right.c + left.c * right.d,
+    d: left.b * right.c + left.d * right.d,
+    e: left.a * right.e + left.c * right.f + left.e,
+    f: left.b * right.e + left.d * right.f + left.f,
+  };
+}
+
+function transformPoint(
+  matrix: SvgMatrix,
+  x: number,
+  y: number,
+): { readonly x: number; readonly y: number } {
+  return {
+    x: matrix.a * x + matrix.c * y + matrix.e,
+    y: matrix.b * x + matrix.d * y + matrix.f,
+  };
+}
+
+function stringAttribute(node: SvgNode, name: string): string {
+  const value: unknown = adaptor.getAttribute(node, name);
+  return typeof value === "string" ? value : "";
+}
+
+function finiteAttribute(
+  node: SvgNode,
+  name: string,
+  fallback: number,
+): number {
+  const value = Number.parseFloat(stringAttribute(node, name));
+  return Number.isFinite(value) ? value : fallback;
 }
 
 function isMacroOption(value: unknown): boolean {
@@ -301,6 +623,15 @@ function roundDimension(value: number): string {
 }
 
 function normalizeError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const structuredMessage =
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof (error as { readonly message?: unknown }).message === "string"
+      ? (error as { readonly message: string }).message
+      : undefined;
+  const message = error instanceof Error
+    ? error.message
+    : structuredMessage ?? String(error);
   return message.replace(/[\r\n]+/gu, " ").slice(0, 300) || "MathJax render failed.";
 }

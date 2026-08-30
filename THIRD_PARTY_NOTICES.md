@@ -34,7 +34,19 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-TeXLeaf 自身的许可条款见根目录 [LICENSE](LICENSE)。
+TeXLeaf 自身的 `GPL-3.0-only` 条款、合理署名要求和用户文档输出例外见根目录 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。本文件中的第三方材料继续适用各自声明，不因 TeXLeaf 主体许可证变化而被改写。
+
+## CodeMirror 6 与编辑器运行依赖
+
+- 项目：https://codemirror.net/ 与 https://github.com/codemirror/dev
+- 用途：TeXLeaf Custom Text Editor Webview 的文本模型、视图、命令、搜索、LaTeX legacy mode 与交互部件
+- 直接组件：`@codemirror/autocomplete` 6.20.0、`@codemirror/commands` 6.11.0、`@codemirror/language` 6.12.4、`@codemirror/legacy-modes` 6.5.3、`@codemirror/search` 6.7.1、`@codemirror/state` 6.7.1、`@codemirror/view` 6.43.9、`@lezer/highlight` 1.2.3
+- 随 bundle 使用的传递组件：`@lezer/common` 1.5.2、`@lezer/lr` 1.4.10、`@marijn/find-cluster-break` 1.0.3、`crelt` 1.0.7、`style-mod` 4.1.3、`w3c-keyname` 2.2.8
+- 许可证：MIT License
+
+完整版权声明与 MIT 许可证文本随发行包保存在 [licenses/CodeMirror-MIT.txt](licenses/CodeMirror-MIT.txt)。TeXLeaf 将这些组件打入浏览器专用的 `dist/visualEditor.js`，VSIX 不依赖安装后的 `node_modules`。
+
+Overleaf 的开源 Visual Editor 是公式部件和选区切换交互的研究参考，不是随 TeXLeaf 分发的运行组件。TeXLeaf 没有把 Overleaf 的 AGPL 源文件、语法文件、CSS、图标或测试复制进发行包；因此本节列出的实际运行依赖是 CodeMirror 6 及上述 MIT 组件。
 
 ## jsonc-parser
 

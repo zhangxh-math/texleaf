@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 "use strict";
 
 /**
@@ -58,6 +65,11 @@ try {
         "window.title": "TeXLeaf Math Preview Visual Test",
         "workbench.colorTheme": colorTheme,
         "workbench.startupEditor": "none",
+        // This launcher specifically validates Monaco Math Preview. TeXLeaf's
+        // product default is now the Custom Text Editor, so force the built-in
+        // text editor only inside this disposable native-preview fixture.
+        "workbench.editorAssociations": { "*.tex": "default" },
+        "texleaf.visualEditor.defaultMode": "source",
         "editor.fontSize": 18,
         "editor.lineHeight": 30,
         "editor.wordWrap": "off",
@@ -481,7 +493,7 @@ function parseArguments(argv) {
         "  --scenario inline|multiline-inline|display|nested-display|tall-display|typing-stability\n" +
         "                                Fixture to open (default: display).\n" +
         "  --placement autoBelow|autoAbove|above|below\n" +
-        "                                Math Preview placement (default: autoBelow).\n" +
+        "                                Math Preview placement (default: autoAbove).\n" +
         "  --debug-port <port>           Loopback CDP port for isolated renderer QA.\n",
     );
     process.exit(0);
@@ -489,7 +501,7 @@ function parseArguments(argv) {
   let vsixPath;
   let theme = "dark";
   let scenario = "display";
-  let placement = "autoBelow";
+  let placement = "autoAbove";
   let debugPort;
   const seenFlags = new Set();
   for (let index = 0; index < argv.length; index += 2) {

@@ -1,4 +1,12 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import * as esbuild from "esbuild";
+import { copyFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 
 const watch = process.argv.includes("--watch");
@@ -33,10 +41,41 @@ const workerOptions = {
   outfile: path.join(workspaceRoot, "dist", "mathPreviewWorker.js"),
 };
 
+const visualEditorOptions = {
+  absWorkingDir: workspaceRoot,
+  bundle: true,
+  format: "iife",
+  mainFields: ["browser", "module", "main"],
+  platform: "browser",
+  target: "es2022",
+  sourcemap: watch,
+  logLevel: "info",
+  entryPoints: [path.join(workspaceRoot, "src", "visualEditorWebview.ts")],
+  outfile: path.join(workspaceRoot, "dist", "visualEditor.js"),
+};
+
+async function copyRuntimeAssets() {
+  const dist = path.join(workspaceRoot, "dist");
+  await mkdir(dist, { recursive: true });
+  await copyFile(
+    path.join(
+      workspaceRoot,
+      "node_modules",
+      "vscode-oniguruma",
+      "release",
+      "onig.wasm",
+    ),
+    path.join(dist, "onig.wasm"),
+  );
+}
+
+await copyRuntimeAssets();
+
 if (watch) {
   const contexts = await Promise.all([
     esbuild.context(extensionOptions),
     esbuild.context(workerOptions),
+    esbuild.context(visualEditorOptions),
   ]);
   await Promise.all(contexts.map((context) => context.watch()));
   console.log("TeXLeaf is watching for changes...");
@@ -44,5 +83,6 @@ if (watch) {
   await Promise.all([
     esbuild.build(extensionOptions),
     esbuild.build(workerOptions),
+    esbuild.build(visualEditorOptions),
   ]);
 }

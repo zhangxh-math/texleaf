@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -223,6 +230,11 @@ test("factory templates are independent, unique, and free of personal data", () 
     );
     assert.ok(text.length > 100, definition.fileName);
     assert.ok(Buffer.byteLength(text, "utf8") < 512 * 1024);
+    assert.equal(
+      text.split(String.raw`\newcommand{\dd}{\mathop{}\!\mathrm{d}}`).length - 1,
+      1,
+      `${definition.fileName} must define the differential command exactly once`,
+    );
     for (const pattern of forbidden) {
       assert.doesNotMatch(text, pattern, definition.fileName);
     }

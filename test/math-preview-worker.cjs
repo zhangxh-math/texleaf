@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 "use strict";
 
 const assert = require("node:assert/strict");
@@ -101,9 +108,10 @@ function render(overrides) {
     assert.doesNotMatch(lightTheme.svg, /#f0f0f0|currentColor/iu);
 
     const cursorMarker = await render({
-      tex: String.raw`\begin{align}q&=x\mathord{\color{#ffb454}\rule[-0.2em]{0.07em}{1.2em}}+y\\r&=\frac{a}{b}\end{align}`,
+      tex: String.raw`\begin{align}q&=x\mathord{\color{#ffb454}\rule[-0.2em]{0.09em}{1.2em}}+y\\r&=\frac{a}{b}\end{align}`,
       foreground: "#f0f0f0",
       macroFingerprint: "cursor-marker",
+      cursorMarkerColor: "#ffb454",
     });
     assert.equal(cursorMarker.type, "result", cursorMarker.message);
     assert.match(
@@ -111,22 +119,32 @@ function render(overrides) {
       /#ffb454/iu,
       "the cursor rule must retain its theme-distinct color in the SVG",
     );
-    const markerTex = String.raw`\mathord{\color{#ffb454}\rule[-0.2em]{0.07em}{1.2em}}`;
+    assert.match(cursorMarker.svg, /data-texleaf-preview-caret="true"/u);
+    assert.ok(cursorMarker.cursor);
+    assert.ok(Number.isFinite(cursorMarker.cursor.x));
+    assert.ok(Number.isFinite(cursorMarker.cursor.y));
+    assert.ok(cursorMarker.cursor.width > 0);
+    assert.ok(cursorMarker.cursor.height > 0);
+    const markerTex = String.raw`\mathord{\color{#ffb454}\rule[-0.2em]{0.09em}{1.2em}}`;
     const cursorStructures = await Promise.all([
       render({
         tex: String.raw`\frac{a${markerTex}+b}{c}`,
         foreground: "#f0f0f0",
         macroFingerprint: "cursor-fraction",
+        cursorMarkerColor: "#ffb454",
       }),
       render({
         tex: String.raw`x_{i${markerTex}j}`,
         foreground: "#f0f0f0",
         macroFingerprint: "cursor-subscript",
+        cursorMarkerColor: "#ffb454",
       }),
     ]);
     for (const response of cursorStructures) {
       assert.equal(response.type, "result", response.message);
       assert.match(response.svg, /#ffb454/iu);
+      assert.match(response.svg, /data-texleaf-preview-caret="true"/u);
+      assert.ok(response.cursor);
     }
 
     const unsafeForeground = await render({
@@ -156,6 +174,94 @@ function render(overrides) {
     });
     assert.equal(environment.type, "result", environment.message);
     assert.match(environment.svg, /^<svg\b/u);
+
+    const proofEndingEnvironment = await render({
+      tex: String.raw`\begin{align*}F(y_1,x_2)&=0.\qedhere\end{align*}`,
+      macroFingerprint: "proof-ending-align-star",
+    });
+    assert.equal(
+      proofEndingEnvironment.type,
+      "result",
+      "proof-ending display environments must remain previewable: " +
+        proofEndingEnvironment.message,
+    );
+    assert.match(proofEndingEnvironment.svg, /^<svg\b/u);
+
+    const unknownCommand = await render({
+      tex: String.raw`\texleafDefinitelyUnknown{x}`,
+      macroFingerprint: "unknown-command-must-fail-closed",
+    });
+    assert.equal(
+      unknownCommand.type,
+      "error",
+      "an unknown TeX command must keep source visible instead of producing a red-name SVG",
+    );
+
+    const twoLabeledRowsTex = String.raw`\begin{align}a&=b\label{one}\\c&=d\label{two}\end{align}`;
+    const twoLabeledRows = await render({
+      tex: twoLabeledRowsTex,
+      macroFingerprint: "two-labeled-align-rows",
+    });
+    const twoLabeledRowsWithNoOpLabels = await render({
+      tex: twoLabeledRowsTex,
+      macros: { label: ["", 1] },
+      macroFingerprint: "two-labeled-align-rows-no-op-label",
+    });
+    assert.equal(
+      twoLabeledRowsWithNoOpLabels.type,
+      "result",
+      twoLabeledRowsWithNoOpLabels.message,
+    );
+    const recursiveLabelOverride = await render({
+      tex: twoLabeledRowsTex,
+      macros: { label: [String.raw`\label{#1}`, 1] },
+      macroFingerprint: "two-labeled-align-rows-recursive-label-override",
+    });
+    assert.equal(
+      recursiveLabelOverride.type,
+      "result",
+      "a request macro must not override the worker's renderer-only no-op label: " +
+        recursiveLabelOverride.message,
+    );
+
+    const screenshotStyleTex = String.raw`\begin{align}
+C(\mathbf{d}) & =\sum_{j=1}^{n}\frac{2d_{j}+1}{\chi(\mathbf{d})-1}C(d_{1},\dots,d_{j}+d_{0},\dots,d_{n})+\sum_{\substack{a,b\geq0\\a+b=d_{0}-1}}\left(\frac{2}{\chi(\mathbf{d})-1}C(a,b,d_{1},\dots,d_{n})\right.\label{eq:bgw-recursion-linear}\\
+&\left.+\sum_{I\sqcup J=\{ 1,\dots n \}}\frac{(\chi(a,\mathbf{d}_{I})-1)!(\chi(b,\mathbf{d}_{J})-1)!}{(\chi(d)-1)!}C(a.\mathbf{d}_{I})C(b,\mathbf{d}_{J})\right).\label{eq:bgw-recursion-quadric}
+\end{align}`;
+    const screenshotStyleEnvironment = await render({
+      tex: screenshotStyleTex,
+      macroFingerprint: "screenshot-style-align",
+    });
+    const screenshotStyleWithNoOpLabels = await render({
+      tex: screenshotStyleTex,
+      macros: { label: ["", 1] },
+      macroFingerprint: "screenshot-style-align-no-op-label",
+    });
+    assert.equal(
+      screenshotStyleWithNoOpLabels.type,
+      "result",
+      screenshotStyleWithNoOpLabels.message,
+    );
+    assert.equal(twoLabeledRows.type, "result", twoLabeledRows.message);
+    assert.equal(
+      screenshotStyleEnvironment.type,
+      "result",
+      screenshotStyleEnvironment.message,
+    );
+    assert.match(screenshotStyleEnvironment.svg, /^<svg\b/u);
+
+    const malformedDelimiter = await render({
+      tex: String.raw`\begin{align}a&=\left(\end{align}`,
+      macroFingerprint: "malformed-delimiter-error-message",
+    });
+    assert.equal(malformedDelimiter.type, "error");
+    assert.equal(typeof malformedDelimiter.message, "string");
+    assert.ok(malformedDelimiter.message.length > 0);
+    assert.notEqual(
+      malformedDelimiter.message,
+      "[object Object]",
+      "structured MathJax failures must retain their useful TeX error message",
+    );
 
     const tallRows = Array.from(
       { length: 20 },
@@ -188,6 +294,42 @@ function render(overrides) {
     });
     assert.equal(configuredMacro.type, "result", configuredMacro.message);
 
+    // Representative commands and the labeled equation body used by the
+    // official ThuThesis v7.7.1 chap03 fixture. These aliases are semantic
+    // MathJax approximations, not claims of XeLaTeX font identity.
+    const thuThesisMacros = {
+      symup: [String.raw`\mathrm{#1}`, 1],
+      symbf: [String.raw`\boldsymbol{#1}`, 1],
+      symbfsf: [String.raw`\boldsymbol{\mathsf{#1}}`, 1],
+      uppi: String.raw`\mathrm{\pi}`,
+      increment: String.raw`\mathrm{\Delta}`,
+      dif: String.raw`\mathop{}\!\mathrm{d}`,
+    };
+    const thuThesisEquation = await render({
+      tex: String.raw`\frac{1}{2 \uppi \symup{i}} \int_\gamma f = \sum_{k=1}^m n(\gamma; a_k) \mathscr{R}(f; a_k).`,
+      macros: thuThesisMacros,
+      macroFingerprint: "thuthesis-v7.7.1-chap03-equation",
+    });
+    assert.equal(thuThesisEquation.type, "result", thuThesisEquation.message);
+    const thuThesisSymbols = await render({
+      tex: String.raw`\increment+\dif x+\symbf{x}+\symbf{\Sigma}+\symbfsf{T}`,
+      macros: thuThesisMacros,
+      macroFingerprint: "thuthesis-v7.7.1-symbols",
+    });
+    assert.equal(thuThesisSymbols.type, "result", thuThesisSymbols.message);
+
+    const doubleAngleFallback = await render({
+      tex: String.raw`\llangle x\rrangle`,
+      macroFingerprint: "double-angle-fallback",
+    });
+    assert.equal(
+      doubleAngleFallback.type,
+      "result",
+      "visual Math Preview must render common double-angle commands even when the document does not define them: " +
+        doubleAngleFallback.message,
+    );
+    assert.match(doubleAngleFallback.svg, /^<svg\b/u);
+
     const latinItalic = await render({
       tex: String.raw`\mathit{Àî}`,
       macroFingerprint: "dynamic-latin-i",
@@ -211,15 +353,19 @@ function render(overrides) {
       tex: String.raw`\texleafisolatedmacro`,
       macroFingerprint: "isolation-same-fingerprint",
     });
-    assert.equal(sameFingerprintProbe.type, "result", sameFingerprintProbe.message);
+    assert.equal(
+      sameFingerprintProbe.type,
+      "error",
+      "a formula-local definition must not leak into a later request with the same fingerprint",
+    );
     const freshFingerprintProbe = await render({
       tex: String.raw`\texleafisolatedmacro`,
       macroFingerprint: "isolation-fresh-fingerprint",
     });
-    assert.equal(freshFingerprintProbe.type, "result", freshFingerprintProbe.message);
+    assert.equal(freshFingerprintProbe.type, "error");
     assert.equal(
-      sameFingerprintProbe.svg,
-      freshFingerprintProbe.svg,
+      sameFingerprintProbe.message,
+      freshFingerprintProbe.message,
       "formula-local definitions must not leak into a later request with the same fingerprint",
     );
 

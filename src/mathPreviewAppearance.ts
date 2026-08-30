@@ -1,3 +1,10 @@
+/*
+ * TeXLeaf
+ * Copyright (C) 2026 zhangxh-math
+ * Licensed under GPL-3.0-only with additional attribution terms.
+ * See LICENSE and NOTICE in the project root.
+ */
+
 export interface MathPreviewAppearance {
   readonly foreground: string;
   readonly cursor: string;
@@ -19,7 +26,7 @@ export function resolveMathPreviewAppearance(
   return dark
     ? {
         foreground: "#ffffff",
-        cursor: "#00e5ff",
+        cursor: "#ff2bd6",
         cardBackground: "#0b0f14",
         cardBackgroundOpacity: 1,
         cardBorder: "#ffffff",
@@ -27,7 +34,7 @@ export function resolveMathPreviewAppearance(
       }
     : {
         foreground: "#202020",
-        cursor: "#e0005a",
+        cursor: "#006dff",
         cardBackground: "#fafafc",
         cardBackgroundOpacity: 1,
         cardBorder: "#000000",
@@ -43,7 +50,7 @@ export function resolveMathPreviewAppearance(
 export function createMathPreviewCursorMarker(cursor: string): string {
   const safeCursor = /^#[0-9a-f]{6}$/iu.test(cursor)
     ? cursor.slice(1).toUpperCase()
-    : "00E5FF";
+    : "FF2BD6";
   return (
     `\\mathord{\\color{#${safeCursor}}` +
     "\\rule[-0.2em]{0.09em}{1.2em}}"
