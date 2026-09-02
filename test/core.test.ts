@@ -64,6 +64,8 @@ import {
   latexContextFromState,
   localLatexPreviewKind,
   materializeReplacement,
+  documentOffsetFromVisualOffset,
+  normalizeVisualText,
   optimisticRevisionStatus,
   parseReplacementTemplate,
   parseSnippetOptions,
@@ -115,8 +117,10 @@ import {
   shouldReplaceAiIssueAfterReview,
   toPortableSnippetObject,
   tryReserveAiAutomaticReviewKey,
+  textForVisualDocumentEol,
   validateMigratableSnippetLibraryText,
   validateSnippetFile,
+  visualOffsetFromDocumentOffset,
   visualFormulaViewportsKeepPriority,
   visualReferenceDisplayLabel,
   visualSourceIndentationColumns,
@@ -132,6 +136,51 @@ import {
   pairedVisualEnvironmentBoundaryReveal,
   selectionRetainsVisualStructureSourceReveal,
 } from '../src/visualEditorStructureReveal';
+
+test('visual text normalization uses one LF for every logical line ending', () => {
+  assert.equal(
+    normalizeVisualText('alpha\r\nbeta\rgamma\ndelta'),
+    'alpha\nbeta\ngamma\ndelta',
+  );
+  assert.equal(textForVisualDocumentEol('alpha\r\nbeta\rgamma', '\n'), 'alpha\nbeta\ngamma');
+  assert.equal(
+    textForVisualDocumentEol('alpha\r\nbeta\ngamma', '\r\n'),
+    'alpha\r\nbeta\r\ngamma',
+  );
+});
+
+test('visual and backing offsets round-trip across Windows CRLF boundaries', () => {
+  const backing = 'a\r\nbeta\r\n\\begin{equation}\r\nx=1\r\n\\end{equation}\r\n';
+  const visual = normalizeVisualText(backing);
+
+  for (let visualOffset = 0; visualOffset <= visual.length; visualOffset += 1) {
+    const documentOffset = documentOffsetFromVisualOffset(backing, visualOffset);
+    assert.equal(
+      visualOffsetFromDocumentOffset(backing, documentOffset),
+      visualOffset,
+      `visual offset ${visualOffset}`,
+    );
+  }
+
+  for (let documentOffset = 0; documentOffset <= backing.length; documentOffset += 1) {
+    const visualOffset = visualOffsetFromDocumentOffset(backing, documentOffset);
+    const roundTrip = documentOffsetFromVisualOffset(backing, visualOffset);
+    const insideCrLf = backing[documentOffset - 1] === '\r' && backing[documentOffset] === '\n';
+    assert.equal(
+      roundTrip,
+      insideCrLf ? documentOffset - 1 : documentOffset,
+      `document offset ${documentOffset}`,
+    );
+  }
+});
+
+test('visual offset conversion clamps invalid and out-of-range inputs', () => {
+  const backing = 'a\r\nb';
+  assert.equal(visualOffsetFromDocumentOffset(backing, -10), 0);
+  assert.equal(visualOffsetFromDocumentOffset(backing, Number.POSITIVE_INFINITY), 3);
+  assert.equal(documentOffsetFromVisualOffset(backing, -10), 0);
+  assert.equal(documentOffsetFromVisualOffset(backing, Number.POSITIVE_INFINITY), 4);
+});
 
 test('visual provider completion treats commas as citation-only triggers', () => {
   assert.equal(shouldActivateVisualProviderCompletion({

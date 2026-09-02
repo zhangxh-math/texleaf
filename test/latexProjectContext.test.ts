@@ -1128,3 +1128,58 @@ test('a stale in-flight read cannot overwrite the next generation source cache',
     service.dispose();
   }
 });
+
+test('CRLF project buffers use stable LF visual ranges without changing project semantics', async () => {
+  resetWorkspace();
+  configuredRoot = 'main.tex';
+  const rootSource = [
+    String.raw`\documentclass{article}`,
+    String.raw`\begin{document}`,
+    String.raw`\input{chapter}`,
+    String.raw`\end{document}`,
+    '',
+  ].join('\r\n');
+  const chapterSource = [
+    String.raw`\section{Windows}`,
+    String.raw`\begin{align}`,
+    String.raw`x&=1 \label{crlf-line} \\`,
+    String.raw`y&=2`,
+    String.raw`\end{align}`,
+    '',
+  ].join('\r\n');
+  const root = addFile('main.tex', rootSource);
+  const chapter = addFile('chapter.tex', chapterSource);
+  openDocument('main.tex', rootSource, 2, true);
+  openDocument('chapter.tex', chapterSource, 3, true);
+
+  const service = new LatexProjectContextService();
+  try {
+    const context = await service.getContext(chapter as unknown as VsCode.Uri);
+    const rootFile = projectFile(context, 'main.tex');
+    const chapterFile = projectFile(context, 'chapter.tex');
+    assert.ok(rootFile);
+    assert.ok(chapterFile);
+    assert.equal(rootFile.sourceKind, 'open-document');
+    assert.equal(chapterFile.sourceKind, 'open-document');
+    assert.equal(rootFile.text.includes('\r'), false);
+    assert.equal(chapterFile.text.includes('\r'), false);
+    assert.equal(rootFile.text, rootSource.replaceAll('\r\n', '\n'));
+    assert.equal(chapterFile.text, chapterSource.replaceAll('\r\n', '\n'));
+
+    const include = rootFile.sourceScan.includes[0];
+    assert.ok(include);
+    assert.equal(
+      rootFile.text.slice(include.range.start, include.range.end),
+      String.raw`\input{chapter}`,
+    );
+    const target = context.labelsByKey.get('crlf-line')?.[0];
+    assert.ok(target);
+    assert.equal(target.uri.toString(), chapter.toString());
+    assert.equal(chapterFile.text.slice(target.from, target.to), String.raw`\label{crlf-line}`);
+    assert.equal(chapterFile.text.slice(target.keyFrom, target.keyTo), 'crlf-line');
+    assert.equal(context.rootUri?.toString(), root.toString());
+    assert.equal(context.graphIncomplete, false);
+  } finally {
+    service.dispose();
+  }
+});

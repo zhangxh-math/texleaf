@@ -19,6 +19,7 @@ import {
   findVisualLabelsInRange,
   innermostLatexMathRegion,
   mathPreviewMacroEnvironmentAtOffset,
+  normalizeVisualText,
   isConfiguredMatrixContext,
   isExcludedLatexContext,
   planAutoEnlargeAncestors,
@@ -38,6 +39,7 @@ import {
   selectVisualFormulaViewportBatch,
   shouldActivateVisualProviderCompletion,
   shouldRunVisualAutomaticSnippet,
+  textForVisualDocumentEol,
   visualCompletionFollowUpCursor,
   visualFormulaViewportsKeepPriority,
   visualLatexCompletionContextAt,
@@ -630,7 +632,7 @@ export class VisualEditorProvider
         if (isLatexProjectUri(event.document.uri)) {
           const state = this.states.get(event.document.uri.toString());
           const optimisticVisualEdit = state !== undefined &&
-            state.mirrorText === event.document.getText();
+            state.mirrorText === visualDocumentText(event.document);
           if (optimisticVisualEdit) {
             this.quietProjectContextInvalidationDepth += 1;
             try {
@@ -945,7 +947,7 @@ export class VisualEditorProvider
       key,
       document,
       sessions: new Set<VisualEditorSession>(),
-      mirrorText: document.getText(),
+      mirrorText: visualDocumentText(document),
       epoch: 0,
       pendingEdits: 0,
       queue: Promise.resolve(),
@@ -1057,7 +1059,7 @@ export class VisualEditorProvider
       session.disposed ||
       state.pendingEdits !== 0 ||
       message.revision !== session.acceptedRevision ||
-      session.document.getText() !== text
+      visualDocumentText(session.document) !== text
     ) {
       await this.postStatus(session, "warning", "文档已变化，本次剪贴板操作已取消。");
       return;
@@ -1085,7 +1087,7 @@ export class VisualEditorProvider
       return;
     }
 
-    const insert = await vscode.env.clipboard.readText();
+    const insert = normalizeVisualText(await vscode.env.clipboard.readText());
     if (insert.length > MAX_INSERTED_TEXT) {
       await this.postStatus(
         session,
@@ -1122,7 +1124,7 @@ export class VisualEditorProvider
       !Number.isSafeInteger(message.anchor) ||
       message.anchor < 0 ||
       message.anchor > text.length ||
-      session.document.getText() !== text
+      visualDocumentText(session.document) !== text
     ) {
       return;
     }
@@ -1145,7 +1147,7 @@ export class VisualEditorProvider
         session.snapshot !== snapshot ||
         session.acceptedRevision !== message.revision ||
         state.mirrorText !== text ||
-        session.document.getText() !== text
+        visualDocumentText(session.document) !== text
       ) {
         return;
       }
@@ -1171,7 +1173,7 @@ export class VisualEditorProvider
         session.snapshot !== snapshot ||
         session.acceptedRevision !== message.revision ||
         state.mirrorText !== text ||
-        session.document.getText() !== text
+        visualDocumentText(session.document) !== text
       ) {
         return;
       }
@@ -1232,7 +1234,7 @@ export class VisualEditorProvider
       if (epoch !== state.epoch || session.disposed) {
         return;
       }
-      if (state.document.getText() !== beforeText) {
+      if (visualDocumentText(state.document) !== beforeText) {
         this.invalidatePendingEdits(state);
         return;
       }
@@ -1241,14 +1243,17 @@ export class VisualEditorProvider
         edit.replace(
           state.document.uri,
           new vscode.Range(
-            state.document.positionAt(change.from),
-            state.document.positionAt(change.to),
+            visualPositionAt(state.document, change.from),
+            visualPositionAt(state.document, change.to),
           ),
-          change.insert,
+          textForVisualDocumentEol(
+            change.insert,
+            state.document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n",
+          ),
         );
       }
       await vscode.workspace.applyEdit(edit);
-      const actualAfterEdit = state.document.getText();
+      const actualAfterEdit = visualDocumentText(state.document);
       if (
         epoch !== state.epoch ||
         actualAfterEdit !== afterText
@@ -1273,7 +1278,7 @@ export class VisualEditorProvider
       }
       state.pendingEdits = Math.max(0, state.pendingEdits - 1);
       if (state.pendingEdits === 0) {
-        state.mirrorText = state.document.getText();
+        state.mirrorText = actualAfterEdit;
         const transformed = message.source === "user" && !message.composing
           ? await this.tryPostInputTransform(
               state,
@@ -1358,7 +1363,7 @@ export class VisualEditorProvider
     if (!isVisualEditingDocument(document, config)) {
       return false;
     }
-    const text = document.getText();
+    const text = visualDocumentText(document);
     const cursorOffset = session.selection.head;
     if (text !== state.mirrorText || cursorOffset < 0 || cursorOffset > text.length) {
       return false;
@@ -1370,7 +1375,7 @@ export class VisualEditorProvider
       const insertedCodePoints = [...single.insert];
       const context = this.runtime.contextAt(
         document,
-        document.positionAt(Math.min(single.from, text.length)),
+        visualPositionAt(document, Math.min(single.from, text.length)),
       );
       if (!isExcludedLatexContext(context, config.excludedEnvironments)) {
         if (
@@ -1426,14 +1431,14 @@ export class VisualEditorProvider
       config.autoSnippets &&
       shouldRunVisualAutomaticSnippet(changes, cursorOffset)
     ) {
-      const position = document.positionAt(cursorOffset);
+      const position = visualPositionAt(document, cursorOffset);
       const template = this.templates.match(document, position);
       if (template !== undefined) {
         return this.postSnippet(
           state,
           session,
-          document.offsetAt(template.range.start),
-          document.offsetAt(template.range.end),
+          visualOffsetAt(document, template.range.start),
+          visualOffsetAt(document, template.range.end),
           template.parts,
           revision,
         );
@@ -1448,8 +1453,8 @@ export class VisualEditorProvider
         return this.postSnippet(
           state,
           session,
-          document.offsetAt(automatic.range.start),
-          document.offsetAt(automatic.range.end),
+          visualOffsetAt(document, automatic.range.start),
+          visualOffsetAt(document, automatic.range.end),
           automatic.match.replacement,
           revision,
         );
@@ -1465,7 +1470,7 @@ export class VisualEditorProvider
     ) {
       const context = this.runtime.contextAt(
         document,
-        document.positionAt(cursorOffset),
+        visualPositionAt(document, cursorOffset),
       );
       if (
         context.mathMode !== "text" &&
@@ -1509,7 +1514,7 @@ export class VisualEditorProvider
       state.pendingEdits !== 0 ||
       message.revision !== session.acceptedRevision ||
       selection.anchor !== selection.head ||
-      state.document.getText() !== state.mirrorText
+      visualDocumentText(state.document) !== state.mirrorText
     ) {
       await this.postInputFallback(session, message);
       return;
@@ -1522,7 +1527,7 @@ export class VisualEditorProvider
       return;
     }
     const offset = selection.head;
-    const position = document.positionAt(offset);
+    const position = visualPositionAt(document, offset);
 
     if (message.action === "auto") {
       if (config.autoSnippets) {
@@ -1532,8 +1537,8 @@ export class VisualEditorProvider
           await this.postSnippet(
             state,
             session,
-            document.offsetAt(template.range.start),
-            document.offsetAt(template.range.end),
+            visualOffsetAt(document, template.range.start),
+            visualOffsetAt(document, template.range.end),
             template.parts,
             message.revision,
             message.requestId,
@@ -1547,8 +1552,8 @@ export class VisualEditorProvider
           await this.postSnippet(
             state,
             session,
-            document.offsetAt(automatic.range.start),
-            document.offsetAt(automatic.range.end),
+            visualOffsetAt(document, automatic.range.start),
+            visualOffsetAt(document, automatic.range.end),
             automatic.match.replacement,
             message.revision,
             message.requestId,
@@ -1568,7 +1573,7 @@ export class VisualEditorProvider
     ) {
       if (message.action === "shiftTab") {
         const alignPlan = planVisualAlignTab(
-          document.getText(),
+          state.mirrorText,
           offset,
           -1,
           config.matrixEnvironments,
@@ -1597,8 +1602,8 @@ export class VisualEditorProvider
           await this.postSnippet(
             state,
             session,
-            document.offsetAt(template.range.start),
-            document.offsetAt(template.range.end),
+            visualOffsetAt(document, template.range.start),
+            visualOffsetAt(document, template.range.end),
             template.parts,
             message.revision,
             message.requestId,
@@ -1619,8 +1624,8 @@ export class VisualEditorProvider
           await this.postSnippet(
             state,
             session,
-            document.offsetAt(manual.range.start),
-            document.offsetAt(manual.range.end),
+            visualOffsetAt(document, manual.range.start),
+            visualOffsetAt(document, manual.range.end),
             manual.match.replacement,
             message.revision,
             message.requestId,
@@ -1635,7 +1640,7 @@ export class VisualEditorProvider
       }
 
       const context = this.runtime.contextAt(document, position);
-      const source = document.getText();
+      const source = state.mirrorText;
       const alignPlan = planVisualAlignTab(
         source,
         offset,
@@ -1659,9 +1664,9 @@ export class VisualEditorProvider
         const line = document.lineAt(position.line);
         const plan = context.mathMode === "text"
           ? planTabout(source, offset, {
-              innerStart: document.offsetAt(line.range.start),
-              innerEnd: document.offsetAt(line.range.end),
-              outerEnd: document.offsetAt(line.range.end),
+              innerStart: visualOffsetAt(document, line.range.start),
+              innerEnd: visualOffsetAt(document, line.range.end),
+              outerEnd: visualOffsetAt(document, line.range.end),
               arrayMode: true,
             })
           : planTabout(source, offset, {
@@ -1699,8 +1704,8 @@ export class VisualEditorProvider
     const context = this.runtime.contextAt(document, position);
     if (message.action === "enter") {
       if (config.matrixShortcuts) {
-        const leftRight = planLeftRightEnter(document.getText(), offset, {
-          eol: document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n",
+        const leftRight = planLeftRightEnter(state.mirrorText, offset, {
+          eol: "\n",
         });
         if (leftRight !== undefined) {
           await this.postApplyEdit(
@@ -1721,7 +1726,7 @@ export class VisualEditorProvider
         if (isConfiguredMatrixContext(context, config.matrixEnvironments)) {
           const lineText = document.lineAt(position.line).text;
           const indentation = /^\s*/u.exec(lineText)?.[0] ?? "";
-          const eol = document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n";
+          const eol = "\n";
           const insertion = context.mathMode === "block"
             ? ` \\\\${eol}${indentation}`
             : " \\\\ ";
@@ -1746,7 +1751,7 @@ export class VisualEditorProvider
     }
 
     if (message.action === "shiftEnter") {
-      const exitPlan = planVisualEnvironmentExit(document.getText(), offset);
+      const exitPlan = planVisualEnvironmentExit(state.mirrorText, offset);
       if (exitPlan !== undefined) {
         await this.postApplyEdit(
           state,
@@ -1804,14 +1809,14 @@ export class VisualEditorProvider
       message.from > message.position ||
       session.selection.anchor !== session.selection.head ||
       session.selection.head !== message.position ||
-      state.document.getText() !== text ||
+      visualDocumentText(state.document) !== text ||
       !readVisualProviderCompletionSetting(session.document.uri)
     ) {
       await respond([]);
       return;
     }
 
-    const position = session.document.positionAt(message.position);
+    const position = visualPositionAt(session.document, message.position);
     const config = readConfig(session.document.uri);
     const latexContext = this.runtime.contextAt(session.document, position);
     const completionContext = visualLatexCompletionContextAt(
@@ -1873,7 +1878,7 @@ export class VisualEditorProvider
         session.selection.head !== message.position ||
         state.mirrorText !== text ||
         session.document.version !== documentVersion ||
-        session.document.getText() !== text
+        visualDocumentText(session.document) !== text
       ) {
         await respond([]);
         return;
@@ -2024,7 +2029,7 @@ export class VisualEditorProvider
       generation !== session.completionGeneration ||
       message.revision !== session.acceptedRevision ||
       session.selection.head !== message.position ||
-      state.document.getText() !== text
+      visualDocumentText(state.document) !== text
     ) {
       await respond([]);
       return;
@@ -2108,7 +2113,7 @@ export class VisualEditorProvider
           session.selection.anchor !== refreshPosition ||
           session.selection.head !== refreshPosition ||
           state.pendingEdits !== 0 ||
-          state.document.getText() !== state.mirrorText
+          visualDocumentText(state.document) !== state.mirrorText
         ) {
           return;
         }
@@ -2151,7 +2156,7 @@ export class VisualEditorProvider
       message.revision !== action.baseRevision + 1 ||
       session.acceptedRevision !== message.revision ||
       state.pendingEdits !== 0 ||
-      state.document.getText() !== state.mirrorText ||
+      visualDocumentText(state.document) !== state.mirrorText ||
       completionCursor === undefined ||
       !this.citations.isVisualCompletionCommand(action.command)
     ) {
@@ -2167,11 +2172,11 @@ export class VisualEditorProvider
       // The visible selection can move because accepting a CodeMirror item
       // closes its popup and may race focus changes. The validated inserted
       // range is the stable citation position for both Enter and mouse clicks.
-      session.document.positionAt(completionCursor),
+      visualPositionAt(session.document, completionCursor),
       action.command,
     );
     if (caret !== undefined && !session.disposed) {
-      const offset = session.document.offsetAt(caret);
+      const offset = visualOffsetAt(session.document, caret);
       const actionSelection = { anchor: completionCursor, head: completionCursor };
       if (sameSelection(session.selection, actionSelection)) {
         // Keep host state aligned with CodeMirror without stealing a newer
@@ -2416,7 +2421,7 @@ export class VisualEditorProvider
     if (
       session.disposed ||
       message.revision !== session.acceptedRevision ||
-      state.mirrorText !== session.document.getText()
+      state.mirrorText !== visualDocumentText(session.document)
     ) {
       await respond([]);
       return;
@@ -2504,7 +2509,7 @@ export class VisualEditorProvider
       message.from < 0 ||
       message.to <= message.from ||
       message.to > text.length ||
-      state.document.getText() !== text
+      visualDocumentText(state.document) !== text
     ) {
       return;
     }
@@ -2520,7 +2525,7 @@ export class VisualEditorProvider
       session.documentGeneration !== projectGeneration ||
       state.pendingEdits !== 0 ||
       message.revision !== session.acceptedRevision ||
-      state.document.getText() !== text
+      visualDocumentText(state.document) !== text
     ) {
       return;
     }
@@ -2570,7 +2575,7 @@ export class VisualEditorProvider
       session.documentGeneration !== projectGeneration ||
       state.pendingEdits !== 0 ||
       session.acceptedRevision !== message.revision ||
-      state.document.getText() !== text
+      visualDocumentText(state.document) !== text
     ) {
       await this.postStatus(session, "warning", "文档已变化，本次跳转已取消。");
       return;
@@ -2602,7 +2607,7 @@ export class VisualEditorProvider
         session.documentGeneration !== projectGeneration ||
         state.pendingEdits !== 0 ||
         session.acceptedRevision !== message.revision ||
-        state.document.getText() !== text
+      visualDocumentText(state.document) !== text
       ) {
         await this.postStatus(session, "warning", "项目或文档已变化，本次跳转已取消。");
         return;
@@ -2626,8 +2631,8 @@ export class VisualEditorProvider
           session.documentGeneration !== projectGeneration ||
           state.pendingEdits !== 0 ||
           session.acceptedRevision !== message.revision ||
-          state.document.getText() !== text ||
-          state.document.getText().slice(target.keyFrom, target.keyTo) !== key
+          visualDocumentText(state.document) !== text ||
+          text.slice(target.keyFrom, target.keyTo) !== key
         ) {
           await this.postStatus(session, "warning", "文档已变化，本次跳转已取消。");
           return;
@@ -2709,7 +2714,7 @@ export class VisualEditorProvider
       session.documentGeneration !== projectGeneration ||
       state.pendingEdits !== 0 ||
       session.acceptedRevision !== message.revision ||
-      state.document.getText() !== text
+      visualDocumentText(state.document) !== text
     ) {
       return;
     }
@@ -2989,7 +2994,7 @@ export class VisualEditorProvider
     if (
       currentSnapshot !== undefined &&
       currentSnapshot.projectContextKey === contextKey &&
-      currentSnapshot.text === document.getText()
+      currentSnapshot.text === visualDocumentText(document)
     ) {
       snapshotsByUri.set(document.uri.toString(), currentSnapshot);
     }
@@ -3042,7 +3047,7 @@ export class VisualEditorProvider
       currentSnapshot !== undefined &&
       currentSnapshot.projectContextKey === `${context.contextId}:${context.revision}` &&
       sameUri(target.uri, document.uri) &&
-      currentSnapshot.text === document.getText()
+      currentSnapshot.text === visualDocumentText(document)
     ) {
       return { context, target, snapshot: currentSnapshot };
     }
@@ -3076,17 +3081,28 @@ export class VisualEditorProvider
     ) {
       return false;
     }
+    const visualParts: readonly ReplacementPart[] = parts.map((part) =>
+      part.kind === "text"
+        ? { ...part, value: normalizeVisualText(part.value) }
+        : part.placeholder === undefined
+          ? part
+          : { ...part, placeholder: normalizeVisualText(part.placeholder) }
+    );
     const config = readConfig(session.document.uri);
     const modifiers = config.autoEnlargeBrackets
       ? planVisualAutoEnlarge(
           text,
           from,
           to,
-          parts,
+          visualParts,
           config.autoEnlargeTriggers,
         )
       : [];
-    const encoding = replacementPartsToCodeMirrorSnippet(parts);
+    const visualModifiers = modifiers.map((modifier) => ({
+      ...modifier,
+      insert: normalizeVisualText(modifier.insert),
+    }));
+    const encoding = replacementPartsToCodeMirrorSnippet(visualParts);
     const posted = await session.panel.webview.postMessage({
       protocol: VISUAL_EDITOR_PROTOCOL,
       type: "applySnippet",
@@ -3096,11 +3112,11 @@ export class VisualEditorProvider
       to,
       expectedText: text.slice(from, to),
       template: encoding.template,
-      insertedText: replacementPartsToText(parts),
+      insertedText: replacementPartsToText(visualParts),
       openBraceMarker: encoding.openBraceMarker,
       closeBraceMarker: encoding.closeBraceMarker,
-      hasSnippetFields: parts.some((part) => part.kind === "tabstop"),
-      modifiers,
+      hasSnippetFields: visualParts.some((part) => part.kind === "tabstop"),
+      modifiers: visualModifiers,
     } satisfies VisualEditorHostMessage);
     return posted;
   }
@@ -3159,7 +3175,7 @@ export class VisualEditorProvider
     if (state === undefined || state.pendingEdits > 0) {
       return;
     }
-    const documentText = document.getText();
+    const documentText = visualDocumentText(document);
     if (documentText === state.mirrorText) {
       // onDidChangeTextDocument may be delivered after workspace.applyEdit has
       // resolved and pendingEdits has returned to zero. The optimistic mirror
@@ -3167,6 +3183,10 @@ export class VisualEditorProvider
       // our own edit—not an external/native-editor reset. Resetting revisions
       // here would force a full-document replacement into CodeMirror and map
       // away its local undo changes while retaining only the old selection.
+      // A pure EOL conversion also lands here. Refresh the host version and
+      // snapshot without resetting CodeMirror history; the live document EOL
+      // will be consulted when the next visual edit is written back.
+      this.scheduleDocumentSync(state, DOCUMENT_SYNC_DELAY_MS);
       return;
     }
     state.epoch += 1;
@@ -3186,7 +3206,7 @@ export class VisualEditorProvider
   private invalidatePendingEdits(state: VisualDocumentState): void {
     state.epoch += 1;
     state.pendingEdits = 0;
-    state.mirrorText = state.document.getText();
+    state.mirrorText = visualDocumentText(state.document);
     for (const session of state.sessions) {
       session.acceptedRevision = 0;
       void this.postDocument(session, "document");
@@ -3259,7 +3279,7 @@ export class VisualEditorProvider
     if (state.pendingEdits > 0) {
       return;
     }
-    const text = session.document.getText();
+    const text = visualDocumentText(session.document);
     const version = session.document.version;
     const config = readConfig(session.document.uri);
     const projectContext = await this.projectContexts.getContext(session.document);
@@ -3268,7 +3288,7 @@ export class VisualEditorProvider
       session.disposed ||
       session.documentGeneration !== documentGeneration ||
       session.document.version !== version ||
-      session.document.getText() !== text
+      visualDocumentText(session.document) !== text
     ) {
       return;
     }
@@ -3333,7 +3353,7 @@ export class VisualEditorProvider
         session.disposed ||
         session.documentGeneration !== documentGeneration ||
         session.document.version !== version ||
-        session.document.getText() !== text
+        visualDocumentText(session.document) !== text
       ) {
         return;
       }
@@ -3355,7 +3375,7 @@ export class VisualEditorProvider
       session.disposed ||
       session.documentGeneration !== documentGeneration ||
       session.document.version !== version ||
-      session.document.getText() !== text
+      visualDocumentText(session.document) !== text
     ) {
       return;
     }
@@ -3376,7 +3396,7 @@ export class VisualEditorProvider
       session.disposed ||
       session.documentGeneration !== documentGeneration ||
       session.document.version !== version ||
-      session.document.getText() !== text
+      visualDocumentText(session.document) !== text
     ) {
       return;
     }
@@ -3417,7 +3437,7 @@ export class VisualEditorProvider
       session.disposed ||
       session.documentGeneration !== documentGeneration ||
       session.document.version !== version ||
-      session.document.getText() !== text
+      visualDocumentText(session.document) !== text
     ) {
       return;
     }
@@ -3467,7 +3487,7 @@ export class VisualEditorProvider
       session.disposed ||
       session.documentGeneration !== documentGeneration ||
       session.document.version !== version ||
-      session.document.getText() !== text
+      visualDocumentText(session.document) !== text
     ) {
       return;
     }
@@ -3480,7 +3500,7 @@ export class VisualEditorProvider
       refreshSyntax &&
       delivered &&
       session.document.version === version &&
-      session.document.getText() === text
+      visualDocumentText(session.document) === text
     ) {
       if (syntaxTokens !== undefined) {
         session.syntaxRefreshRequired = false;
@@ -3512,7 +3532,7 @@ export class VisualEditorProvider
       return;
     }
     const state = this.stateFor(session.document);
-    if (state.pendingEdits > 0 || state.mirrorText !== session.document.getText()) {
+    if (state.pendingEdits > 0 || state.mirrorText !== visualDocumentText(session.document)) {
       return;
     }
     await session.panel.webview.postMessage({
@@ -3529,7 +3549,7 @@ export class VisualEditorProvider
       return;
     }
     const state = this.stateFor(session.document);
-    if (state.pendingEdits > 0 || state.mirrorText !== session.document.getText()) {
+    if (state.pendingEdits > 0 || state.mirrorText !== visualDocumentText(session.document)) {
       return;
     }
     await session.panel.webview.postMessage({
@@ -4298,7 +4318,7 @@ export class VisualEditorProvider
       { readonly type: "completionReferencePreview" }
     >,
   ): Promise<void> {
-    const text = session.document.getText();
+    const text = visualDocumentText(session.document);
     const generation = session.renderGeneration;
     if (
       session.acceptedRevision !== message.revision ||
@@ -4323,7 +4343,7 @@ export class VisualEditorProvider
       session.disposed ||
       session.renderGeneration !== generation ||
       session.acceptedRevision !== message.revision ||
-      session.document.getText() !== text
+      visualDocumentText(session.document) !== text
     ) {
       return;
     }
@@ -4624,7 +4644,7 @@ export class VisualEditorProvider
     const visualText = state.mirrorText.slice(from, to);
     const context = this.runtime.contextAt(
       session.document,
-      session.document.positionAt(selection.head),
+      visualPositionAt(session.document, selection.head),
     );
     const candidates: QuickPickVisualSnippet[] = this.runtime
       .compiledSnippetsFor(session.document, config)
@@ -4656,7 +4676,7 @@ export class VisualEditorProvider
       selected === undefined ||
       session.disposed ||
       state.pendingEdits > 0 ||
-      state.mirrorText !== session.document.getText() ||
+      state.mirrorText !== visualDocumentText(session.document) ||
       selection.anchor !== session.selection.anchor ||
       selection.head !== session.selection.head
     ) {
@@ -4693,7 +4713,7 @@ export class VisualEditorProvider
     const cancellation = new vscode.CancellationTokenSource();
     const completions = await this.citations.provideCompletionItems(
       session.document,
-      session.document.positionAt(selection.head),
+      visualPositionAt(session.document, selection.head),
       cancellation.token,
       {
         triggerKind: vscode.CompletionTriggerKind.Invoke,
@@ -4743,17 +4763,18 @@ export class VisualEditorProvider
       return;
     }
     const range = item.range instanceof vscode.Range ? item.range : undefined;
-    const insert = typeof item.insertText === "string"
+    const rawInsert = typeof item.insertText === "string"
       ? item.insertText
       : item.insertText instanceof vscode.SnippetString
         ? item.insertText.value
         : undefined;
-    if (range === undefined || insert === undefined) {
+    if (range === undefined || rawInsert === undefined) {
       void vscode.window.showWarningMessage("TeXLeaf：这条引用补全无法安全应用。");
       return;
     }
-    const from = session.document.offsetAt(range.start);
-    const to = session.document.offsetAt(range.end);
+    const insert = normalizeVisualText(rawInsert);
+    const from = visualOffsetAt(session.document, range.start);
+    const to = visualOffsetAt(session.document, range.end);
     await this.postApplyEdit(
       state,
       session,
@@ -4898,7 +4919,7 @@ export class VisualEditorProvider
     try {
       const items = await this.aiWriting.provideVisualInlineCompletion(
         session.document,
-        session.document.positionAt(selection.head),
+        visualPositionAt(session.document, selection.head),
         cancellation.token,
       );
       const item = items?.[0];
@@ -4916,7 +4937,7 @@ export class VisualEditorProvider
         await this.postStatus(session, "warning", "文档已变化，本条 AI 续写建议已取消。", false);
         return;
       }
-      const insert = typeof item.insertText === "string"
+      const rawInsert = typeof item.insertText === "string"
         ? item.insertText
         : item.insertText instanceof vscode.SnippetString
           ? item.insertText.value
@@ -4924,13 +4945,14 @@ export class VisualEditorProvider
       const range = item.range instanceof vscode.Range
         ? item.range
         : new vscode.Range(
-            session.document.positionAt(selection.head),
-            session.document.positionAt(selection.head),
+            visualPositionAt(session.document, selection.head),
+            visualPositionAt(session.document, selection.head),
           );
-      if (insert === undefined || insert.length === 0) {
+      if (rawInsert === undefined || rawInsert.length === 0) {
         await this.postStatus(session, "info", "当前光标没有可用的 AI 续写建议。", false);
         return;
       }
+      const insert = normalizeVisualText(rawInsert);
       const preview = insert.length > 240 ? `${insert.slice(0, 240)}…` : insert;
       const choice = await vscode.window.showInformationMessage(
         `TeXLeaf AI 续写建议：${preview}`,
@@ -4948,8 +4970,8 @@ export class VisualEditorProvider
         await this.postStatus(session, "info", "AI 续写建议未应用。", false);
         return;
       }
-      const from = session.document.offsetAt(range.start);
-      const to = session.document.offsetAt(range.end);
+      const from = visualOffsetAt(session.document, range.start);
+      const to = visualOffsetAt(session.document, range.end);
       await this.postApplyEdit(
         state,
         session,
@@ -5115,8 +5137,8 @@ export class VisualEditorProvider
     this.nativeProblemNavigationEpoch += 1;
     await this.focusVisualRange(
       editor.document.uri,
-      editor.document.offsetAt(diagnostic.range.start),
-      editor.document.offsetAt(diagnostic.range.end),
+      visualOffsetAt(editor.document, diagnostic.range.start),
+      visualOffsetAt(editor.document, diagnostic.range.end),
       false,
       undefined,
       false,
@@ -5191,8 +5213,8 @@ export class VisualEditorProvider
     );
     return this.revealVisualRange(
       uri,
-      document.offsetAt(safeStart),
-      document.offsetAt(safeEnd.isBefore(safeStart) ? safeStart : safeEnd),
+      visualOffsetAt(document, safeStart),
+      visualOffsetAt(document, safeEnd.isBefore(safeStart) ? safeStart : safeEnd),
       { center: true, flash: true },
     );
   }
@@ -5260,7 +5282,7 @@ export class VisualEditorProvider
     }
 
     await this.waitForDocumentEdits(document);
-    const documentText = document.getText();
+    const documentText = visualDocumentText(document);
     if (
       sourceGuard !== undefined &&
       (
@@ -5984,6 +6006,55 @@ export class VisualEditorProvider
   }
 }
 
+/**
+ * CodeMirror represents every logical line break as one LF. Keep every value
+ * that crosses the visual-editor protocol in that coordinate space, while the
+ * backing TextDocument retains the user's LF/CRLF choice.
+ */
+function visualDocumentText(document: vscode.TextDocument): string {
+  return normalizeVisualText(document.getText());
+}
+
+function visualOffsetAt(
+  document: vscode.TextDocument,
+  position: vscode.Position,
+): number {
+  const validated = document.validatePosition(position);
+  const documentOffset = document.offsetAt(validated);
+  return document.eol === vscode.EndOfLine.CRLF
+    ? documentOffset - validated.line
+    : documentOffset;
+}
+
+function visualDocumentLength(document: vscode.TextDocument): number {
+  if (document.lineCount <= 0) {
+    return 0;
+  }
+  return visualOffsetAt(document, document.lineAt(document.lineCount - 1).range.end);
+}
+
+function visualPositionAt(
+  document: vscode.TextDocument,
+  requestedOffset: number,
+): vscode.Position {
+  const offset = clampInteger(requestedOffset, 0, visualDocumentLength(document));
+  let low = 0;
+  let high = Math.max(1, document.lineCount);
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const lineStart = visualOffsetAt(document, document.lineAt(middle).range.start);
+    if (lineStart <= offset) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  const line = Math.max(0, Math.min(document.lineCount - 1, low - 1));
+  const lineText = document.lineAt(line).text;
+  const lineStart = visualOffsetAt(document, new vscode.Position(line, 0));
+  return new vscode.Position(line, Math.min(lineText.length, offset - lineStart));
+}
+
 function isLatexProjectUri(uri: vscode.Uri): boolean {
   return uri.path.toLocaleLowerCase().endsWith(".tex");
 }
@@ -6696,11 +6767,11 @@ function visualAiIssuesFor(
   }
   return snapshot.issues.map((issue) => ({
     id: issue.id,
-    from: document.offsetAt(issue.range.start),
-    to: document.offsetAt(issue.range.end),
+    from: visualOffsetAt(document, issue.range.start),
+    to: visualOffsetAt(document, issue.range.end),
     message: issue.message,
     explanation: issue.explanation,
-    replacement: issue.replacement,
+    replacement: normalizeVisualText(issue.replacement),
     category: issue.category,
     severity: issue.severity,
   }));
@@ -6725,8 +6796,8 @@ function visualDiagnosticId(
 ): string {
   return createHash("sha1").update([
     index,
-    document.offsetAt(diagnostic.range.start),
-    document.offsetAt(diagnostic.range.end),
+    visualOffsetAt(document, diagnostic.range.start),
+    visualOffsetAt(document, diagnostic.range.end),
     diagnostic.severity,
     diagnostic.source?.trim() ?? "",
     visualDiagnosticCode(diagnostic.code) ?? "",
@@ -6771,7 +6842,7 @@ function visualLabelDefinitionCompletionItems(
       prefixes.add(key.slice(0, separator + 1));
     }
   }
-  const range = new vscode.Range(document.positionAt(context.from), position);
+  const range = new vscode.Range(visualPositionAt(document, context.from), position);
   return [...prefixes]
     .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }))
     .map((prefix, index) => {
@@ -6911,8 +6982,8 @@ function visualTeXLeafSnippetCompletionItems(
   context: LatexContext,
   config: TeXLeafConfig,
 ): readonly vscode.CompletionItem[] {
-  const safeFrom = clampInteger(fromOffset, 0, document.getText().length);
-  const range = new vscode.Range(document.positionAt(safeFrom), position);
+  const safeFrom = clampInteger(fromOffset, 0, visualDocumentLength(document));
+  const range = new vscode.Range(visualPositionAt(document, safeFrom), position);
   const query = document.getText(range);
   const candidates: {
     readonly snippet: CompiledSnippet;
@@ -6967,8 +7038,8 @@ function visualCoreLatexCompletionItems(
   fromOffset: number,
   citationCommands: readonly string[],
 ): readonly vscode.CompletionItem[] {
-  const safeFrom = clampInteger(fromOffset, 0, document.getText().length);
-  const range = new vscode.Range(document.positionAt(safeFrom), position);
+  const safeFrom = clampInteger(fromOffset, 0, visualDocumentLength(document));
+  const range = new vscode.Range(visualPositionAt(document, safeFrom), position);
   const query = document.getText(range);
   return visualCoreLatexCompletionCandidates(citationCommands)
     .map((candidate) => ({
@@ -7045,7 +7116,7 @@ function validVirtualInputRequest(
   return !session.disposed &&
     state.pendingEdits === 0 &&
     message.revision === session.acceptedRevision &&
-    state.mirrorText === session.document.getText() &&
+    state.mirrorText === visualDocumentText(session.document) &&
     message.value.length <= MAX_VISUAL_VIRTUAL_INPUT_LENGTH &&
     !/[\u0000\r\n]/u.test(message.value) &&
     Number.isSafeInteger(message.selectionStart) &&
@@ -7066,7 +7137,7 @@ function virtualLatexInputContext(
   cursor: number,
   kind: VisualEditorVirtualInputContext,
 ): LatexContext {
-  const source = runtime.contextAt(document, document.positionAt(anchor));
+  const source = runtime.contextAt(document, visualPositionAt(document, anchor));
   const local = scanLatexContext(value, cursor);
   const environment = kind === "tikzcd" ? "tikzcd" : "tabular";
   return {
@@ -7114,8 +7185,8 @@ async function visualExtensionSnippetCompletionItems(
     document.languageId,
     output,
   );
-  const safeFrom = clampInteger(fromOffset, 0, document.getText().length);
-  const range = new vscode.Range(document.positionAt(safeFrom), position);
+  const safeFrom = clampInteger(fromOffset, 0, visualDocumentLength(document));
+  const range = new vscode.Range(visualPositionAt(document, safeFrom), position);
   const query = document.getText(range).toLocaleLowerCase("en-US");
   const candidates: {
     readonly prefix: string;
@@ -7410,7 +7481,7 @@ function serializeVisualCompletionItem(
   if (range === undefined) {
     const word = document.getWordRangeAtPosition(position);
     const from = word === undefined
-      ? document.positionAt(fallbackFrom)
+      ? visualPositionAt(document, fallbackFrom)
       : word.start;
     const insertMode = vscode.workspace.getConfiguration(
       "editor",
@@ -7429,8 +7500,9 @@ function serializeVisualCompletionItem(
   ) {
     return undefined;
   }
-  const from = document.offsetAt(range.start);
-  const to = document.offsetAt(range.end);
+  insertSource = normalizeVisualText(insertSource);
+  const from = visualOffsetAt(document, range.start);
+  const to = visualOffsetAt(document, range.end);
   const expectedText = document.getText(range);
   if (
     from < 0 ||
@@ -7499,10 +7571,10 @@ function visualCompletionSnippetVariables(
   selection: VisualEditorSelection,
 ): Readonly<Record<string, string>> {
   const selectedRange = new vscode.Range(
-    document.positionAt(Math.min(selection.anchor, selection.head)),
-    document.positionAt(Math.max(selection.anchor, selection.head)),
+    visualPositionAt(document, Math.min(selection.anchor, selection.head)),
+    visualPositionAt(document, Math.max(selection.anchor, selection.head)),
   );
-  const position = document.positionAt(selection.head);
+  const position = visualPositionAt(document, selection.head);
   const line = document.lineAt(position.line);
   const word = document.getWordRangeAtPosition(position);
   const uriPath = document.uri.path;
@@ -7512,7 +7584,7 @@ function visualCompletionSnippetVariables(
   const now = new Date();
   const pad = (value: number): string => String(value).padStart(2, "0");
   return {
-    TM_SELECTED_TEXT: document.getText(selectedRange),
+    TM_SELECTED_TEXT: normalizeVisualText(document.getText(selectedRange)),
     TM_CURRENT_LINE: line.text,
     TM_CURRENT_WORD: word === undefined ? "" : document.getText(word),
     TM_LINE_INDEX: String(position.line),
@@ -8158,8 +8230,8 @@ function visualSyntaxEditSpan(
   let newEndOffset = 0;
   let delta = 0;
   for (const change of changes) {
-    startLine = Math.min(startLine, document.positionAt(change.from).line);
-    oldEndLine = Math.max(oldEndLine, document.positionAt(change.to).line);
+    startLine = Math.min(startLine, visualPositionAt(document, change.from).line);
+    oldEndLine = Math.max(oldEndLine, visualPositionAt(document, change.to).line);
     const newFrom = change.from + delta;
     newEndOffset = Math.max(newEndOffset, newFrom + change.insert.length);
     delta += change.insert.length - (change.to - change.from);
@@ -8177,28 +8249,30 @@ function visualIncrementalSyntaxInput(
   afterText: string,
   span: VisualSyntaxEditSpan,
 ): VisualEditorIncrementalSyntaxInput | undefined {
-  if (document.getText() !== afterText || document.lineCount <= 0) {
+  // The caller already compared `afterText` with the normalized live document.
+  if (document.lineCount <= 0) {
     return undefined;
   }
   const startLine = clampInteger(span.startLine, 0, document.lineCount - 1);
-  const newEndLine = document.positionAt(
+  const newEndLine = visualPositionAt(
+    document,
     clampInteger(span.newEndOffset, 0, afterText.length),
   ).line;
-  const startOffset = document.offsetAt(new vscode.Position(startLine, 0));
+  const startOffset = visualOffsetAt(document, new vscode.Position(startLine, 0));
   const newLines: VisualEditorSyntaxLineInput[] = [];
   for (let lineIndex = startLine; lineIndex <= newEndLine; lineIndex += 1) {
     const line = document.lineAt(lineIndex);
-    const contentEnd = document.offsetAt(line.range.end);
+    const contentEnd = visualOffsetAt(document, line.range.end);
     const nextLineStart = lineIndex + 1 < document.lineCount
-      ? document.offsetAt(new vscode.Position(lineIndex + 1, 0))
+      ? visualOffsetAt(document, new vscode.Position(lineIndex + 1, 0))
       : contentEnd;
-    const rawEolLength = nextLineStart - contentEnd;
-    if (rawEolLength < 0 || rawEolLength > 2) {
+    const eolLength = nextLineStart - contentEnd;
+    if (eolLength < 0 || eolLength > 1) {
       return undefined;
     }
     newLines.push({
       text: line.text,
-      eolLength: rawEolLength as 0 | 1 | 2,
+      eolLength: eolLength as 0 | 1,
     });
   }
   return {
@@ -8251,10 +8325,10 @@ function selectionForDocument(
   document: vscode.TextDocument,
   selection: VisualEditorSelection,
 ): vscode.Selection {
-  const clamped = clampSelection(selection, document.getText().length);
+  const clamped = clampSelection(selection, visualDocumentLength(document));
   return new vscode.Selection(
-    document.positionAt(clamped.anchor),
-    document.positionAt(clamped.head),
+    visualPositionAt(document, clamped.anchor),
+    visualPositionAt(document, clamped.head),
   );
 }
 

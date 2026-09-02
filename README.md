@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <strong>TeXLeaf 1.0.0</strong> · VS Code 1.98+ · Windows / macOS / Linux · GPL-3.0-only
+  <strong>TeXLeaf 1.1.0</strong> · VS Code 1.98+ · Windows / macOS / Linux · GPL-3.0-only
 </p>
 
 TeXLeaf 始终编辑原来的 `.tex` / `.bib` 文件，不创建中间文档，也不改变 LaTeX 源码格式。可视化模式、同标签页源码模式和 VS Code 原生编辑器共享同一份 `TextDocument`、保存状态与 Undo/Redo 历史。

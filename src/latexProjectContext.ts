@@ -23,6 +23,7 @@ import {
   type VisualDocumentLanguage,
   type VisualLabelTarget,
 } from "./core/visualStructure";
+import { normalizeVisualText } from "./core/visualTextCoordinates";
 
 const DEFAULT_MAX_DEPTH = 24;
 const DEFAULT_MAX_FILES = 256;
@@ -2057,6 +2058,11 @@ export class LatexProjectContextService implements vscode.Disposable {
       documentVersion = undefined;
       sourceKind = "workspace-fs";
     }
+
+    // Project scans feed visual structures, labels and cross-file navigation.
+    // Normalize once here so every project range shares CodeMirror's one-LF
+    // coordinate space, regardless of how each physical file stores EOLs.
+    text = normalizeVisualText(text);
 
     let scan: LatexProjectSourceScan;
     let scanError: string | undefined;

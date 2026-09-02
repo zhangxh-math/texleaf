@@ -33,6 +33,7 @@ export * from './visualEditing';
 export * from './visualFormula';
 export * from './visualIndentation';
 export * from './visualStructure';
+export * from './visualTextCoordinates';
 export * from './localLatexPreview';
 export * from './latexProject';
 export * from './latexCapabilities';
