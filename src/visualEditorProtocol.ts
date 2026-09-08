@@ -8,6 +8,8 @@
 import type {
   VisualHeadingLevel,
   VisualImageRecord,
+  VisualFigureRecord,
+  VisualReferenceRecord,
   VisualReferenceTargetKind,
   VisualStructureRecord,
   VisualTableRecord,
@@ -55,6 +57,7 @@ export interface VisualFormulaRecord {
   /** Present for display environments whose body must retain its wrapper. */
   readonly environmentName?: string;
   readonly labels: readonly VisualFormulaLabel[];
+  readonly references?: readonly VisualReferenceRecord[];
 }
 
 export interface VisualEditorReferenceFormulaPreview {
@@ -113,7 +116,7 @@ export type VisualEditorReferenceStructurePreview =
   | {
       readonly kind: "diagram";
       readonly key: string;
-      readonly record: VisualTikzcdRecord | VisualTikzpictureRecord;
+      readonly record: VisualTikzcdRecord | VisualTikzpictureRecord | VisualFigureRecord;
     };
 
 export interface VisualEditorSelection {
@@ -161,6 +164,7 @@ export interface VisualEditorCapabilities {
 }
 
 export interface VisualEditorInputFeatures {
+  readonly compatibilityMode?: "basic" | "maximum";
   readonly enabled: boolean;
   readonly manualTrigger: "tab" | "space";
   readonly matrixShortcuts: boolean;
@@ -326,7 +330,17 @@ export type VisualEditorInputAction =
 export type VisualEditorHostMessage =
   | {
       readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
+      readonly type: "structureAssets";
+      readonly replaceAll?: boolean;
+      readonly revision: number;
+      readonly version: number;
+      readonly assetGeneration: number;
+      readonly structures: readonly VisualStructureRecord[];
+    }
+  | {
+      readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
       readonly type: "initialize" | "document";
+      readonly assetGeneration?: number;
       readonly text: string;
       readonly version: number;
       readonly revision: number;
@@ -384,6 +398,7 @@ export type VisualEditorHostMessage =
   | {
       readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
       readonly type: "renderBatch";
+      readonly assetGeneration?: number;
       readonly version: number;
       /**
        * Static viewport renders are intentionally coalesced. One host message
@@ -607,6 +622,10 @@ export type VisualEditorHostMessage =
     };
 
 export type VisualEditorWebviewCommand =
+  | "visualBasic"
+  | "visualMaximum"
+  | "clearGraphCache"
+  | "retryGraphPreviews"
   | "openSource"
   | "undo"
   | "redo"

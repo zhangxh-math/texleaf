@@ -244,6 +244,7 @@ import type {
   VisualSourceText,
   VisualMathFragment,
   VisualStructureRecord,
+  VisualFootnoteRecord,
   VisualTableCell,
   VisualTableOfContentsNotice,
   VisualTableOfContentsRecord,
@@ -252,6 +253,7 @@ import type {
   VisualTheoremRecord,
   VisualTikzcdRecord,
   VisualTikzpictureRecord,
+  VisualFigureRecord,
 } from "./core/visualStructure";
 
 interface VsCodeApi {
@@ -434,6 +436,7 @@ const editableCompartment = new Compartment();
 const bracketMatchingCompartment = new Compartment();
 const syntaxHighlightingCompartment = new Compartment();
 const setFormulaDocument = StateEffect.define<{
+  readonly resetRenders?: boolean;
   readonly records: readonly VisualFormulaRecord[];
   readonly enabled: boolean;
   readonly placement: VisualMathPreviewPlacement;
@@ -563,6 +566,9 @@ function mapVisualFormulaRecord(
     // belongs to the formula, while text typed just outside remains prose.
     bodyFrom: changes.mapPos(record.bodyFrom, -1),
     bodyTo: changes.mapPos(record.bodyTo, 1),
+    ...(record.references === undefined ? {} : { references: record.references.map(reference => ({
+      ...reference, from: changes.mapPos(reference.from, 1), to: changes.mapPos(reference.to, -1),
+    })) }),
     labels: record.labels.map((label) => ({
       ...label,
       from: changes.mapPos(label.from, 1),
@@ -767,6 +773,7 @@ let deferredDocumentTimer: ReturnType<typeof setTimeout> | undefined;
 let documentVersion = 0;
 let clientRevision = 0;
 let projectContextKey = "";
+let assetGeneration: number | undefined;
 let mathPreviewPlacement: VisualMathPreviewPlacement = "autoAbove";
 let inputFeatures: VisualEditorInputFeatures = {
   enabled: true,
@@ -1033,6 +1040,7 @@ const formulaField = StateField.define<FormulaFieldValue>({
     for (const effect of transaction.effects) {
       if (effect.is(setFormulaDocument)) {
         const previousRecords = records;
+        if (effect.value.resetRenders) { rendered = new Map(); cursorRendered = undefined; }
         records = effect.value.records;
         recordsMayNeedSorting = true;
         activeFormulaIds = new Set(records.map((record) => record.id));
@@ -2608,6 +2616,7 @@ const editorTheme = EditorView.theme({
   ".tok-emphasis": {
     fontStyle: "italic",
   },
+  ".texleaf-formula-references": { display: "flex", gap: "0.5em", fontSize: "0.8em", justifyContent: "flex-end", marginTop: "0.25em" },
   ".texleaf-text-style": {
     cursor: "text",
   },
@@ -2970,6 +2979,7 @@ const editorTheme = EditorView.theme({
     borderBottomRightRadius: "7px",
   },
   ".texleaf-title-card": {
+    position: "relative",
     boxSizing: "border-box",
     width: "calc(100% - 32px)",
     margin: "0 16px",
@@ -2993,7 +3003,7 @@ const editorTheme = EditorView.theme({
     display: "block",
     marginBottom: "0.35em",
   },
-  ".texleaf-title-card [role=button]:focus-visible": {
+  ".texleaf-title-card [role=button]:focus-visible, .texleaf-front-matter-section [role=button]:focus-visible": {
     outline: "1px solid var(--vscode-focusBorder)",
     outlineOffset: "3px",
   },
@@ -3124,7 +3134,7 @@ const editorTheme = EditorView.theme({
     fontWeight: "700",
     textAlign: "center",
   },
-  ".cm-line.texleaf-abstract-line, .texleaf-abstract-begin-shell + .cm-line:not(.texleaf-abstract-line)": {
+  ".cm-line.texleaf-abstract-line, .texleaf-abstract-begin-shell + .cm-line:not(.texleaf-abstract-line), .texleaf-front-matter-abstract-body": {
     "--texleaf-line-base-padding-inline-start": "1em",
     boxSizing: "border-box",
     minHeight: "var(--vscode-editor-line-height, 1.5em)",
@@ -3134,6 +3144,22 @@ const editorTheme = EditorView.theme({
     borderLeft: "1px solid var(--vscode-editorWidget-border)",
     borderRight: "1px solid var(--vscode-editorWidget-border)",
     lineHeight: "1.55",
+  },
+  ".texleaf-front-matter-abstract-body": {
+    display: "block",
+    width: "calc(100% - 32px)",
+    paddingInlineStart: "1em",
+    paddingBottom: "0.65em",
+    borderBottom: "1px solid var(--vscode-editorWidget-border)",
+    borderBottomLeftRadius: "8px",
+    borderBottomRightRadius: "8px",
+  },
+  ".texleaf-title-source": {
+    display: "block",
+    width: "fit-content",
+    maxWidth: "100%",
+    margin: "0 0 12px auto",
+    whiteSpace: "normal",
   },
   ".cm-line.texleaf-abstract-layout-line": {
     minHeight: "0",
@@ -3257,6 +3283,7 @@ const editorTheme = EditorView.theme({
     fontSize: "clamp(1.65em, 4vw, 2.35em)",
     lineHeight: "1.2",
     fontWeight: "700",
+    overflowWrap: "anywhere",
   },
   ".texleaf-document-authors": {
     display: "flex",
@@ -3390,8 +3417,9 @@ const editorTheme = EditorView.theme({
     gap: "4px",
     margin: "0 0.3em",
     padding: "2px 6px",
-    border: VISUAL_THEOREM_FRAME_BORDER,
-    borderRadius: VISUAL_THEOREM_FRAME_RADIUS,
+    border: "0",
+    borderRadius: "0",
+    backgroundColor: "transparent",
   },
   ".texleaf-theorem-label": {
     flex: "0 0 auto",
@@ -3483,6 +3511,18 @@ const editorTheme = EditorView.theme({
   ".cm-line.texleaf-theorem-plain": {
     fontStyle: "italic",
   },
+  ".cm-line.texleaf-theorem-inline-start": {
+    borderTop: VISUAL_THEOREM_FRAME_BORDER,
+    borderTopLeftRadius: VISUAL_THEOREM_FRAME_RADIUS,
+    borderTopRightRadius: VISUAL_THEOREM_FRAME_RADIUS,
+    paddingTop: "0.4em",
+  },
+  ".cm-line.texleaf-theorem-inline-end": {
+    borderBottom: VISUAL_THEOREM_FRAME_BORDER,
+    borderBottomLeftRadius: VISUAL_THEOREM_FRAME_RADIUS,
+    borderBottomRightRadius: VISUAL_THEOREM_FRAME_RADIUS,
+    paddingBottom: "0.4em",
+  },
   ".texleaf-theorem-formula-shell:not(.texleaf-theorem-proof) + .cm-line:not(.texleaf-theorem-line), .texleaf-list-boundary.texleaf-theorem-list-boundary:not(.texleaf-theorem-proof) + .cm-line:not(.texleaf-theorem-line)": {
     "--texleaf-line-base-padding-inline-start": "12px",
     boxSizing: "border-box",
@@ -3546,8 +3586,9 @@ const editorTheme = EditorView.theme({
     minHeight: "0",
     margin: "0 0.3em",
     padding: "2px 6px",
-    border: VISUAL_THEOREM_FRAME_BORDER,
-    borderRadius: VISUAL_THEOREM_FRAME_RADIUS,
+    border: "0",
+    borderRadius: "0",
+    backgroundColor: "transparent",
     lineHeight: "inherit",
     verticalAlign: "baseline",
   },
@@ -5308,7 +5349,7 @@ const editorTheme = EditorView.theme({
   ".texleaf-frame-content-shell.texleaf-title-shell": {
     padding: "0.72em 18px 0.9em",
   },
-  ".texleaf-frame-content-shell > .texleaf-title-card": {
+  ".texleaf-frame-content-shell .texleaf-title-card": {
     width: "100%",
     margin: "0",
     padding: "16px 18px",
@@ -5500,6 +5541,9 @@ referenceHoverElement.addEventListener("pointerleave", () => {
   scheduleReferenceHoverHide();
 });
 
+wireButton(requiredElement<HTMLButtonElement>("visual-mode-basic"), "visualBasic");
+wireButton(requiredElement<HTMLButtonElement>("visual-mode-maximum"), "visualMaximum");
+wireButton(requiredElement<HTMLButtonElement>("clear-graph-cache"), "clearGraphCache");
 wireButton(buildPdfLaTexButton, "buildPdfLaTex");
 wireButton(buildXeLaTexButton, "buildXeLaTex");
 wireButton(buildLuaLaTexButton, "buildLuaLaTex");
@@ -5699,8 +5743,17 @@ function handleHostMessage(message: VisualEditorHostMessage): void {
     case "bracketTokenPatch":
       applyBracketTokenPatch(message);
       return;
+    case "structureAssets":
+      if (editor !== undefined && message.version === documentVersion && message.assetGeneration === assetGeneration &&
+          message.revision === clientRevision) {
+        const patches = new Map(message.structures.map(record => [visualStructureIdentity(record), record]));
+        const records = message.replaceAll ? message.structures : editor.state.field(structureField).records.map(record => patches.get(visualStructureIdentity(record)) ?? record);
+        editor.dispatch({ effects: setStructureDocument.of(records) });
+      }
+      return;
     case "renderBatch":
-      if (editor === undefined || message.version !== documentVersion) {
+      if (editor === undefined || message.version !== documentVersion ||
+          (message.assetGeneration !== undefined && message.assetGeneration !== assetGeneration)) {
         return;
       }
       {
@@ -6164,11 +6217,12 @@ function appendDiagramReferenceHover(
     );
     exact.classList.add("texleaf-reference-hover-diagram-exact");
     root.append(exact);
+    if (record.kind === "figure" && record.caption !== undefined) root.append(createInlineContentElement(record.captionSegments, record.caption, "texleaf-reference-hover-structure-caption"));
     return;
   }
-  if (record.kind === "tikzpicture") {
+  if (record.kind === "tikzpicture" || record.kind === "figure") {
     root.append(createLocalLatexStructureFallback(
-      "本地 TeX 精确预览尚未生成，或该 TikZ 图使用了未启用的包、外部文件或命令。",
+      record.previewStatus?.message ?? "图形预览尚未生成。",
     ));
     return;
   }
@@ -6878,7 +6932,13 @@ function applyDocumentMessage(message: VisualDocumentHostMessage): void {
   const activeBracketConfigurationChanged =
     inputFeatures.highlightActiveBracketPair !==
       message.inputFeatures.highlightActiveBracketPair;
+  const compatibilityModeChanged = inputFeatures.compatibilityMode !== message.inputFeatures.compatibilityMode;
+  assetGeneration = message.assetGeneration;
   inputFeatures = message.inputFeatures;
+  const enhanced = inputFeatures.compatibilityMode === "maximum";
+  requiredElement<HTMLButtonElement>("visual-mode-button").textContent = enhanced ? "增强可视化" : "标准可视化";
+  requiredElement<HTMLButtonElement>("visual-mode-basic").setAttribute("aria-checked", String(!enhanced));
+  requiredElement<HTMLButtonElement>("visual-mode-maximum").setAttribute("aria-checked", String(enhanced));
   if (editor !== undefined) {
     if (activeBracketConfigurationChanged) {
       editor.dispatch({
@@ -7006,11 +7066,12 @@ function applyDocumentMessage(message: VisualDocumentHostMessage): void {
     );
     const effects: StateEffect<unknown>[] = [];
     if (
-      !formulaRecordsEqual ||
+      compatibilityModeChanged || !formulaRecordsEqual ||
       currentFormula.enabled !== inputFeatures.mathPreviewEnabled ||
       currentFormula.placement !== mathPreviewPlacement
     ) {
       effects.push(setFormulaDocument.of({
+        resetRenders: compatibilityModeChanged,
         records: message.formulas,
         enabled: inputFeatures.mathPreviewEnabled,
         placement: mathPreviewPlacement,
@@ -9845,6 +9906,7 @@ function handleVisualInputBeforeCollapsedBlock(
       case "keywords":
       case "table":
       case "tikzcd":
+      case "figure":
       case "tikzpicture":
       case "image":
       case "tableOfContents":
@@ -12557,6 +12619,15 @@ function handleVisualBackspace(view: EditorView): boolean {
       const boundaries = hiddenPairedEnvironmentBoundaries(structure).map(
         ({ range: boundary }) => boundary,
       );
+      if (range.empty) {
+        // Every atomic source replacement can make CodeMirror's character
+        // deletion consume a whole command or preview block. Reveal it first.
+        structure.atomic.between(Math.max(0, range.head - 1), range.head, (from, to) => {
+          if (to === range.head && from < to) {
+            boundaries.push({ from, to, sourceFrom: from, sourceTo: to, block: false });
+          }
+        });
+      }
       const reveal = planVisualHiddenEnvironmentBoundaryBackspace(
         { start: range.from, end: range.to },
         boundaries,
@@ -12569,9 +12640,19 @@ function handleVisualBackspace(view: EditorView): boolean {
           view.state.doc.toString(),
         );
         if (sourceReveal !== undefined) {
+          const expanded: StructureSourceReveal = {
+            ...sourceReveal,
+            ranges: [{ from: reveal.sourceFrom, to: reveal.sourceTo }, ...sourceReveal.ranges],
+            scopeFrom: Math.min(reveal.sourceFrom, sourceReveal.scopeFrom),
+            scopeTo: Math.max(reveal.sourceTo, sourceReveal.scopeTo),
+            retention: "boundary-lines",
+          };
           view.dispatch({
-            selection: EditorSelection.cursor(reveal.sourceTo),
-            effects: setStructureSourceReveal.of(sourceReveal),
+            selection: EditorSelection.cursor(sourceRevealCaretPosition(view.state, expanded, reveal.sourceTo)),
+            effects: [setStructureSourceReveal.of(expanded),
+              ...(!structure.preambleExpanded && structure.records.some(record =>
+                record.kind === "preamble" && reveal.sourceFrom < record.to && reveal.sourceTo > record.from)
+                ? [setPreambleExpanded.of(true)] : [])],
             scrollIntoView: true,
             annotations: Transaction.addToHistory.of(false),
           });
@@ -13329,10 +13410,14 @@ function buildStructurePresentation(
 
   const groupedFrontMatter: VisualReplacementRange[] = [];
   for (const record of records) {
-    const range = record.kind === "maketitle" ? record.frontMatter?.replacement : undefined;
-    if (record.kind === "maketitle" && range !== undefined &&
-      addReplacement(range, new MakeTitleWidget(record, false, true))) {
+    if (record.kind !== "maketitle" || record.frontMatter === undefined) continue;
+    const { replacement: range, replacements = [] } = record.frontMatter;
+    const ranges = [range, ...replacements];
+    if (ranges.some(item => selectionTouchesRange(state, item.sourceFrom, item.sourceTo) ||
+      sourceRevealTouchesRange(sourceReveal, item.sourceFrom, item.sourceTo))) continue;
+    if (addReplacement(range, new MakeTitleWidget(record, false, true))) {
       groupedFrontMatter.push(range);
+      for (const extra of replacements) if (addReplacement(extra, undefined)) groupedFrontMatter.push(extra);
     }
   }
 
@@ -13343,8 +13428,16 @@ function buildStructurePresentation(
     }
   }
 
+  const collapsedFootnotes: VisualFootnoteRecord[] = [];
+  for (const record of records) {
+    if (record.kind === "footnote" && !groupedFrontMatter.some(range => record.from >= range.from && record.to <= range.to) &&
+        addReplacement({ from: record.from, to: record.to, sourceFrom: record.from, sourceTo: record.to, block: false }, new FootnoteWidget(record))) {
+      collapsedFootnotes.push(record);
+    }
+  }
   for (const record of records) {
     const start = visualStructureStart(record);
+    if (record.kind === "footnote" || collapsedFootnotes.some(note => start > note.from && start < note.to)) continue;
     if (record.kind !== "preamble" && groupedFrontMatter.some(range => start >= range.from && start < range.to)) {
       continue;
     }
@@ -13522,6 +13615,7 @@ function buildStructurePresentation(
           ),
         );
         break;
+      case "figure":
       case "tikzpicture":
         addReplacement(
           record.replacement,
@@ -13591,7 +13685,8 @@ function buildStructurePresentation(
         }
         if (
           valid &&
-          !selectionTouchesRange(state, record.from, record.to)
+          !selectionTouchesRange(state, record.from, record.to) &&
+          !sourceRevealTouchesRange(sourceReveal, record.from, record.to)
         ) {
           const decoration = Decoration.replace({
             widget: new AccentWidget(record),
@@ -13671,7 +13766,7 @@ function addTextStyleDecorations(
   ) {
     return;
   }
-  const revealedBySource = transparent && (
+  const revealedBySource = (
     sourceRevealTouchesRange(sourceReveal, record.prefixFrom, record.prefixTo) ||
     sourceRevealTouchesRange(sourceReveal, record.suffixFrom, record.suffixTo)
   );
@@ -13687,7 +13782,7 @@ function addTextStyleDecorations(
     ? selectionTouchesRange(state, record.prefixFrom, record.prefixTo) ||
       selectionTouchesRange(state, record.suffixFrom, record.suffixTo) ||
       revealedBySource
-    : selectionTouchesRange(state, record.from, record.to);
+    : selectionTouchesRange(state, record.from, record.to) || revealedBySource;
   if (wrapperExposed) {
     return;
   }
@@ -13700,7 +13795,7 @@ function addTextStyleDecorations(
     }
     const hidden = Decoration.replace({
       ...(record.command === "footnote" ? { widget: new AccentWidget({ kind: "accent", from, to, text: edge === "prefix" ? "〔脚注：" : "〕" }) } : {}),
-      ...(transparent && edge === "prefix"
+      ...((transparent || record.contentFrom === record.contentTo) && edge === "prefix"
         ? { widget: new TransparentWrapperEditWidget(record) }
         : {}),
       inclusive: false,
@@ -13755,9 +13850,10 @@ class TransparentWrapperEditWidget extends WidgetType {
   public override toDOM(view: EditorView): HTMLElement {
     const chip = createInlineEnvironmentEditChip(
       view,
-      this.record.prefixFrom,
-      this.record.prefixTo,
+      this.record.contentFrom === this.record.contentTo ? this.record.from : this.record.prefixFrom,
+      this.record.contentFrom === this.record.contentTo ? this.record.to : this.record.prefixTo,
       this.record.editLabel ?? `编辑 \\${this.record.command}`,
+      this.record.contentFrom === this.record.contentTo,
     );
     chip.classList.add("texleaf-transparent-wrapper-edit-chip");
     chip.title = `展开并编辑 ${this.record.command} 的完整包装源码`;
@@ -13788,10 +13884,17 @@ class AccentWidget extends WidgetType {
   }
 
   public override eq(other: AccentWidget): boolean {
-    return this.record.text === other.record.text;
+    return this.record.text.length > 0 && this.record.text === other.record.text;
   }
 
   public override toDOM(view: EditorView): HTMLElement {
+    if (this.record.text.length === 0) {
+      const source = view.state.doc.sliceString(this.record.from, this.record.to).replace(/\s+/gu, " ");
+      const chip = createInlineEnvironmentEditChip(view, this.record.from, this.record.to, `源码 · ${source.slice(0, 64)}`, true);
+      chip.classList.add("texleaf-source-command");
+      chip.title = "在可视化中展开并编辑完整原始命令";
+      return chip;
+    }
     const glyph = document.createElement("span");
     glyph.className = "texleaf-accent-glyph";
     glyph.tabIndex = 0;
@@ -14000,6 +14103,8 @@ function addTheoremDecorations(
         class: [
           "texleaf-theorem-line",
           `texleaf-theorem-${record.style}`,
+          !record.begin.block && line.from === state.doc.lineAt(record.begin.sourceFrom).from ? "texleaf-theorem-inline-start" : "",
+          !record.end.block && line.from === state.doc.lineAt(record.end.sourceFrom).from ? "texleaf-theorem-inline-end" : "",
           sourceBoundary === undefined ? "" : "texleaf-theorem-source-boundary",
           sourceBoundary === undefined ? "" : `texleaf-theorem-source-${sourceBoundary}`,
         ].filter(Boolean).join(" "),
@@ -14009,6 +14114,7 @@ function addTheoremDecorations(
   if (!beginReplaced && record.begin.block) {
     addTheoremLine(record.begin.sourceFrom, "begin");
   }
+  if (!record.begin.block) addTheoremLine(record.begin.sourceFrom);
   let position = record.bodyFrom;
   while (position < record.bodyTo) {
     const line = state.doc.lineAt(position);
@@ -14021,6 +14127,7 @@ function addTheoremDecorations(
   if (record.end.block) {
     addTheoremLine(record.end.sourceFrom, endReplaced ? "widget-end" : "end");
   }
+  else addTheoremLine(record.end.sourceFrom);
 }
 
 function addFrameDecorations(
@@ -14366,7 +14473,9 @@ class MakeTitleWidget extends WidgetType {
   }
 
   public override toDOM(view: EditorView): HTMLElement {
+    const container = document.createElement("div");
     const root = document.createElement("section");
+    container.append(root);
     root.className = "texleaf-title-card";
     root.tabIndex = 0;
     root.setAttribute("aria-label", this.grouped ? "文章文首预览" : "文章标题、作者、单位与邮箱预览");
@@ -14376,6 +14485,20 @@ class MakeTitleWidget extends WidgetType {
       this.record.replacement.sourceFrom,
       this.record.replacement.sourceTo,
     );
+
+    const localMetadata = [this.record.title, ...this.record.authors, ...this.record.affiliations,
+      ...this.record.emails, this.record.date].filter((field): field is VisualSourceText =>
+      field !== undefined && field.navigationId === undefined);
+    const sourceRanges = [this.record.replacement,
+      ...localMetadata.map(field => ({ sourceFrom: field.from, sourceTo: field.to })),
+      ...(this.record.metadataReplacements ?? []),
+      ...(this.grouped && this.record.frontMatter !== undefined
+        ? [this.record.frontMatter.replacement, ...(this.record.frontMatter.replacements ?? [])] : [])];
+    const editTitle = createStructureSourceButton(view,
+      Math.min(...sourceRanges.map(range => range.sourceFrom)),
+      Math.max(...sourceRanges.map(range => range.sourceTo)), "编辑文首源码", true);
+    editTitle.classList.add("texleaf-title-source");
+    root.append(editTitle);
 
     const heading = document.createElement("h1");
     heading.className = "texleaf-document-title";
@@ -14442,15 +14565,35 @@ class MakeTitleWidget extends WidgetType {
     for (const section of this.grouped ? this.record.frontMatter?.sections ?? [] : []) {
       const element = document.createElement("div");
       element.className = `texleaf-front-matter-section texleaf-front-matter-${section.role}`;
+      const abstract = section.role === "abstract";
+      const header = document.createElement("div");
+      header.className = abstract ? "texleaf-abstract-begin" : "texleaf-keywords-card texleaf-keywords-card-block";
       const label = document.createElement("span");
-      label.className = "texleaf-front-matter-label";
+      label.className = abstract ? "texleaf-abstract-label" : "texleaf-keywords-label";
       label.textContent = section.label;
-      element.append(label, createInlineContentElement(section.source.segments ?? [], section.source.text, "texleaf-front-matter-content", view));
-      wireMetadataSourcePointer(element, view, section.source);
-      root.append(element);
+      const content = createInlineContentElement(section.source.segments ?? [], section.source.text,
+        abstract ? "texleaf-front-matter-content texleaf-front-matter-abstract-body" : "texleaf-keywords-value", view);
+      const edit = document.createElement("span");
+      edit.className = "texleaf-environment-edit-chip";
+      edit.textContent = abstract
+        ? section.label === "摘要" ? "编辑摘要源码" : "Edit abstract source"
+        : "编辑源码";
+      const enclosing = section.source.navigationId === undefined
+        ? view.state.field(structureField).records.find((record): record is VisualAbstractRecord =>
+          record.kind === "abstract" && record.bodyFrom <= section.source.from && record.bodyTo >= section.source.to)
+        : undefined;
+      wireMetadataSourcePointer(edit, view, enclosing === undefined ? section.source
+        : { from: enclosing.begin.sourceFrom, to: enclosing.end.sourceTo });
+      wireMetadataSourcePointer(content, view, section.source);
+      header.append(label);
+      if (!abstract) header.append(content);
+      header.append(edit);
+      element.append(header);
+      if (abstract) element.append(content);
+      container.append(element);
     }
     return createMeasuredBlockShell(
-      root,
+      container,
       [
         "texleaf-title-shell",
         this.insideFrame ? "texleaf-frame-content-shell" : "",
@@ -15009,6 +15152,7 @@ class ReferenceWidget extends WidgetType {
 
   public override eq(other: ReferenceWidget): boolean {
     return this.record.command === other.record.command &&
+      JSON.stringify(this.record.resolvedLabels) === JSON.stringify(other.record.resolvedLabels) &&
       this.record.label === other.record.label &&
       this.record.keys.join("\u0000") === other.record.keys.join("\u0000") &&
       referenceChipPresentationIdentity(this.targets) ===
@@ -15022,7 +15166,7 @@ class ReferenceWidget extends WidgetType {
       "aria-label",
       `引用 ${this.record.keys.join(", ")}；悬停预览，点击编辑，Ctrl/Cmd+单击跳转到标签`,
     );
-    appendReferenceChipTargets(chip, view, this.record, this.targets);
+    appendReferenceChipTargets(chip, view, this.record, this.targets.map(target => ({...target, label: this.record.resolvedLabels?.[target.key] ?? target.label})));
     wireSourcePointer(chip, view, this.record.from, this.record.to, (from, to) => {
       hideReferenceHover();
       post({
@@ -15057,6 +15201,61 @@ function createLabelChip(
   chip.title = `标签 ${record.key}；点击编辑 label 命令`;
   wireSourcePointer(chip, view, record.from, record.to);
   return chip;
+}
+
+class FootnoteWidget extends WidgetType {
+  private cleanup: (() => void) | undefined;
+  public constructor(private readonly record: VisualFootnoteRecord) { super(); }
+  public override eq(other: FootnoteWidget): boolean {
+    return visualPresentationKey(this.record) === visualPresentationKey(other.record);
+  }
+  public override toDOM(view: EditorView): HTMLElement {
+    const marker = document.createElement("sup");
+    marker.className = "texleaf-footnote-marker";
+    marker.tabIndex = 0;
+    marker.setAttribute("role", "button");
+    marker.textContent = this.record.number ?? "*";
+    marker.setAttribute("aria-label", `脚注 ${this.record.number ?? ""}；悬浮查看，点击编辑源码`);
+    wireSourcePointer(marker, view, this.record.from, this.record.to);
+    const card = document.createElement("div");
+    card.className = "texleaf-footnote-hover";
+    card.setAttribute("role", "note");
+    card.hidden = true;
+    card.append(createInlineContentElement(this.record.source.segments ?? [], this.record.source.text,
+      "texleaf-footnote-content", view));
+    card.append(createStructureSourceButton(view, this.record.from, this.record.to, "编辑脚注源码"));
+    document.body.append(card);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cancel = (): void => { clearTimeout(timer); };
+    const hide = (): void => { cancel(); card.hidden = true; };
+    const leave = (): void => { cancel(); timer = setTimeout(hide, 180); };
+    const show = (): void => {
+      cancel();
+      if (!marker.isConnected) return;
+      card.hidden = false;
+      const anchor = marker.getBoundingClientRect();
+      const bounds = view.scrollDOM.getBoundingClientRect();
+      card.style.maxWidth = `${Math.max(120, Math.min(460, bounds.width - 16))}px`;
+      const box = card.getBoundingClientRect();
+      card.style.left = `${Math.max(bounds.left + 8, Math.min(anchor.left, bounds.right - box.width - 8))}px`;
+      card.style.top = `${Math.max(bounds.top + 8, Math.min(anchor.bottom + 6, bounds.bottom - box.height - 8))}px`;
+    };
+    marker.addEventListener("pointermove", show);
+    marker.addEventListener("focus", show);
+    marker.addEventListener("pointerleave", leave);
+    marker.addEventListener("blur", leave);
+    marker.addEventListener("pointerdown", hide);
+    card.addEventListener("pointerenter", cancel);
+    card.addEventListener("pointerleave", leave);
+    card.addEventListener("focusin", cancel);
+    card.addEventListener("focusout", leave);
+    card.addEventListener("keydown", event => { if (event.key === "Escape") hide(); });
+    view.scrollDOM.addEventListener("scroll", hide);
+    this.cleanup = () => { cancel(); card.remove(); view.scrollDOM.removeEventListener("scroll", hide); };
+    return marker;
+  }
+  public override ignoreEvent(): boolean { return true; }
+  public override destroy(): void { this.cleanup?.(); }
 }
 
 class CitationWidget extends WidgetType {
@@ -15294,6 +15493,7 @@ function citationPreviewIdentity(
     entry.container,
     entry.year,
     entry.source,
+    entry.titleSegments === undefined ? "" : visualPresentationKey(entry.titleSegments),
   ].join("\u0001")).join("\u0000");
 }
 
@@ -15484,13 +15684,16 @@ function createCitationHoverEntry(
   const root = document.createElement("div");
   root.className = "texleaf-completion-info";
   const heading = document.createElement("h3");
-  heading.textContent = entry?.entryType === "bibitem"
-    ? `文献 ${key}`
-    : compactReferenceHoverText(entry?.title ?? "", 220) || `[未找到 ${key}]`;
+  if (entry?.entryType === "bibitem") {
+    heading.textContent = `文献 ${key}`;
+  } else {
+    heading.append(createInlineContentElement(entry?.titleSegments ?? [],
+      compactReferenceHoverText(entry?.title ?? "", 220) || `[未找到 ${key}]`, "texleaf-citation-title"));
+  }
   root.append(heading);
   if (entry?.entryType === "bibitem") {
     const citation = document.createElement("p");
-    citation.textContent = entry.title;
+    citation.append(createInlineContentElement(entry.titleSegments ?? [], entry.title, "texleaf-citation-title"));
     root.append(citation);
   } else {
     appendCitationHoverField(
@@ -15716,13 +15919,14 @@ function createStructureSourceButton(
   from: number,
   to: number,
   label = "编辑环境",
+  selectSource = false,
 ): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "texleaf-structure-action";
   button.textContent = label;
   button.title = "原位展开并编辑完整 LaTeX 环境源码";
-  wireSourcePointer(button, view, from, to);
+  wireSourcePointer(button, view, from, to, undefined, selectSource);
   return button;
 }
 
@@ -15731,13 +15935,14 @@ function createInlineEnvironmentEditChip(
   from: number,
   to: number,
   label = "编辑环境",
+  selectSource = false,
 ): HTMLSpanElement {
   const chip = document.createElement("span");
   chip.className = "texleaf-environment-edit-chip";
   chip.tabIndex = 0;
   chip.textContent = label;
   chip.title = "成对展开这一环境的 \\begin / \\end LaTeX 源码";
-  wireSourcePointer(chip, view, from, to);
+  wireSourcePointer(chip, view, from, to, undefined, selectSource);
   return chip;
 }
 
@@ -16800,6 +17005,9 @@ class TikzcdWidget extends WidgetType {
       );
     }
 
+    if (inputFeatures.compatibilityMode !== "maximum" && this.record.simplifiedOptions.length > 0) {
+      card.append(createEnhancedVisualizationHint());
+    }
     const canvas = document.createElement("div");
     canvas.className = "texleaf-tikzcd-canvas";
     configureStructureHorizontalScroll(
@@ -16900,7 +17108,7 @@ class TikzcdWidget extends WidgetType {
 
 class TikzpictureWidget extends WidgetType {
   public constructor(
-    private readonly record: VisualTikzpictureRecord,
+    private readonly record: VisualTikzpictureRecord | VisualFigureRecord,
     private readonly insideFrame: boolean,
   ) {
     super();
@@ -16913,9 +17121,9 @@ class TikzpictureWidget extends WidgetType {
 
   public override toDOM(view: EditorView): HTMLElement {
     const card = document.createElement("figure");
-    card.className = "texleaf-tikzpicture-card";
+    card.className = this.record.kind === "figure" ? "texleaf-tikzpicture-card texleaf-whole-figure-card" : "texleaf-tikzpicture-card";
     card.tabIndex = 0;
-    card.title = "高级 TikZ 本地 TeX 预览";
+    card.title = this.record.kind === "figure" ? "完整图形预览" : "TikZ 图形预览";
     wireSourcePointer(
       card,
       view,
@@ -16928,15 +17136,32 @@ class TikzpictureWidget extends WidgetType {
       view,
       this.record.replacement.sourceFrom,
       this.record.replacement.sourceTo,
-      "编辑 tikzpicture 源码",
+      this.record.kind === "figure" ? "编辑完整图形源码" : "编辑 tikzpicture 源码",
     ));
     card.append(actions);
     card.append(this.record.asset === undefined
-      ? createLocalLatexStructureFallback("当前 TikZ 使用了预览器未启用的包、外部文件或命令；源码保持完整。")
+      ? inputFeatures.compatibilityMode !== "maximum"
+        ? createEnhancedVisualizationHint()
+        : createLocalPreviewStatus(this.record.previewStatus)
       : createLocalLatexStructurePreview(
           this.record.asset,
-          "tikzpicture 的本地 TeX 精确预览",
+          this.record.kind === "figure" ? "完整图形的本地 TeX 预览" : "TikZ 的本地 TeX 预览",
         ));
+    if (this.record.kind === "figure") {
+      if (this.record.caption !== undefined) {
+        const caption = document.createElement("figcaption");
+        caption.append(createInlineContentElement(this.record.captionSegments, this.record.caption, "texleaf-figure-caption", view));
+        card.append(caption);
+      }
+      if (this.record.label !== undefined) {
+        const label = document.createElement("span");
+        label.className = "texleaf-formula-label-chip";
+        label.textContent = `↪ ${this.record.label.key}`;
+        label.tabIndex = 0;
+        wireSourcePointer(label, view, this.record.label.from, this.record.label.to);
+        card.append(label);
+      }
+    }
     return createMeasuredBlockShell(
       card,
       [
@@ -16959,6 +17184,9 @@ function createLocalLatexStructurePreview(
 ): HTMLElement {
   const root = document.createElement("div");
   root.className = "texleaf-local-latex-preview";
+  // Authored white fills and imported PDF artwork need a stable paper canvas.
+  // Keep this shared by document cards and reference previews.
+  root.style.color = "#010203";
   configureStructureHorizontalScroll(root, label);
   root.style.setProperty(
     "--texleaf-local-preview-width",
@@ -16974,8 +17202,47 @@ function createLocalLatexStructurePreview(
   }
   svg.removeAttribute("aria-hidden");
   svg.setAttribute("aria-label", label);
+  svg.style.backgroundColor = "#fff";
+  svg.style.padding = "4px";
   root.append(svg);
   return root;
+}
+
+function createLocalPreviewStatus(status: VisualTikzpictureRecord["previewStatus"]): HTMLElement {
+  if (status?.state === "modeRequired") return createEnhancedVisualizationHint();
+  const node = createLocalLatexStructureFallback(status?.message ?? "正在生成图形预览…");
+  if (status?.state === "error") {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "texleaf-structure-action";
+    retry.textContent = "重试图形";
+    for (const type of ["pointerdown", "mousedown", "keydown"]) retry.addEventListener(type, event => event.stopPropagation());
+    retry.addEventListener("click", event => {
+      event.stopPropagation();
+      post({ protocol: VISUAL_EDITOR_PROTOCOL, type: "command", command: "retryGraphPreviews" });
+    });
+    node.append(retry);
+  }
+  return node;
+}
+
+function createEnhancedVisualizationHint(): HTMLElement {
+  const hint = document.createElement("span");
+  hint.className = "texleaf-enhanced-visualization-hint";
+  hint.append("此内容需要增强可视化。 ");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "texleaf-structure-action";
+  button.textContent = "切换到增强可视化";
+  for (const type of ["pointerdown", "mousedown", "keydown"]) {
+    button.addEventListener(type, event => event.stopPropagation());
+  }
+  button.addEventListener("click", event => {
+    event.stopPropagation();
+    post({ protocol: VISUAL_EDITOR_PROTOCOL, type: "command", command: "visualMaximum" });
+  });
+  hint.append(button);
+  return hint;
 }
 
 function createLocalLatexStructureFallback(message: string): HTMLElement {
@@ -19397,6 +19664,12 @@ function createMathFragmentElement(
 ): HTMLElement {
   const root = document.createElement("span");
   root.className = "texleaf-structure-math";
+  if (fragment?.previewStatus?.state === "error") {
+    root.textContent = fallback;
+    root.dataset.texleafRenderError = fragment.previewStatus.message;
+    root.style.color = "var(--vscode-errorForeground, #f14c4c)";
+    return root;
+  }
   if (fragment?.asset === undefined) {
     root.textContent = fallback;
     return root;
@@ -20236,30 +20509,29 @@ function pairedEnvironmentSourceReveal(
   to: number,
   source: string,
 ): StructureSourceReveal | undefined {
-  const transparentWrapper = records
+  const textWrapper = records
     .filter((record): record is VisualTextStyleRecord =>
       record.kind === "textStyle" &&
-      record.transparent === true &&
       (
         rangesOverlap(record.prefixFrom, record.prefixTo, from, to) ||
         rangesOverlap(record.suffixFrom, record.suffixTo, from, to)
       )
     )
     .sort((left, right) => (left.to - left.from) - (right.to - right.from))[0];
-  if (transparentWrapper !== undefined) {
+  if (textWrapper !== undefined) {
     return {
       ranges: [
         {
-          from: transparentWrapper.prefixFrom,
-          to: transparentWrapper.prefixTo,
+          from: textWrapper.prefixFrom,
+          to: textWrapper.prefixTo,
         },
         {
-          from: transparentWrapper.suffixFrom,
-          to: transparentWrapper.suffixTo,
+          from: textWrapper.suffixFrom,
+          to: textWrapper.suffixTo,
         },
       ],
-      scopeFrom: transparentWrapper.from,
-      scopeTo: transparentWrapper.to,
+      scopeFrom: textWrapper.from,
+      scopeTo: textWrapper.to,
       retention: "boundary-lines",
     };
   }
@@ -20290,6 +20562,15 @@ function pairedEnvironmentSourceReveal(
       scopeFrom: record.begin.sourceFrom,
       scopeTo: record.end.sourceTo,
       retention: "boundary-lines",
+    };
+  }
+  if (record?.kind === "frame") {
+    const reveal = pairedVisualEnvironmentBoundaryReveal(record, from, to);
+    return reveal === undefined ? undefined : {
+      ...reveal,
+      ranges: [...reveal.ranges, ...record.titleCommands.map(range => ({
+        from: range.sourceFrom, to: range.sourceTo,
+      }))],
     };
   }
   return record === undefined
@@ -20458,6 +20739,7 @@ function mapVisualStructureRecords(
           date: source(record.date),
           ...(record.frontMatter === undefined ? {} : { frontMatter: {
             replacement: replacement(record.frontMatter.replacement),
+            ...(record.frontMatter.replacements === undefined ? {} : { replacements: record.frontMatter.replacements.map(replacement) }),
             sections: record.frontMatter.sections.map(section => ({ ...section, source: source(section.source)! })),
           } }),
         };
@@ -20474,6 +20756,9 @@ function mapVisualStructureRecords(
           suffixFrom: start(record.suffixFrom),
           suffixTo: end(record.suffixTo),
         };
+      case "footnote":
+        return { ...record, from: start(record.from), to: end(record.to),
+          contentFrom: start(record.contentFrom), contentTo: end(record.contentTo), source: source(record.source)! };
       case "accent":
         return {
           ...record,
@@ -20550,6 +20835,9 @@ function mapVisualStructureRecords(
           bodyFrom: start(record.bodyFrom),
           bodyTo: end(record.bodyTo),
         };
+      case "figure":
+        return { ...record, replacement: replacement(record.replacement), bodyFrom: start(record.bodyFrom), bodyTo: end(record.bodyTo),
+          label: label(record.label), captionSegments: record.captionSegments.map(segment) };
       case "tikzpicture":
         return {
           ...record,
@@ -20588,6 +20876,10 @@ function mapVisualStructureRecords(
   });
 }
 
+function visualStructureIdentity(record: VisualStructureRecord): string {
+  return `${record.kind}:${visualStructureStart(record)}`;
+}
+
 function visualStructureStart(record: VisualStructureRecord): number {
   switch (record.kind) {
     case "preamble":
@@ -20595,6 +20887,7 @@ function visualStructureStart(record: VisualStructureRecord): number {
     case "label":
     case "reference":
     case "citation":
+    case "footnote":
     case "textStyle":
     case "accent":
       return record.from;
@@ -20602,6 +20895,7 @@ function visualStructureStart(record: VisualStructureRecord): number {
     case "keywords":
     case "table":
     case "tikzcd":
+    case "figure":
     case "tikzpicture":
     case "image":
     case "tableOfContents":
@@ -21173,6 +21467,14 @@ class FormulaWidget extends WidgetType {
     } else {
       root.textContent = "公式预览不可用";
     }
+    if (this.formula.errorMessage === "此内容需要增强可视化。") {
+      root.classList.remove("texleaf-formula-widget-error");
+      delete root.dataset.texleafRenderError;
+      root.title = "此内容需要增强可视化；点击编辑源码";
+      root.setAttribute("aria-label", root.title);
+      root.replaceChildren(createEnhancedVisualizationHint());
+      layout = undefined;
+    }
     if (this.record.display && this.record.labels.length > 0) {
       const labels = document.createElement("span");
       labels.className = "texleaf-formula-labels";
@@ -21210,6 +21512,17 @@ class FormulaWidget extends WidgetType {
       } else {
         root.append(labels);
       }
+    }
+    if ((this.record.references?.length ?? 0) > 0) {
+      const references = document.createElement("span");
+      references.className = "texleaf-formula-references";
+      references.setAttribute("aria-label", "公式中的引用；悬停预览，Ctrl/Cmd+单击跳转");
+      const index = indexVisualStructureReferences(view.state.doc.toString(), view.state.field(structureField, false)?.records ?? []);
+      for (const reference of this.record.references ?? []) {
+        const chip = new ReferenceWidget(reference, referenceChipPresentations(index, new Map(), reference.keys)).toDOM(view);
+        references.append(chip);
+      }
+      root.append(references);
     }
     const open = (event: Event): void => {
       const liveRecord = view.state
@@ -21289,6 +21602,8 @@ class FormulaWidget extends WidgetType {
   public override ignoreEvent(): boolean {
     return true;
   }
+
+  public override destroy(dom: HTMLElement): void { hideReferenceHoverOwnedBy(dom); }
 
 }
 
@@ -21372,22 +21687,24 @@ function createFormulaSourceTooltipView(view: EditorView): TooltipView {
   const replaceFormula = (formula: RenderedFormula): void => {
     const previousLeft = scroll.scrollLeft;
     const previousTop = scroll.scrollTop;
-    applyFormulaGeometry(canvas, formula);
+    const modeRequired = formula.errorMessage === "此内容需要增强可视化。";
+    applyFormulaGeometry(canvas, modeRequired ? { ...formula, widthEm: 28, heightEm: 3 } : formula);
     root.classList.toggle(
       "texleaf-math-preview-tooltip-error",
-      formula.errorMessage !== undefined,
+      formula.errorMessage !== undefined && !modeRequired,
     );
     root.setAttribute(
       "aria-label",
-      formula.errorMessage === undefined
+      modeRequired ? "此内容需要增强可视化"
+        : formula.errorMessage === undefined
         ? "当前公式的可滚动 Math Preview"
         : "Math Preview 渲染失败：" + formula.errorMessage,
     );
-    const svg = createFormulaSvg(formula);
-    if (svg !== undefined) {
-      canvas.replaceChildren(svg);
+    if (modeRequired) {
+      canvas.replaceChildren(createEnhancedVisualizationHint());
     } else {
-      canvas.replaceChildren(document.createTextNode("公式预览不可用"));
+      const svg = createFormulaSvg(formula);
+      canvas.replaceChildren(svg ?? document.createTextNode("公式预览不可用"));
     }
     scroll.scrollLeft = previousLeft;
     scroll.scrollTop = previousTop;
@@ -22683,7 +23000,7 @@ function formulaCacheEvictionsTouchViewport(formulaIds: readonly string[]): bool
   }
   const visibleFrom = Math.min(...editor.visibleRanges.map((range) => range.from));
   const visibleTo = Math.max(...editor.visibleRanges.map((range) => range.to));
-  const viewportKey = `${documentVersion}:${visibleFrom}:${visibleTo}`;
+  const viewportKey = `${documentVersion}:${assetGeneration ?? 0}:${visibleFrom}:${visibleTo}`;
   if (lastFormulaCacheRefillViewportKey === viewportKey) {
     // One refill is enough for an unchanged viewport. If the visible SVGs
     // themselves exceed the byte budget, repeated refill/eviction would
@@ -22750,7 +23067,7 @@ function queueViewportRequestFrame(): void {
     }
     const from = Math.min(...ranges.map((range) => range.from));
     const to = Math.max(...ranges.map((range) => range.to));
-    const key = `${documentVersion}:${from}:${to}`;
+    const key = `${documentVersion}:${assetGeneration ?? 0}:${from}:${to}`;
     if (key !== lastViewportGeometryKey) {
       lastViewportGeometryKey = key;
       lastFormulaCacheRefillViewportKey = undefined;

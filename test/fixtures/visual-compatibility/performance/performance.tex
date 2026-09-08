@@ -1,0 +1,15 @@
+\documentclass{article}
+\usepackage{tikz,amsmath,amsthm}
+\definecolor{ink}{HTML}{FF0000}
+\newtheorem{lemma}{Lemma}
+\title{Native responsiveness and cache acceptance}
+\author{TexLeaf-Z}
+\begin{document}
+\maketitle
+An ordinary formula $x^2+y^2=z^2$ stays interactive.
+\begin{lemma}\label{lem:known}A checked reference target.\end{lemma}
+\begin{align*}a&=b\\\intertext{Using Lemma \ref{lem:known}.}c&=d\end{align*}
+A footnote\footnote{A source-backed note with $a+b$ and Lemma \ref{lem:known}.} remains editable.
+\begin{tikzpicture}\draw[ink,line width=2pt] (0,0)--(2,1);\end{tikzpicture}
+Unrelated prose remains editable.
+\end{document}

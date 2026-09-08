@@ -42,6 +42,7 @@ assert.deepEqual(
     "vscode",
     "node:child_process",
     "node:crypto",
+    "node:fs",
     "node:fs/promises",
     "node:module",
     "node:os",
@@ -145,7 +146,7 @@ assert.doesNotThrow(
 const originalLoad = Module._load;
 Module._load = function loadWithVsCodeStub(request, parent, isMain) {
   if (request === "vscode") {
-    return {};
+    return { EventEmitter: class { event = () => ({ dispose() {} }); } };
   }
   return originalLoad.call(this, request, parent, isMain);
 };

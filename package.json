@@ -2,7 +2,7 @@
   "name": "texleaf",
   "displayName": "TeXLeaf — Fast LaTeX Snippets",
   "description": "安全、可定制的 LaTeX 可视化公式编辑、自动片段、AI 写作检查、Math Preview 与 Zotero 引用管理。",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "publisher": "zhangxh-math",
   "author": {
     "name": "zhangxh-math",
@@ -950,6 +950,30 @@
             "default": "",
             "scope": "machine",
             "description": "可选的本地 TeX 工具目录，用于 TikZ 图形预览和系统宏包查找；留空时使用 PATH 和常见 TeX Live 安装目录。"
+          },
+          "texleaf.visualEditor.compatibilityMode": {
+            "order": 1.1,
+            "scope": "resource",
+            "type": "string",
+            "enum": [
+              "basic",
+              "maximum"
+            ],
+            "enumItemLabels": [
+              "标准可视化",
+              "增强可视化"
+            ],
+            "default": "basic",
+            "description": "标准可视化提供正文、公式和常用结构；增强可视化额外使用本机 TeX 渲染复杂图形。切换模式保留图形缓存。"
+          },
+          "texleaf.visualEditor.graphCacheLimitMB": {
+            "order": 1.2,
+            "scope": "machine",
+            "type": "integer",
+            "default": 128,
+            "minimum": 16,
+            "maximum": 2048,
+            "description": "图形磁盘缓存容量上限（MB）。超过上限时自动清理最久未使用的图形；可在可视化菜单中手动清理。"
           }
         }
       },

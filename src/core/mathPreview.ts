@@ -62,6 +62,8 @@ export interface MathPreviewMacroEnvironmentTransition {
 export type MathPreviewFragmentKind = "standalone" | "body" | "preamble";
 
 export interface MathPreviewSnapshot {
+  /** Host-verified presentation labels; source positions remain untouched. */
+  readonly referenceLabels?: ReadonlyMap<string, string>;
   readonly formulas: readonly MathPreviewFormula[];
   readonly macros: Readonly<Record<string, MathPreviewMacro>>;
   /** Stable, collision-free cache material for the resolved macro table. */
@@ -72,11 +74,25 @@ export interface MathPreviewSnapshot {
   readonly macroEnvironmentTransitions?: readonly MathPreviewMacroEnvironmentTransition[];
 }
 
+export interface LocalLatexPreviewSettings {
+  readonly colors: Readonly<Record<string, { readonly model: "HTML" | "rgb" | "RGB" | "gray" | "cmyk"; readonly value: string }>>;
+  readonly tikzLibraries: readonly string[];
+  readonly ytableauSetup?: string;
+}
+
 export interface MathPreviewRenderInput {
   readonly tex: string;
   readonly display: boolean;
   readonly macros: Readonly<Record<string, MathPreviewMacro>>;
   readonly macroFingerprint: string;
+  /** Host-selected policy. Omitted means basic: no local TeX processes. */
+  readonly compatibilityMode?: "basic" | "maximum";
+  /** Host-resolved drawing declarations. No raw document preamble is executed. */
+  readonly localSettings?: LocalLatexPreviewSettings;
+  readonly localEngine?: "latex" | "xelatex" | "pdflatex";
+  /** Validated dependencies staged under generated names in the job directory. */
+  readonly localFiles?: readonly { readonly name: string; readonly contents: Uint8Array; readonly sourcePath?: string }[];
+  readonly localFigure?: boolean;
 }
 
 export interface MathPreviewScanOptions {
@@ -339,6 +355,41 @@ export function scanMathPreviewDocument(
   });
 }
 
+/** Reuse the macro scanner's comment, definition, scope and verbatim boundaries. */
+export function collectLocalLatexPreviewSettings(text: string): LocalLatexPreviewSettings {
+  let colors: Record<string, LocalLatexPreviewSettings["colors"][string]> = Object.create(null);
+  const libraries = new Set<string>();
+  let ytableauSetup: string | undefined;
+  const scopes: {colors: typeof colors; ytableauSetup: string | undefined}[] = [];
+  collectDocumentMacros(text, true, createMutableMacroTable(), (_offset, command, end) => {
+    if (command === "definecolor") {
+      const name = readRequiredGroup(text, end);
+      const model = name === undefined ? undefined : readRequiredGroup(text, name.end);
+      const value = model === undefined ? undefined : readRequiredGroup(text, model.end);
+      if (name === undefined || model === undefined || value === undefined || Object.keys(colors).length >= 128 ||
+          !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/u.test(name.value)) return;
+      const kind = model.value;
+      if ((kind === "HTML" && /^[0-9A-Fa-f]{6}$/u.test(value.value)) ||
+          ((kind === "rgb" || kind === "RGB" || kind === "gray" || kind === "cmyk") &&
+            /^[0-9.,\s]{1,80}$/u.test(value.value))) {
+        colors[name.value] = { model: kind as LocalLatexPreviewSettings["colors"][string]["model"], value: value.value };
+      }
+    } else if (command === "usetikzlibrary") {
+      const argument = readRequiredGroup(text, end);
+      for (const name of argument?.value.split(",") ?? []) {
+        if (libraries.size < 64 && /^[A-Za-z][A-Za-z0-9.-]{0,63}$/u.test(name.trim())) libraries.add(name.trim());
+      }
+    } else if (command === "ytableausetup") {
+      const argument = readRequiredGroup(text, end);
+      if (argument !== undefined && /^[A-Za-z0-9=, .!:+*()-]{1,256}$/u.test(argument.value)) ytableauSetup = argument.value;
+    }
+  }, event => {
+    if (event === "enter") { scopes.push({colors, ytableauSetup}); colors = {...colors}; }
+    else { const previous = scopes.pop(); if (previous !== undefined) ({colors, ytableauSetup} = previous); }
+  });
+  return { colors, tikzLibraries: [...libraries].sort(), ...(ytableauSetup === undefined ? {} : { ytableauSetup }) };
+}
+
 /** Convert scanner regions to non-overlapping, outermost preview formulas. */
 export function normalizeMathRegions(
   text: string,
@@ -453,7 +504,7 @@ export function createMathPreviewRenderInput(
   const macroEnvironment = macroEnvironmentForFormula(formula, snapshot);
 
   return {
-    tex: wrapMathPreviewBody(body.tex, formula.environmentName),
+    tex: resolveMathPreviewReferences(wrapMathPreviewBody(body.tex, formula.environmentName), snapshot.referenceLabels, macroEnvironment.macros),
     display: formula.mode === "block",
     macros: macroEnvironment.macros,
     macroFingerprint: macroEnvironment.macroFingerprint,
@@ -503,16 +554,49 @@ export function createMathPreviewCursorRenderInput(
     markerTex +
     body.tex.slice(insertionOffset);
   return {
-    tex: wrapMathPreviewBody(markedBody, formula.environmentName),
+    tex: resolveMathPreviewReferences(wrapMathPreviewBody(markedBody, formula.environmentName), snapshot.referenceLabels, macroEnvironment.macros),
     display: formula.mode === "block",
     macros: macroEnvironment.macros,
     macroFingerprint: macroEnvironment.macroFingerprint,
   };
 }
 
+/** Replace after cursor insertion so display labels never shift source offsets. */
+function resolveMathPreviewReferences(tex: string, labels: ReadonlyMap<string, string> | undefined,
+  macros: Readonly<Record<string, MathPreviewMacro>>): string {
+  if (labels === undefined) return tex;
+  let output = "", cursor = 0, index = 0;
+  while (index < tex.length) {
+    if (tex[index] === "%") {
+      const newline = tex.indexOf("\n", index);
+      index = newline < 0 ? tex.length : newline + 1;
+      continue;
+    }
+    if (tex[index] !== "\\") { index++; continue; }
+    const command = readControlSequence(tex, index);
+    if ((command.name === "ref" || command.name === "eqref") && !Object.hasOwn(macros, command.name)) {
+      const argument = readRequiredGroup(tex, tex[command.end] === "*" ? command.end + 1 : command.end);
+      const key = argument?.value.trim();
+      // Dynamic labels (including a cursor marker inside the key) stay source.
+      if (argument !== undefined && key !== undefined && /^[\p{L}\p{N} .:_+/-]{1,256}$/u.test(key)) {
+        const label = labels.get(key) ?? key;
+        if (/^[\p{L}\p{N} .:_+/-]{1,256}$/u.test(label)) {
+          const plain = command.name === "eqref" ? `(${label})` : label;
+          // textnormal is valid in both math and intertext's text parser.
+          output += tex.slice(cursor, index) + `\\textnormal{${plain.replaceAll("_", "\\_")}}`;
+          index = argument.end; cursor = index;
+          continue;
+        }
+      }
+    }
+    index = command.end;
+  }
+  return output + tex.slice(cursor);
+}
+
 type MathPreviewMacroSnapshot = Pick<
   MathPreviewSnapshot,
-  "macros" | "macroFingerprint" | "macroEnvironments"
+  "macros" | "macroFingerprint" | "macroEnvironments" | "referenceLabels"
 >;
 
 function macroEnvironmentForFormula(
@@ -1744,6 +1828,8 @@ function collectDocumentMacros(
   text: string,
   collectAllMacros: boolean,
   resolved: Record<string, MathPreviewMacro>,
+  visitCommand?: (offset: number, name: string, end: number) => void,
+  visitScope?: (event: "enter" | "exit") => void,
 ): DocumentMacroScan {
   const result: ParsedMacro[] = [];
   const environmentAliases = new Map<number, LatexEnvironmentAlias>();
@@ -1806,8 +1892,10 @@ function collectDocumentMacros(
     }
     if (character !== "\\") {
       if (character === "{") {
+        visitScope?.("enter");
         groupDepth += 1;
       } else if (character === "}") {
+        visitScope?.("exit");
         groupDepth = Math.max(0, groupDepth - 1);
         restoreAliasShadows();
       }
@@ -1817,11 +1905,13 @@ function collectDocumentMacros(
 
     const command = readControlSequence(text, index);
     if (command.name === "begingroup") {
+      visitScope?.("enter");
       groupDepth += 1;
       index = command.end;
       continue;
     }
     if (command.name === "endgroup") {
+      visitScope?.("exit");
       groupDepth = Math.max(0, groupDepth - 1);
       restoreAliasShadows();
       index = command.end;
@@ -1914,8 +2004,10 @@ function collectDocumentMacros(
           continue;
         }
         if (environmentCommand === "begin") {
+          visitScope?.("enter");
           environmentStack.push(name);
         } else if (environmentStack.at(-1) === name) {
+          visitScope?.("exit");
           environmentStack.pop();
           restoreAliasShadows();
         } else {
@@ -1929,6 +2021,7 @@ function collectDocumentMacros(
       }
     }
 
+    if (!environmentScopeUncertain) visitCommand?.(index, command.name, command.end);
     if (groupDepth === 0 && environmentStack.length === 0 && !environmentScopeUncertain) {
       recordLegacyMathFont(text, command.name, command.end, fontCommands, fontFamilies);
     }

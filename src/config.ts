@@ -6,6 +6,7 @@
  */
 
 import * as vscode from "vscode";
+import { normalizeVisualCompatibilityMode, type VisualCompatibilityMode } from "./core/localLatexPreview";
 import {
   DEFAULT_CITATION_COMMANDS,
   isAIWritingSourceUri,
@@ -26,6 +27,8 @@ export type AIWritingLanguage = "auto" | "english" | "chinese";
 export type AIWritingStyle = "academic" | "general" | "concise";
 
 export interface TeXLeafConfig {
+  readonly visualCompatibilityMode: VisualCompatibilityMode;
+  readonly visualGraphCacheLimitMB: number;
   readonly enabled: boolean;
   readonly autoSnippets: boolean;
   readonly manualTrigger: ManualTrigger;
@@ -110,6 +113,8 @@ export function readConfig(uri?: vscode.Uri): TeXLeafConfig {
 
   return {
     enabled: config.get<boolean>("enabled", true),
+    visualCompatibilityMode: normalizeVisualCompatibilityMode(config.get("visualEditor.compatibilityMode")),
+    visualGraphCacheLimitMB: clamp(readGlobalConfigurationValue(config, "visualEditor.graphCacheLimitMB", 128), 16, 2048),
     autoSnippets: config.get<boolean>("autoSnippets", true),
     manualTrigger: manual === "space" ? "space" : "tab",
     autoFraction: config.get<boolean>("autoFraction", true),

@@ -20,7 +20,7 @@ export interface VisualFrontMatterTarget {
 }
 
 /** Resolve only verified execution slices; paths and snapshots remain host-only. */
-export function resolveVisualFrontMatter(structure: VisualDocumentStructure, context: LatexProjectContext): {
+export function resolveVisualFrontMatter(structure: VisualDocumentStructure, context: LatexProjectContext, compatibilityMode: "basic" | "maximum" = "basic"): {
   readonly structure: VisualDocumentStructure;
   readonly targetsById: ReadonlyMap<string, VisualFrontMatterTarget>;
 } {
@@ -87,7 +87,7 @@ export function resolveVisualFrontMatter(structure: VisualDocumentStructure, con
     return segment === undefined ? undefined : { file: segment.file,
       from: segment.from + from - segment.offset, to: segment.from + to - segment.offset };
   };
-  const titles = scanVisualDocumentStructure(merged, { documentLanguage: context.rootLanguage }).records
+  const titles = scanVisualDocumentStructure(merged, { documentLanguage: context.rootLanguage, compatibilityMode }).records
     .filter(record => record.kind === "maketitle");
   const requested = context.requestedUri.toString();
   return { targetsById, structure: { ...structure, records: structure.records.map(record => {
@@ -111,6 +111,12 @@ export function resolveVisualFrontMatter(structure: VisualDocumentStructure, con
     });
     const metadataReplacements = (record.metadataReplacements ?? []).filter(range =>
       verifiedMetadata.some(target => target.from === range.sourceFrom && target.to === range.sourceTo));
+    const verifiedExtra = (title.frontMatter?.replacements ?? []).flatMap(range => {
+      const target = locate(range.sourceFrom, range.sourceTo);
+      return target?.file.uri.toString() === requested ? [target] : [];
+    });
+    const replacements = (record.frontMatter?.replacements ?? []).filter(range =>
+      verifiedExtra.some(target => target.from === range.sourceFrom && target.to === range.sourceTo));
     const mapRange = (value: { readonly from: number; readonly to: number }) => {
       const target = locate(value.from, value.to);
       if (target === undefined) return undefined;
@@ -155,13 +161,14 @@ export function resolveVisualFrontMatter(structure: VisualDocumentStructure, con
       // A remote abstract is shown at the local title trigger. Local body
       // sections must still belong to the locally verified fold range.
       if (!mapped.navigationId && mapped.from >= (files.get(requested)?.sourceScan.beginDocument?.start ?? 0) &&
-        (mapped.from < group.from || mapped.to > group.to)) return [];
+        (mapped.from < group.from || mapped.to > group.to) &&
+        !replacements.some(range => mapped.from >= range.from && mapped.to <= range.to)) return [];
       return [{ ...section, source: mapped }];
     }) ?? [];
     return { ...record, metadataReplacements, title: source(title.title), authors: list(title.authors), affiliations: list(title.affiliations),
       emails: list(title.emails), date: source(title.date),
       ...((record.frontMatter !== undefined || sections.length > 0) ? {
-        frontMatter: { replacement: group, sections },
+        frontMatter: { replacement: group, sections, ...(replacements.length === 0 ? {} : { replacements }) },
       } : {}) };
   }) } };
 }

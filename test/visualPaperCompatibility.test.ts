@@ -116,8 +116,9 @@ test("unresolved title macros retain a visible source fallback", () => {
 test("footnotes expose their content and nested references without raw wrapper syntax", () => {
   const source = String.raw`\begin{document}Text\footnote[2]{A note with $x$ and \cite{key}.}`;
   const records = scanVisualDocumentStructure(source).records;
-  const note = records.find(r => r.kind === "textStyle" && r.command === "footnote");
-  assert.ok(note?.kind === "textStyle");
+  const note = records.find(r => r.kind === "footnote");
+  assert.ok(note?.kind === "footnote");
+  assert.equal(note.number, "2");
   assert.equal(source.slice(note.contentFrom,note.contentTo), String.raw`A note with $x$ and \cite{key}.`);
   assert.ok(records.some(r => r.kind === "citation" && r.keys[0] === "key"));
 });

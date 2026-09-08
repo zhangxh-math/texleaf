@@ -5,6 +5,9 @@
  * See LICENSE and NOTICE in the project root.
  */
 
+import { createLocalLatexPreviewDocument, localLatexPreviewKind } from "./core/localLatexPreview";
+import { prepareLocalLatexPreviewFiles } from "./localLatexPreviewRenderer";
+import { loadVisualCompiledReferences, type VisualCompiledBuild } from "./visualCompiledReferences";
 import { NavigationHistoryLanes, type NavigationHistoryDirection } from "./core/navigationHistory";
 import { realpath, lstat } from "node:fs/promises";
 import { findVisualLabeledStructureForLabel, indexVisualStructureReferences, planVisualFormulaViewportLane, planVisualAutomaticSnippetInput, type VisualLabeledStructureTarget, type VisualTableRecord } from "./core";
@@ -20,6 +23,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { parse as parseJsonc, type ParseError } from "jsonc-parser";
 import {
+  collectLocalLatexPreviewSettings,
   createMathPreviewCursorRenderInput,
   createMathPreviewRenderInput,
   resolveLatexPreviewCapability,
@@ -43,6 +47,9 @@ import {
   replacementPartsToVirtualSnippet,
   resolveVisualBibliography,
   visualInlineReferenceRecords,
+  mapVisualRecordInlineSegments,
+  visualMathReferenceRecords,
+  resolveVisualReferenceLabels,
   resolveUnorderedMathPreviewPreambleMacros,
   scanLatexContext,
   scanMathPreviewDocument,
@@ -128,6 +135,7 @@ import {
   type VisualEditorSyntaxLineInput,
 } from "./visualEditorSyntaxTheme";
 import {
+  onDidCompleteLatexWorkshopBuild,
   prepareLatexWorkshopVisualEditor,
   prepareLatexWorkshopVisualSave,
   provideLatexWorkshopVisualCompletionItems,
@@ -366,12 +374,14 @@ const visualExtensionSnippetCache = new Map<
 >();
 
 interface VisualSnapshot {
+  readonly assetGeneration?: number;
+  readonly compatibilityMode?: "basic" | "maximum";
   readonly text: string;
   readonly version: number;
   readonly preview: MathPreviewSnapshot;
   readonly records: readonly VisualFormulaRecord[];
   readonly formulaById: ReadonlyMap<string, MathPreviewFormula>;
-  readonly structures: readonly VisualStructureRecord[];
+  structures: readonly VisualStructureRecord[];
   readonly projectContext: LatexProjectContext | undefined;
   readonly projectContextKey: string;
 }
@@ -412,6 +422,7 @@ function buildVisualSnapshot(
   mathPreviewScale: number,
   projectContext?: LatexProjectContext,
 ): VisualSnapshot {
+  preview = { ...preview, referenceLabels: new Map([...([...indexVisualStructureReferences(text, structures)].map(([key, value]) => [key, value.label] as const)), ...(preview.referenceLabels ?? [])]) };
   const collapsedRanges = visualCollapsedSourceRanges(structures);
   const records: VisualFormulaRecord[] = [];
   const formulaById = new Map<string, MathPreviewFormula>();
@@ -436,6 +447,10 @@ function buildVisualSnapshot(
           }
         : renderInput,
       mathPreviewScale,
+      renderInput !== undefined && localLatexPreviewKind(renderInput) !== undefined
+        ? createLocalLatexPreviewDocument({ ...renderInput, localSettings: collectLocalLatexPreviewSettings(
+            (projectContext?.preambleSource ?? "") + "\n" + text.slice(0, formula.outerRange.start)) })
+        : undefined,
     );
     const occurrence = formulaIdentityOccurrences.get(identity) ?? 0;
     formulaIdentityOccurrences.set(identity, occurrence + 1);
@@ -451,6 +466,8 @@ function buildVisualSnapshot(
         ? {}
         : { environmentName: formula.environmentName }),
       labels: visualFormulaLabels(text, formula),
+      references: visualMathReferenceRecords(text, formula.bodyRange.start, formula.bodyRange.end).map(reference => ({ ...reference,
+        resolvedLabels: Object.fromEntries(reference.keys.flatMap(key => preview.referenceLabels?.has(key) ? [[key, preview.referenceLabels.get(key)!]] : [])) })),
     });
     formulaById.set(id, formula);
   }
@@ -469,11 +486,15 @@ function buildVisualSnapshot(
 }
 
 interface VisualEditorSession {
+  localAssetFiles?: Set<string>;
+  localAssetController?: AbortController;
+  localFormulaWork?: Promise<void>;
   buildRootUri?: vscode.Uri;
   readonly document: vscode.TextDocument;
   readonly panel: vscode.WebviewPanel;
   readonly subscriptions: vscode.Disposable[];
   readonly renderedFormulaIds: Set<string>;
+  readonly pendingLocalFormulaIds: Set<string>;
   ready: boolean;
   disposed: boolean;
   acceptedRevision: number;
@@ -564,6 +585,7 @@ export class VisualEditorProvider
   private readonly disposables: vscode.Disposable[] = [];
   private readonly states = new Map<string, VisualDocumentState>();
   private readonly projectFileSnapshotCache = new Map<string, VisualSnapshot>();
+  private readonly latestBuildResults = new Map<string, VisualCompiledBuild>();
   /**
    * Navigation is provider-wide rather than panel-local so a jump from one
    * included TeX file to another can return to the physical source document.
@@ -608,6 +630,16 @@ export class VisualEditorProvider
   }
 
   public register(): void {
+    this.disposables.push(onDidCompleteLatexWorkshopBuild(result => {
+      const key = path.resolve(result.rootFile);
+      if ((this.latestBuildResults.get(key)?.startedAt ?? 0) > result.startedAt) return;
+      this.latestBuildResults.set(key, result);
+      this.projectFileSnapshotCache.clear();
+      for (const state of this.states.values()) {
+        if ([...state.sessions].some(session => session.snapshot?.projectContext?.rootUri?.scheme === "file" &&
+          path.resolve(session.snapshot.projectContext.rootUri.fsPath) === key)) this.scheduleDocumentSync(state, 0);
+      }
+    }));
     void this.synchronizeDefaultEditorAssociation();
     this.disposables.push(vscode.commands.registerCommand("texleaf.visualEditor.navigateForward", () => this.navigateForward(this.activeSession)));
     void vscode.commands.executeCommand(
@@ -794,6 +826,7 @@ export class VisualEditorProvider
           void this.synchronizeDefaultEditorAssociation();
         }
         if (texleafChanged) {
+          void this.renderer.setGraphCacheLimitMB(readConfig().visualGraphCacheLimitMB).catch(error => this.output.warn(errorMessage(error)));
           this.renderer.clear();
         }
         if (event.affectsConfiguration("texleaf.bibliographyFile")) {
@@ -803,6 +836,13 @@ export class VisualEditorProvider
           this.projectContexts.invalidateAll();
         }
         for (const state of this.states.values()) {
+          for (const session of state.sessions) {
+            if (event.affectsConfiguration("texleaf.visualEditor.compatibilityMode", session.document.uri)) {
+              session.localAssetController?.abort();
+              session.localAssetController = new AbortController();
+              session.renderedFormulaIds.clear();
+            }
+          }
           this.scheduleDocumentSync(state, 0);
         }
       }),
@@ -885,6 +925,7 @@ export class VisualEditorProvider
       panel,
       subscriptions: [],
       renderedFormulaIds: new Set<string>(),
+      pendingLocalFormulaIds: new Set<string>(),
       ready: false,
       disposed: false,
       acceptedRevision: 0,
@@ -1201,12 +1242,13 @@ export class VisualEditorProvider
     );
     const config = readConfig(session.document.uri);
     try {
-      const rendered = await this.renderer.renderInteractive({
+      const rendered = await this.renderer.renderInteractive(await this.prepareLocalPreviewInput(session, snapshot, {
+        compatibilityMode: config.visualCompatibilityMode,
         tex,
         display: false,
         macros: environment.macros,
         macroFingerprint: environment.macroFingerprint,
-      }, config.mathPreviewScale, visualTexBinPath(session.document.uri));
+      }, message.anchor), config.mathPreviewScale, visualTexBinPath(session.document.uri), { signal: session.localAssetController?.signal });
       if (
         session.disposed ||
         session.renderGeneration !== generation ||
@@ -2660,7 +2702,7 @@ export class VisualEditorProvider
     );
     if (message.kind === "frontMatter") {
       const target = message.key === undefined ? undefined
-        : resolveVisualFrontMatter(structure, projectContext).targetsById.get(message.key);
+        : resolveVisualFrontMatter(structure, projectContext, readConfig(session.document.uri).visualCompatibilityMode).targetsById.get(message.key);
       if (target === undefined || target.originFrom !== message.from || target.originTo !== message.to ||
         session.disposed || session.documentGeneration !== projectGeneration || state.pendingEdits !== 0 ||
         session.acceptedRevision !== message.revision || visualDocumentText(state.document) !== text) {
@@ -2777,7 +2819,7 @@ export class VisualEditorProvider
       }
       return;
     }
-    const record = visualInlineReferenceRecords(structure).find((candidate) =>
+    const record = [...visualInlineReferenceRecords(structure), ...visualMathReferenceRecords(text, message.from, message.to)].find((candidate) =>
       (candidate.kind === "reference" || candidate.kind === "citation") &&
       candidate.kind === message.kind &&
       candidate.from === message.from &&
@@ -3128,6 +3170,7 @@ export class VisualEditorProvider
       environment.macroFingerprint,
       config.mathPreviewMaxSourceLength,
       config.mathPreviewScale,
+      config.visualCompatibilityMode,
     ]);
     const cached = this.projectFileSnapshotCache.get(cacheKey);
     if (cached !== undefined) {
@@ -3144,7 +3187,7 @@ export class VisualEditorProvider
         fragmentKind: structureOptions.fragmentKind ?? "standalone",
         inheritedMacroEnvironment: environment,
       }),
-      scanVisualDocumentStructure(executableText, structureOptions).records,
+      resolveVisualTableOfContents(scanVisualDocumentStructure(executableText, structureOptions), { ...context, requestedUri: file.uri }).structure.records,
       config.mathPreviewScale,
       context,
     );
@@ -3464,6 +3507,34 @@ export class VisualEditorProvider
     }
   }
 
+  private async prepareLocalPreviewInput(session: VisualEditorSession, snapshot: VisualSnapshot,
+    input: MathPreviewRenderInput, offset: number): Promise<MathPreviewRenderInput> {
+    if (input.compatibilityMode !== "maximum" || (!input.localFigure && !this.renderer.usesLocalTeX(input))) return input;
+    if (!vscode.workspace.isTrusted) throw new Error("请信任工作区后再生成增强图形预览。");
+    const context = snapshot.projectContext;
+    const configured = { ...input, localSettings: collectLocalLatexPreviewSettings(
+      (context?.preambleSource ?? "") + "\n" + snapshot.text.slice(0, offset)) };
+    if (!/\\includegraphics\b/u.test(input.tex)) return configured;
+    const root = context?.rootUri ?? session.document.uri;
+    if (root.scheme !== "file") throw new Error("外部图形需要保存到本地项目后才能预览。");
+    const boundary = context?.workspaceUri ?? vscode.Uri.file(path.dirname(root.fsPath));
+    const prepared = await prepareLocalLatexPreviewFiles(vscode, configured, boundary,
+      [path.dirname(root.fsPath), path.dirname(session.document.uri.fsPath)]);
+    session.localAssetFiles ??= new Set();
+    for (const file of prepared.localFiles ?? []) {
+      if (file.sourcePath === undefined || session.localAssetFiles.has(file.sourcePath) || session.localAssetFiles.size >= 256) continue;
+      session.localAssetFiles.add(file.sourcePath);
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(path.dirname(file.sourcePath), path.basename(file.sourcePath)));
+      const refresh = (): void => {
+        if (session.disposed) return;
+        session.renderedFormulaIds.clear();
+        this.scheduleDocumentSync(this.stateFor(session.document), 0);
+      };
+      session.subscriptions.push(watcher, watcher.onDidChange(refresh), watcher.onDidCreate(refresh), watcher.onDidDelete(refresh));
+    }
+    return prepared;
+  }
+
   private async postDocument(
     session: VisualEditorSession,
     type: "initialize" | "document",
@@ -3471,6 +3542,8 @@ export class VisualEditorProvider
     if (!session.ready || session.disposed) {
       return;
     }
+    void this.renderer.setGraphCacheLimitMB(readConfig().visualGraphCacheLimitMB).catch(error => this.output.warn(errorMessage(error)));
+    session.localAssetController ??= new AbortController();
     const documentGeneration = ++session.documentGeneration;
     this.traceMathPreview("document:start", {
       generation: documentGeneration,
@@ -3519,7 +3592,7 @@ export class VisualEditorProvider
     );
     let structure = scanVisualDocumentStructure(executableText, structureOptions);
     structure = resolveVisualTableOfContents(structure, projectContext).structure;
-    structure = resolveVisualFrontMatter(structure, projectContext).structure;
+    structure = resolveVisualFrontMatter(structure, projectContext, readConfig(session.document.uri).visualCompatibilityMode).structure;
     this.traceMathPreview("document:structure", { generation: documentGeneration });
     const rootFile = projectContext.rootUri === undefined
       ? undefined
@@ -3620,11 +3693,17 @@ export class VisualEditorProvider
     ) {
       return;
     }
-    const preview = scanMathPreviewDocument(executableText, {
+    const compiledReferences = await loadVisualCompiledReferences(vscode, projectContext,
+      projectContext.rootUri?.scheme === "file" ? this.latestBuildResults.get(path.resolve(projectContext.rootUri.fsPath)) : undefined);
+    structure = resolveVisualReferenceLabels(structure, new Map([
+      ...[...indexVisualStructureReferences(text, structure.records)].map(([key, value]) => [key, value.label] as const),
+      ...compiledReferences,
+    ]));
+    const preview = { ...scanMathPreviewDocument(executableText, {
       maxSourceLength: config.mathPreviewMaxSourceLength,
       fragmentKind: structureOptions.fragmentKind ?? "standalone",
       inheritedMacroEnvironment: projectEnvironment,
-    });
+    }), referenceLabels: compiledReferences };
     this.traceMathPreview("document:formula-scan", { generation: documentGeneration });
     if (config.mathPreviewEnabled) {
       structure = await resolveVisualStructureMath(
@@ -3637,6 +3716,10 @@ export class VisualEditorProvider
           !session.disposed &&
           session.documentGeneration === documentGeneration &&
           session.document.version === version,
+        "structure",
+        config.visualCompatibilityMode,
+        session.localAssetController.signal,
+        false,
       );
     }
     this.traceMathPreview("document:structure-math", { generation: documentGeneration });
@@ -3648,23 +3731,15 @@ export class VisualEditorProvider
     ) {
       return;
     }
-    const snapshot = buildVisualSnapshot(
+    const snapshot = { ...buildVisualSnapshot(
       text,
       version,
       preview,
       structure.records,
       config.mathPreviewScale,
       projectContext,
-    );
+    ), assetGeneration: documentGeneration, compatibilityMode: config.visualCompatibilityMode };
     const records = snapshot.records;
-    session.snapshot = snapshot;
-    session.renderGeneration += 1;
-    const currentFormulaIds = new Set(records.map((record) => record.id));
-    for (const renderedId of session.renderedFormulaIds) {
-      if (!currentFormulaIds.has(renderedId)) {
-        session.renderedFormulaIds.delete(renderedId);
-      }
-    }
     const aiIssues = visualAiIssuesFor(this.aiWriting, session.document);
     const diagnostics = visualDiagnosticsFor(
       session.document,
@@ -3713,6 +3788,7 @@ export class VisualEditorProvider
         session.document.uri.scheme === "untitled",
       formulas: records,
       structures: structure.records,
+      assetGeneration: documentGeneration,
       ...(initializeSelection === undefined
         ? {}
         : { selection: initializeSelection }),
@@ -3728,6 +3804,7 @@ export class VisualEditorProvider
         synctexEnabled: session.document.uri.scheme === "file" && vscode.workspace.isTrusted,
       },
       inputFeatures: {
+        compatibilityMode: config.visualCompatibilityMode,
         enabled: config.enabled,
         manualTrigger: config.manualTrigger,
         matrixShortcuts: config.matrixShortcuts,
@@ -3764,7 +3841,41 @@ export class VisualEditorProvider
     ) {
       return;
     }
+    // Publish the snapshot and its generation together, after all asynchronous preparation.
+    if (session.snapshot?.compatibilityMode !== config.visualCompatibilityMode) session.renderedFormulaIds.clear();
+    session.snapshot = snapshot;
+    session.renderGeneration += 1;
+    for (const id of session.pendingLocalFormulaIds) session.renderedFormulaIds.delete(id);
+    session.pendingLocalFormulaIds.clear();
+    const currentFormulaIds = new Set(records.map((record) => record.id));
+    for (const renderedId of session.renderedFormulaIds) {
+      if (!currentFormulaIds.has(renderedId)) {
+        session.renderedFormulaIds.delete(renderedId);
+      }
+    }
     const delivered = await session.panel.webview.postMessage(message);
+    if (delivered && config.mathPreviewEnabled && config.visualCompatibilityMode === "maximum") {
+      const current = (): boolean => !session.disposed && session.documentGeneration === documentGeneration &&
+        session.snapshot === snapshot && session.document.version === version &&
+        readConfig(session.document.uri).visualCompatibilityMode === "maximum";
+      void resolveVisualStructureMath(this.renderer, structure, preview, config.mathPreviewScale,
+        visualTexBinPath(session.document.uri), current, "structure", config.visualCompatibilityMode,
+        session.localAssetController.signal, true,
+        (input, offset) => this.prepareLocalPreviewInput(session, snapshot, input, offset),
+        async record => {
+          if (!current()) return;
+          const key = localStructureAssetKey(record);
+          snapshot.structures = snapshot.structures.map(existing =>
+            (existing.kind === "tikzcd" || existing.kind === "tikzpicture" || existing.kind === "figure") && localStructureAssetKey(existing) === key ? record : existing);
+          await session.panel.webview.postMessage({ protocol: VISUAL_EDITOR_PROTOCOL, type: "structureAssets",
+            version, revision: message.revision, assetGeneration: documentGeneration, structures: [record] } satisfies VisualEditorHostMessage);
+        }).then(async resolved => {
+          if (!current()) return;
+          snapshot.structures = resolved.records;
+          await session.panel.webview.postMessage({ protocol: VISUAL_EDITOR_PROTOCOL, type: "structureAssets",
+            version, revision: message.revision, assetGeneration: documentGeneration, replaceAll: true, structures: resolved.records } satisfies VisualEditorHostMessage);
+        }).catch(error => this.output.warn(errorMessage(error)));
+    }
     if (
       delivered &&
       type === "initialize" &&
@@ -4083,9 +4194,46 @@ export class VisualEditorProvider
             skippedWithoutAsset = true;
             continue;
           }
+          if (this.renderer.usesLocalTeX(input)) {
+            // Reserve the ID immediately, then render on a separate sequential lane.
+            // A slow graph cannot hold the next ordinary viewport formula.
+            rememberRenderedFormulaId(session, record.id);
+            session.pendingLocalFormulaIds.add(record.id);
+            const assetGeneration = snapshot.assetGeneration;
+            const signal = session.localAssetController?.signal;
+            const current = (): boolean => !session.disposed && session.snapshot === snapshot &&
+              session.renderGeneration === generation && !signal?.aborted;
+            session.localFormulaWork = (session.localFormulaWork ?? Promise.resolve()).then(async () => {
+              if (!current()) return;
+              let result: Awaited<ReturnType<VisualEditorRenderer["render"]>> | undefined;
+              let failure: string | undefined;
+              try {
+                const prepared = await this.prepareLocalPreviewInput(session, snapshot,
+                  { ...input, compatibilityMode: config.visualCompatibilityMode }, record.from);
+                result = await this.renderer.render(prepared,
+                  config.mathPreviewScale, visualTexBinPath(session.document.uri), { signal });
+              } catch (error: unknown) { failure = errorMessage(error); }
+              if (!current()) return;
+              const delivered = await session.panel.webview.postMessage({
+                protocol: VISUAL_EDITOR_PROTOCOL, type: "renderBatch", version: snapshot.version,
+                ...(assetGeneration === undefined ? {} : { assetGeneration }),
+                results: result === undefined ? [] : [{ formulaId: record.id,
+                  formulaSource: snapshot.text.slice(record.from, record.to), svg: result.svg,
+                  widthEm: result.widthEm, heightEm: result.heightEm }],
+                errors: failure === undefined ? [] : [{ formulaId: record.id, message: failure }],
+              } satisfies VisualEditorHostMessage);
+              if (!current()) return;
+              session.pendingLocalFormulaIds.delete(record.id);
+              if (!delivered) session.renderedFormulaIds.delete(record.id);
+            }).catch(error => {
+              if (current()) { session.pendingLocalFormulaIds.delete(record.id); session.renderedFormulaIds.delete(record.id); }
+              if (!session.disposed) this.output.warn(errorMessage(error));
+            });
+            continue;
+          }
           try {
             const result = await this.renderer.render(
-              input,
+              { ...input, compatibilityMode: config.visualCompatibilityMode },
               config.mathPreviewScale,
               visualTexBinPath(session.document.uri),
             );
@@ -4300,11 +4448,11 @@ export class VisualEditorProvider
     // Re-scan only the current formula against its last known project macro
     // environment instead of rejecting changed ranges until an expensive
     // multi-file context rebuild completes.
-    const localPreview = scanMathPreviewDocument(message.formulaSource, {
+    const localPreview = { ...scanMathPreviewDocument(message.formulaSource, {
       fragmentKind: "body",
       maxSourceLength: config.mathPreviewMaxSourceLength,
       inheritedMacroEnvironment,
-    });
+    }), referenceLabels: snapshot.preview.referenceLabels ?? new Map<string, string>() };
     this.traceMathPreview("cursor:scanned", { requestId: message.requestId });
     const formula = localPreview.formulas.find((candidate) =>
       candidate.closed &&
@@ -4326,6 +4474,8 @@ export class VisualEditorProvider
       localPreview,
       formula.outerRange.start,
     );
+    const staticInput = createMathPreviewRenderInput(message.formulaSource, formula, localPreview);
+    if (staticInput !== undefined && this.renderer.usesLocalTeX(staticInput)) return;
     const markerIsShadowed = VISUAL_CURSOR_MARKER_COMMANDS.some((name) =>
       Object.hasOwn(cursorMacroEnvironment.macros, name)
     );
@@ -4352,7 +4502,7 @@ export class VisualEditorProvider
     }
     try {
       const result = await this.renderer.renderCursor(
-        input,
+        { ...input, compatibilityMode: config.visualCompatibilityMode },
         config.mathPreviewScale,
         appearance.cursor,
         visualTexBinPath(session.document.uri),
@@ -4438,11 +4588,11 @@ export class VisualEditorProvider
       snapshot.preview,
       canonicalFormula.outerRange.start,
     );
-    const localPreview = scanMathPreviewDocument(message.formulaSource, {
+    const localPreview = { ...scanMathPreviewDocument(message.formulaSource, {
       fragmentKind: "body",
       maxSourceLength: config.mathPreviewMaxSourceLength,
       inheritedMacroEnvironment,
-    });
+    }), referenceLabels: snapshot.preview.referenceLabels ?? new Map<string, string>() };
     const formula = localPreview.formulas.find((candidate) =>
       candidate.closed &&
       candidate.outerRange.start === 0 &&
@@ -4473,9 +4623,10 @@ export class VisualEditorProvider
     }
     try {
       const result = await this.renderer.renderCommittedFormula(
-        input,
+        await this.prepareLocalPreviewInput(session, snapshot, { ...input, compatibilityMode: config.visualCompatibilityMode }, message.formulaFrom),
         config.mathPreviewScale,
         visualTexBinPath(session.document.uri),
+        { signal: session.localAssetController?.signal },
       );
       if (
         session.disposed ||
@@ -4591,7 +4742,7 @@ export class VisualEditorProvider
     ) {
       return;
     }
-    const reference = visualInlineReferenceRecords({ records: snapshot.structures }).find(
+    const reference = [...visualInlineReferenceRecords({ records: snapshot.structures }), ...snapshot.records.flatMap(record => record.references ?? [])].find(
       (record): record is Extract<VisualStructureRecord, { readonly kind: "reference" }> =>
         record.kind === "reference" &&
         record.from === message.from &&
@@ -4738,9 +4889,10 @@ export class VisualEditorProvider
       }
       try {
         const result = await this.renderer.renderInteractive(
-          input,
+          await this.prepareLocalPreviewInput(session, snapshot, { ...input, compatibilityMode: config.visualCompatibilityMode }, formula!.outerRange.start),
           config.mathPreviewScale,
           visualTexBinPath(session.document.uri),
+          { signal: session.localAssetController?.signal },
         );
         return {
           key,
@@ -4786,9 +4938,10 @@ export class VisualEditorProvider
         }
         try {
           const result = await this.renderer.renderInteractive(
-            input,
+            await this.prepareLocalPreviewInput(session, snapshot, { ...input, compatibilityMode: config.visualCompatibilityMode }, record.from),
             config.mathPreviewScale,
             visualTexBinPath(session.document.uri),
+            { signal: session.localAssetController?.signal },
           );
           return {
             from: record.from - theoremRecord.bodyFrom,
@@ -4871,6 +5024,23 @@ export class VisualEditorProvider
   ): Promise<void> {
     this.activeSession = session;
     switch (command) {
+      case "visualBasic":
+      case "visualMaximum": {
+        const configuration = vscode.workspace.getConfiguration("texleaf", session.document.uri);
+        await configuration.update("visualEditor.compatibilityMode", command === "visualMaximum" ? "maximum" : "basic",
+          vscode.workspace.getWorkspaceFolder(session.document.uri) === undefined
+            ? vscode.ConfigurationTarget.Global : vscode.ConfigurationTarget.WorkspaceFolder);
+        return;
+      }
+      case "retryGraphPreviews":
+        this.renderer.retryGraphPreviews();
+        session.renderedFormulaIds.clear();
+        this.scheduleDocumentSync(this.stateFor(session.document), 0);
+        return;
+      case "clearGraphCache":
+        await this.renderer.clearGraphCache();
+        await this.postStatus(session, "info", "图形缓存已清理，下次显示时重新生成。论文和 PDF 未改动。");
+        return;
       case "save":
         await this.waitForDocumentEdits(session.document);
         await session.document.save();
@@ -6017,6 +6187,7 @@ export class VisualEditorProvider
     if (session.disposed) {
       return;
     }
+    session.localAssetController?.abort();
     session.disposed = true;
     for (const pending of this.visualFocusAcknowledgements.values()) {
       if (pending.session === session) {
@@ -6179,6 +6350,10 @@ export class VisualEditorProvider
     #ai-suggestion[data-kind="diagnostic"]:not([data-has-insight="true"]) #ai-suggestion-proposal,
     #ai-suggestion[data-kind="diagnostic"] #ai-suggestion-actions,
     #ai-suggestion[data-kind="diagnostic"] #ai-suggestion-note { display: none; }
+    .texleaf-footnote-marker { cursor: pointer; color: var(--vscode-textLink-foreground); font-size: .75em; padding: 0 1px; }
+    .texleaf-footnote-hover { position: fixed; z-index: 80; box-sizing: border-box; padding: 10px 12px; max-height: min(45vh, 320px); overflow: auto; border: 1px solid var(--vscode-editorHoverWidget-border); border-radius: 6px; background: var(--vscode-editorHoverWidget-background); color: var(--vscode-editorHoverWidget-foreground); box-shadow: 0 4px 14px var(--vscode-widget-shadow); font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size, 13px); line-height: 1.5; }
+    .texleaf-footnote-hover > button { display: block; margin-top: 8px; }
+    .texleaf-enhanced-visualization-hint { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px; color: var(--vscode-editorWarning-foreground, #cca700); border: 1px solid currentColor; border-radius: 4px; font-size: .85em; }
     #reference-hover { position: fixed; z-index: 85; display: none; box-sizing: border-box; width: min(460px, calc(100vw - 16px)); max-height: min(62vh, 420px); overflow: hidden; border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-editorWidget-border)); border-radius: 7px; color: var(--vscode-editorHoverWidget-foreground); background: var(--vscode-editorHoverWidget-background); box-shadow: 0 4px 14px var(--vscode-widget-shadow); font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size, 13px); line-height: 1.45; }
     #reference-hover.visible { display: block; }
     #reference-hover-content { max-height: min(62vh, 420px); overflow: auto; overscroll-behavior: contain; }
@@ -6248,6 +6423,7 @@ export class VisualEditorProvider
     <button id="build-menu-button" class="primary toolbar-menu-trigger" type="button" title="选择 LaTeX 编译方式" aria-haspopup="menu" aria-expanded="false" data-toolbar-menu="build-menu"><span aria-hidden="true">▶</span><span>编译</span></button>
     <button id="top-view-pdf" type="button" title="在 TeXLeaf 内置查看器中打开 PDF"><span aria-hidden="true">▣</span><span>PDF</span></button>
     <button id="top-open-source" class="toolbar-toggle" type="button" title="在当前标签页切换源码模式" aria-pressed="false"><span aria-hidden="true">⌨</span><span class="toolbar-button-label">源码</span></button>
+    <button id="visual-mode-button" class="toolbar-menu-trigger" type="button" aria-haspopup="menu" aria-expanded="false" data-toolbar-menu="visual-mode-menu">标准可视化</button>
     <button id="top-open-native-source" type="button" title="在 VS Code 原生编辑器中打开"><span aria-hidden="true">↗</span><span>原生</span></button>
     <button id="top-save-document" type="button" title="保存文档（Ctrl/Cmd+S）"><span aria-hidden="true">▣</span><span>保存</span></button>
     <button id="top-format-document" type="button" title="按 LaTeX 结构一键规范源码缩进（Shift+Alt/Option+F）" disabled><span aria-hidden="true">≡</span><span>排版</span></button>
@@ -6272,6 +6448,12 @@ export class VisualEditorProvider
     <button id="ai-menu-button" class="toolbar-menu-trigger" type="button" aria-haspopup="menu" aria-expanded="false" data-toolbar-menu="ai-menu">✧ AI</button>
     <span class="spacer"></span>
     <span id="status" role="status" aria-live="polite">正在载入…</span>
+  </div>
+  <div id="visual-mode-menu" class="toolbar-popup-menu" role="menu" aria-label="可视化模式" tabindex="-1" hidden>
+    <button id="visual-mode-basic" type="button" role="menuitemradio" aria-checked="true"><span class="toolbar-menu-label">标准可视化</span></button>
+    <button id="visual-mode-maximum" type="button" role="menuitemradio" aria-checked="false"><span class="toolbar-menu-label">增强可视化</span></button>
+    <div class="toolbar-menu-separator" role="separator"></div>
+    <button id="clear-graph-cache" type="button" role="menuitem"><span class="toolbar-menu-label">清理图形缓存</span></button>
   </div>
   <div id="build-menu" class="toolbar-popup-menu" role="menu" aria-label="选择编译方式" tabindex="-1" hidden>
     <button id="build-pdflatex" type="button" role="menuitem"><span class="toolbar-menu-icon">PDF</span><span class="toolbar-menu-label">使用 pdfLaTeX 编译</span></button>
@@ -6466,6 +6648,10 @@ private async createReferenceStructurePreview(
             visualTexBinPath(session.document.uri),
             () => !session.disposed,
             "interactive",
+            config.visualCompatibilityMode,
+            session.localAssetController?.signal,
+            true,
+            (input, offset) => this.prepareLocalPreviewInput(session, snapshot, input, offset),
           )
         : visualStructureDocument([bounded.record]);
       const record = resolved.records[0];
@@ -6500,7 +6686,7 @@ private async createReferenceStructurePreview(
     }
     if (
       target.targetKind === "diagram" &&
-      (target.record.kind === "tikzcd" || target.record.kind === "tikzpicture")
+      (target.record.kind === "tikzcd" || target.record.kind === "tikzpicture" || target.record.kind === "figure")
     ) {
       const resolved = config.mathPreviewEnabled &&
           previewContext === "hover" &&
@@ -6513,10 +6699,14 @@ private async createReferenceStructurePreview(
             visualTexBinPath(session.document.uri),
             () => !session.disposed,
             "interactive",
+            config.visualCompatibilityMode,
+            session.localAssetController?.signal,
+            true,
+            (input, offset) => this.prepareLocalPreviewInput(session, snapshot, input, offset),
           )
         : visualStructureDocument([target.record]);
       const record = resolved.records[0];
-      return record?.kind === "tikzcd" || record?.kind === "tikzpicture"
+      return record?.kind === "tikzcd" || record?.kind === "tikzpicture" || record?.kind === "figure"
         ? { kind: "diagram", key, record }
         : undefined;
     }
@@ -6680,9 +6870,11 @@ function visualProjectScanOptions(
   const role = file?.role ?? context.requestedRole;
   return {
     fragmentKind: role,
+    compatibilityMode: readConfig(uri).visualCompatibilityMode,
     documentLanguage: context.rootLanguage,
     numberingRootLevel: context.numberingRoot,
     numberingMode: role === "body" ? "unknown" : "local",
+    appendicesEnabled: scanVisualDocumentStructure(context.preambleSource, { fragmentKind: "preamble" }).appendicesEnabled ?? false,
   };
 }
 
@@ -6985,6 +7177,11 @@ async function resolveVisualStructureMath(
   texBinPath: string,
   shouldContinue: () => boolean = () => true,
   lane: "structure" | "interactive" = "structure",
+  compatibilityMode: "basic" | "maximum" = "basic",
+  signal?: AbortSignal,
+  includeLocal = true,
+  prepareInput?: (input: MathPreviewRenderInput, offset: number) => Promise<MathPreviewRenderInput>,
+  onLocalAsset?: (record: Extract<VisualStructureRecord, { kind: "tikzcd" | "tikzpicture" | "figure" }>) => Promise<void>,
 ): Promise<VisualDocumentStructure> {
   const fragments: Array<{
     readonly fragment: VisualMathFragment;
@@ -6997,6 +7194,13 @@ async function resolveVisualStructureMath(
     fragments.push({ fragment, sourceOffset });
   };
   const localAssets = new Map<string, NonNullable<VisualMathFragment["asset"]>>();
+  const localErrors = new Map<string, string>();
+  const graphStatus = (record: Extract<VisualStructureRecord, { kind: "tikzcd" | "tikzpicture" | "figure" }>) => {
+    const error = localErrors.get(localStructureAssetKey(record));
+    return compatibilityMode !== "maximum" ? { state: "modeRequired" as const, message: "此内容需要增强可视化。" }
+      : error === undefined ? { state: "pending" as const, message: "正在生成图形预览…" }
+      : { state: "error" as const, message: error };
+  };
   for (const record of structure.records) {
     if (record.kind === "maketitle") {
       for (const source of [record.title, ...record.authors, ...record.affiliations, ...record.emails, record.date, ...(record.frontMatter?.sections ?? []).map(section => section.source)]) {
@@ -7008,8 +7212,12 @@ async function resolveVisualStructureMath(
           if (segment.kind === "math") appendFragment(segment.math, segment.math.sourceFrom);
         }
       }
-    } else if (record.kind === "image" || record.kind === "theorem") {
-      for (const segment of (record.kind === "image" ? record.captionSegments : record.optionalTitleSegments) ?? []) {
+    } else if (record.kind === "footnote") {
+      for (const segment of record.source.segments ?? []) {
+        if (segment.kind === "math") appendFragment(segment.math, segment.math.sourceFrom);
+      }
+    } else if (record.kind === "image" || record.kind === "figure" || record.kind === "theorem") {
+      for (const segment of (record.kind !== "theorem" ? record.captionSegments : record.optionalTitleSegments) ?? []) {
         if (segment.kind === "math") appendFragment(segment.math, segment.math.sourceFrom);
       }
     } else if (record.kind === "table") {
@@ -7039,9 +7247,18 @@ async function resolveVisualStructureMath(
     }
   }
   const fragmentKeys = new Map<VisualMathFragment, string>();
+  for (const citation of visualInlineReferenceRecords(structure)) {
+    if (citation.kind !== "citation") continue;
+    for (const entry of citation.previews) {
+      for (const segment of entry.titleSegments ?? []) {
+        if (segment.kind === "math") appendFragment(segment.math, citation.from);
+      }
+    }
+  }
   const unique = new Map<string, {
     readonly tex: string;
     readonly environment: MathPreviewMacroEnvironment;
+    readonly sourceOffset: number;
   }>();
   for (const { fragment, sourceOffset } of fragments) {
     const tex = fragment.tex.trim();
@@ -7049,33 +7266,37 @@ async function resolveVisualStructureMath(
       continue;
     }
     const environment = mathPreviewMacroEnvironmentAtOffset(preview, sourceOffset);
-    const key = `${environment.macroFingerprint}\u0000${tex}`;
+    const scopedLocal = renderer.usesLocalTeX({ tex, display: false, macros: environment.macros,
+      macroFingerprint: environment.macroFingerprint });
+    // Equal source can use different scoped drawing settings. The local renderer
+    // shares work after preparing the effective document for each source position.
+    const key = `${environment.macroFingerprint}\u0000${tex}${scopedLocal ? `\u0000${sourceOffset}` : ""}`;
     fragmentKeys.set(fragment, key);
     if (
       !unique.has(key) &&
       unique.size < MAX_VISUAL_STRUCTURE_MATH_FRAGMENTS
     ) {
-      unique.set(key, { tex, environment });
+      unique.set(key, { tex, environment, sourceOffset });
     }
   }
   const assets = new Map<string, NonNullable<VisualMathFragment["asset"]>>();
+  const fragmentErrors = new Map<string, string>();
   const localRecords = structure.records.filter(
-    (record) => record.kind === "tikzcd" || record.kind === "tikzpicture",
+    (record): record is Extract<VisualStructureRecord, { kind: "tikzcd" | "tikzpicture" | "figure" }> => includeLocal && compatibilityMode === "maximum" && (record.kind === "tikzcd" || record.kind === "tikzpicture" || record.kind === "figure"),
   );
   const renderTasks: Array<() => Promise<void>> = [
     ...[...unique].map(([key, input]) => async () => {
       if (!shouldContinue()) {
         return;
       }
+      let renderInput: MathPreviewRenderInput = { tex: input.tex, display: false, macros: input.environment.macros,
+        macroFingerprint: input.environment.macroFingerprint, compatibilityMode };
+      if (renderer.usesLocalTeX(renderInput) && (!includeLocal || compatibilityMode !== "maximum")) return;
       try {
+        if (renderer.usesLocalTeX(renderInput) && prepareInput !== undefined) renderInput = await prepareInput(renderInput, input.sourceOffset);
         const rendered = await renderer[
           lane === "interactive" ? "renderInteractive" : "renderStructure"
-        ]({
-          tex: input.tex,
-          display: false,
-          macros: input.environment.macros,
-          macroFingerprint: input.environment.macroFingerprint,
-        }, scale, texBinPath);
+        ](renderInput, scale, texBinPath, { signal });
         if (!shouldContinue()) {
           return;
         }
@@ -7084,8 +7305,8 @@ async function resolveVisualStructureMath(
           widthEm: rendered.widthEm,
           heightEm: rendered.heightEm,
         });
-      } catch {
-        // Unsupported cell/node syntax keeps its bounded plain-text fallback.
+      } catch (error: unknown) {
+        fragmentErrors.set(key, (error instanceof Error ? error.message : String(error)).slice(0, 500));
       }
     }),
     ...localRecords.map((record) => async () => {
@@ -7097,24 +7318,25 @@ async function resolveVisualStructureMath(
           preview,
           record.replacement.sourceFrom,
         );
-        const rendered = await renderer[
-          lane === "interactive" ? "renderInteractive" : "renderStructure"
-        ]({
+        let input: MathPreviewRenderInput = {
           tex: record.tex,
+          compatibilityMode,
           display: true,
           macros: environment.macros,
           macroFingerprint: environment.macroFingerprint,
-        }, scale, texBinPath);
+          ...(record.kind === "figure" ? { localFigure: true } : {}),
+        };
+        if (prepareInput !== undefined) input = await prepareInput(input, record.replacement.sourceFrom);
+        const rendered = await renderer[lane === "interactive" ? "renderInteractive" : "renderStructure"](input, scale, texBinPath, { signal });
         if (!shouldContinue()) {
           return;
         }
-        localAssets.set(localStructureAssetKey(record), {
-          svg: rendered.svg,
-          widthEm: rendered.widthEm,
-          heightEm: rendered.heightEm,
-        });
-      } catch {
-        // tikzcd keeps its geometric fallback; tikzpicture keeps editable source.
+        const asset = { svg: rendered.svg, widthEm: rendered.widthEm, heightEm: rendered.heightEm };
+        localAssets.set(localStructureAssetKey(record), asset);
+        await onLocalAsset?.({ ...record, asset });
+      } catch (error: unknown) {
+        localErrors.set(localStructureAssetKey(record), (error instanceof Error ? error.message : String(error)).slice(0, 500));
+        if (shouldContinue()) await onLocalAsset?.({ ...record, previewStatus: graphStatus(record) });
       }
     }),
   ];
@@ -7129,9 +7351,27 @@ async function resolveVisualStructureMath(
     const asset = key === undefined ? undefined : assets.get(key);
     return asset === undefined ? fragment : { ...fragment, asset };
   };
+  const resolveCitationFragment = (fragment: VisualMathFragment): VisualMathFragment => {
+    const key = fragmentKeys.get(fragment);
+    const asset = key === undefined ? undefined : assets.get(key);
+    const { asset: previousAsset, previewStatus: previousStatus, ...source } = fragment;
+    if (asset !== undefined) return { ...source, asset };
+    const message = (key === undefined ? undefined : fragmentErrors.get(key)) ??
+      "当前模式或预览限制无法渲染此公式。";
+    return { ...source, previewStatus: { state: "error", message } };
+  };
+  const resolveCitation = (citation: Extract<VisualStructureRecord, { kind: "citation" }>): typeof citation => ({
+    ...citation, previews: citation.previews.map(entry => entry.titleSegments === undefined ? entry : {
+      ...entry, titleSegments: entry.titleSegments.map(segment => segment.kind === "math"
+        ? { ...segment, math: resolveCitationFragment(segment.math) } : segment),
+    }),
+  });
   return {
     ...structure,
-    records: structure.records.map((record) => {
+    records: structure.records.map((originalRecord) => {
+      const record = originalRecord.kind === "citation" ? resolveCitation(originalRecord)
+        : mapVisualRecordInlineSegments(originalRecord, segments => segments.map(segment => segment.kind === "citation"
+          ? { ...segment, citation: resolveCitation(segment.citation) } : segment));
       if (record.kind === "maketitle") {
         const source = (value: VisualSourceText | undefined): VisualSourceText | undefined => value?.segments === undefined ? value
           : { ...value, segments: value.segments.map(segment => segment.kind === "math" ? { ...segment, math: resolveFragment(segment.math) } : segment) };
@@ -7142,6 +7382,9 @@ async function resolveVisualStructureMath(
           } }),
         };
       }
+      if (record.kind === "footnote") return { ...record, source: { ...record.source,
+        segments: (record.source.segments ?? []).map(segment => segment.kind === "math"
+          ? { ...segment, math: resolveFragment(segment.math) } : segment) } };
       if (record.kind === "image") return { ...record, captionSegments: (record.captionSegments ?? []).map(segment =>
         segment.kind === "math" ? { ...segment, math: resolveFragment(segment.math) } : segment) };
       if (record.kind === "theorem") return { ...record, optionalTitleSegments: (record.optionalTitleSegments ?? []).map(segment =>
@@ -7184,11 +7427,13 @@ async function resolveVisualStructureMath(
           })),
         };
         const asset = localAssets.get(localStructureAssetKey(record));
-        return asset === undefined ? resolved : { ...resolved, asset };
+        return asset === undefined ? { ...resolved, previewStatus: graphStatus(record) } : { ...resolved, asset };
       }
-      if (record.kind === "tikzpicture") {
+      if (record.kind === "tikzpicture" || record.kind === "figure") {
         const asset = localAssets.get(localStructureAssetKey(record));
-        return asset === undefined ? record : { ...record, asset };
+        const resolved = record.kind === "figure" ? { ...record, captionSegments: record.captionSegments.map(segment =>
+          segment.kind === "math" ? { ...segment, math: resolveFragment(segment.math) } : segment) } : record;
+        return asset === undefined ? { ...resolved, previewStatus: graphStatus(record) } : { ...resolved, asset };
       }
       return record;
     }),
@@ -7196,7 +7441,7 @@ async function resolveVisualStructureMath(
 }
 
 function localStructureAssetKey(
-  record: Extract<VisualStructureRecord, { readonly kind: "tikzcd" | "tikzpicture" }>,
+  record: Extract<VisualStructureRecord, { readonly kind: "tikzcd" | "tikzpicture" | "figure" }>,
 ): string {
   return `${record.kind}:${record.replacement.sourceFrom}:${record.replacement.sourceTo}`;
 }
@@ -7309,13 +7554,15 @@ function visualCollapsedSourceRanges(
 ): readonly (readonly [number, number])[] {
   return records.flatMap((record): readonly (readonly [number, number])[] => {
     switch (record.kind) {
+      case "footnote":
       case "preamble":
         return [[record.from, record.to]];
       case "maketitle":
-        return [[record.replacement.from, record.replacement.to], ...(record.metadataReplacements ?? []).map(range => [range.from, range.to] as const)];
+        return [[record.replacement.from, record.replacement.to], ...(record.metadataReplacements ?? []).map(range => [range.from, range.to] as const), ...(record.frontMatter === undefined ? [] : [record.frontMatter.replacement, ...(record.frontMatter.replacements ?? [])].map(range => [range.from, range.to] as const))];
       case "tableOfContents":
       case "table":
       case "tikzcd":
+      case "figure":
       case "tikzpicture":
       case "image":
       case "bibliography":
@@ -9015,7 +9262,8 @@ function selectionForDocument(
 }
 
 function isWebviewCommand(value: unknown): value is VisualEditorWebviewCommand {
-  return value === "save" || value === "openSource" || value === "build" ||
+  return value === "visualBasic" || value === "visualMaximum" || value === "clearGraphCache" || value === "retryGraphPreviews" ||
+    value === "save" || value === "openSource" || value === "build" ||
     value === "buildPdfLaTex" || value === "buildXeLaTex" ||
     value === "buildLuaLaTex" || value === "buildBibTex" ||
     value === "buildBibLaTex" ||
@@ -9484,14 +9732,16 @@ function visualIsEscapedAt(text: string, offset: number): boolean {
 function visualFormulaIdentity(
   input: Pick<MathPreviewRenderInput, "tex" | "display" | "macroFingerprint">,
   scale: number,
+  localDocument?: string,
 ): string {
   return createHash("sha256")
     .update(JSON.stringify([
-      "texleaf-visual-formula-v1",
+      "texleaf-visual-formula-v2",
       input.tex,
       input.display,
       input.macroFingerprint,
       scale,
+      localDocument,
     ]))
     .digest("hex")
     .slice(0, 24);

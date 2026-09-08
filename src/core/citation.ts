@@ -99,6 +99,8 @@ export interface CitationReference {
 }
 
 export interface BibTeXEntry extends CitationReference {
+  /** Original title field, preserving TeX commands for visual previews. */
+  readonly titleLatex?: string;
   /** Lower-case BibTeX entry type, such as `article` or `inproceedings`. */
   readonly type: string;
   /** Alias retained for call sites where `type` is already used as a discriminator. */
@@ -840,8 +842,12 @@ export function bibTeXValueToText(value: string): string {
     .trim();
 }
 
-function parseBibFields(text: string, start: number, end: number): Readonly<Record<string, string>> {
+function parseBibFields(text: string, start: number, end: number): {
+  readonly fields: Readonly<Record<string, string>>;
+  readonly titleLatex: string | undefined;
+} {
   const fields: Record<string, string> = Object.create(null) as Record<string, string>;
+  let titleLatex: string | undefined;
   let index = start;
   while (index < end) {
     index = skipBibTrivia(text, index, end);
@@ -869,12 +875,13 @@ function parseBibFields(text: string, start: number, end: number): Readonly<Reco
 
     const parsed = parseBibValueExpression(text, index + 1, end);
     fields[fieldName] = bibTeXValueToText(parsed.value);
+    if (fieldName === 'title') titleLatex = parsed.value;
     index = parsed.end;
     if (text[index] !== ',') {
       index = findNextField(text, index, end);
     }
   }
-  return fields;
+  return { fields, titleLatex };
 }
 
 function yearFromFields(fields: Readonly<Record<string, string>>): string {
@@ -949,7 +956,7 @@ export function parseBibTeXEntries(text: string): readonly BibTeXEntry[] {
       continue;
     }
 
-    const fields = parseBibFields(text, keyEnd + 1, close);
+    const { fields, titleLatex } = parseBibFields(text, keyEnd + 1, close);
     const authors = fields['author'] ?? '';
     const journal = fields['journal'] ?? fields['journaltitle'] ?? '';
     const container = journal || fields['booktitle'] || fields['publisher'] || '';
@@ -958,6 +965,7 @@ export function parseBibTeXEntries(text: string): readonly BibTeXEntry[] {
       entryType,
       key,
       title: fields['title'] ?? '',
+      ...(titleLatex === undefined ? {} : { titleLatex }),
       authors,
       author: authors,
       journal,

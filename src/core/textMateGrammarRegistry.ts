@@ -17,13 +17,20 @@ export function withLiteralColumnDefinitions(grammar: IRawGrammar): IRawGrammar 
   return {
     ...grammar,
     patterns: [{
-      // Column bodies are declarations: their dollars do not enter math mode.
-      // ponytail: the header stays on one line; add argument stages for split headers.
-      begin: "(\\\\newcolumntype)\\s*\\{[^{}]+\\}(?:\\s*\\[[0-9]+\\])?\\s*\\{",
+      // TextMate matches one line at a time: keep the command, name, optional
+      // arity and body in separate states so newlines/comments stay inert.
+      begin: "(\\\\newcolumntype)(?![A-Za-z@])",
       beginCaptures: { 1: { name: "storage.type.function.latex" } },
-      end: "\\}",
+      // The \G guard prevents ending immediately after the name argument.
+      end: "(?<=\\})(?!\\G)",
       name: "meta.column-definition.latex",
-      patterns,
+      patterns: [
+        patterns[0]!,
+        {
+          begin: "\\{[^{}]+\\}", end: "(?<=\\})(?!\\G)",
+          patterns: [patterns[0]!, { match: "\\[[0-9]+\\]" }, { include: `#${group}` }],
+        },
+      ],
     }, ...grammar.patterns],
     repository: Object.assign({}, grammar.repository, { [group]: { begin: "\\{", end: "\\}", patterns } }),
   };

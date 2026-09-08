@@ -5,7 +5,8 @@
  * See LICENSE and NOTICE in the project root.
  */
 
-import * as vscode from "vscode";
+import type * as vscode from "vscode";
+import path from "node:path";
 import {
   prepareVisualFormulaAsset,
   toMathJaxMacroOptions,
@@ -14,7 +15,7 @@ import {
 } from "./core";
 import { MathPreviewWorkerClient } from "./mathPreviewWorkerClient";
 import type { MathPreviewWorkerSuccess } from "./mathPreviewProtocol";
-import { LocalLatexPreviewRenderer } from "./localLatexPreviewRenderer";
+import { LocalLatexPreviewRenderer, type LocalPreviewRenderOptions } from "./localLatexPreviewRenderer";
 
 const COMPLETED_RENDER_CACHE_ITEMS = 512;
 const COMPLETED_RENDER_CACHE_BYTES = 48 * 1024 * 1024;
@@ -88,12 +89,13 @@ class CompletedRenderCache {
  * The Webview still receives only sanitized SVG output.
  */
 export class VisualEditorRenderer implements vscode.Disposable {
+  public retryGraphPreviews(): void { this.local.retryFailures(); }
+  public clearGraphCache(): Promise<void> { return this.local.clearCache(); }
+  public setGraphCacheLimitMB(limit: number): Promise<void> { return this.local.setCacheLimitMB(limit); }
   private readonly worker: MathPreviewWorkerClient;
   private readonly cursorWorker: MathPreviewWorkerClient;
   private readonly interactiveWorker: MathPreviewWorkerClient;
-  private readonly local = new LocalLatexPreviewRenderer();
-  private readonly cursorLocal = new LocalLatexPreviewRenderer();
-  private readonly interactiveLocal = new LocalLatexPreviewRenderer();
+  private readonly local: LocalLatexPreviewRenderer;
   /** Static, structure, and interactive lanes share only completed assets. */
   private readonly completedCache = new CompletedRenderCache(
     COMPLETED_RENDER_CACHE_ITEMS,
@@ -112,6 +114,10 @@ export class VisualEditorRenderer implements vscode.Disposable {
 
   public constructor(context: vscode.ExtensionContext) {
     const workerPath = context.asAbsolutePath("dist/mathPreviewWorker.js");
+    this.local = new LocalLatexPreviewRenderer({
+      cacheDirectory: context.globalStorageUri?.scheme === "file"
+        ? path.join(context.globalStorageUri.fsPath, "visual-tex-cache") : undefined,
+    });
     // Macro environments are comparatively numerous in document rendering but
     // tiny in the cursor lane. Per-lane bounds avoid retaining 36 heavyweight
     // MathJax documents across three workers and reduce long-session GC pauses.
@@ -137,8 +143,9 @@ export class VisualEditorRenderer implements vscode.Disposable {
     input: MathPreviewRenderInput,
     scale: number,
     texBinPath?: string,
+    options: LocalPreviewRenderOptions = {},
   ): Promise<MathPreviewWorkerSuccess> {
-    return this.renderInternal("static", input, scale, this.worker, this.local, texBinPath);
+    return this.renderInternal("static", input, scale, this.worker, this.local, texBinPath, undefined, false, options);
   }
 
   /** Low-priority document-structure asset, isolated from viewport cache keys. */
@@ -146,6 +153,7 @@ export class VisualEditorRenderer implements vscode.Disposable {
     input: MathPreviewRenderInput,
     scale: number,
     texBinPath?: string,
+    options: LocalPreviewRenderOptions = {},
   ): Promise<MathPreviewWorkerSuccess> {
     return this.renderInternal(
       "structure",
@@ -153,7 +161,7 @@ export class VisualEditorRenderer implements vscode.Disposable {
       scale,
       this.worker,
       this.local,
-      texBinPath,
+      texBinPath, undefined, false, options,
     );
   }
 
@@ -163,16 +171,18 @@ export class VisualEditorRenderer implements vscode.Disposable {
     scale: number,
     cursorMarkerColor: string,
     texBinPath?: string,
+    options: LocalPreviewRenderOptions = {},
   ): Promise<MathPreviewWorkerSuccess> {
     return this.cursorReady.then(() => this.renderInternal(
       "cursor",
       input,
       scale,
       this.cursorWorker,
-      this.cursorLocal,
+      this.local,
       texBinPath,
       cursorMarkerColor,
       false,
+      options,
     ));
   }
 
@@ -187,14 +197,15 @@ export class VisualEditorRenderer implements vscode.Disposable {
     input: MathPreviewRenderInput,
     scale: number,
     texBinPath?: string,
+    options: LocalPreviewRenderOptions = {},
   ): Promise<MathPreviewWorkerSuccess> {
     return this.renderInternal(
       "interactive",
       input,
       scale,
       this.interactiveWorker,
-      this.interactiveLocal,
-      texBinPath,
+      this.local,
+      texBinPath, undefined, false, options,
     );
   }
 
@@ -206,14 +217,15 @@ export class VisualEditorRenderer implements vscode.Disposable {
     input: MathPreviewRenderInput,
     scale: number,
     texBinPath?: string,
+    options: LocalPreviewRenderOptions = {},
   ): Promise<MathPreviewWorkerSuccess> {
     return this.renderInternal(
       "interactive",
       input,
       scale,
       this.interactiveWorker,
-      this.interactiveLocal,
-      texBinPath,
+      this.local,
+      texBinPath, undefined, false, options,
     );
   }
 
@@ -226,19 +238,26 @@ export class VisualEditorRenderer implements vscode.Disposable {
     texBinPath?: string,
     cursorMarkerColor?: string,
     latestOnly = false,
+    localOptions: LocalPreviewRenderOptions = {},
   ): Promise<MathPreviewWorkerSuccess> {
     if (this.disposed) {
       return Promise.reject(new Error("Visual editor renderer is disposed."));
     }
     const usesLocalRenderer = local.supports(input);
+    if (usesLocalRenderer) {
+      return local.render(input, scale, cursorMarkerColor, texBinPath, {
+        priority: lane === "interactive" || lane === "cursor",
+        ...localOptions,
+      }).then(result => ({ ...result, ...prepareVisualFormulaAsset(result, { display: input.display }) }));
+    }
     const key = JSON.stringify([
       "texleaf-visual-editor-v4",
-      usesLocalRenderer ? "local" : "mathjax",
+      "mathjax",
       input.tex,
       input.display,
       input.macroFingerprint,
       scale,
-      usesLocalRenderer ? texBinPath : undefined,
+      undefined,
       cursorMarkerColor,
     ]);
     const completed = lane === "cursor" ? this.cursorCache : this.completedCache;
@@ -257,9 +276,7 @@ export class VisualEditorRenderer implements vscode.Disposable {
     }
 
     const epoch = this.cacheEpoch;
-    const rendered = usesLocalRenderer
-      ? local.render(input, scale, cursorMarkerColor, texBinPath)
-      : worker[latestOnly ? "renderLatest" : "render"]({
+    const rendered = worker[latestOnly ? "renderLatest" : "render"]({
           tex: input.tex,
           display: input.display,
           macros: toMathJaxMacroOptions(input.macros),
@@ -293,6 +310,10 @@ export class VisualEditorRenderer implements vscode.Disposable {
     return request;
   }
 
+  public usesLocalTeX(input: MathPreviewRenderInput): boolean {
+    return this.local.supports(input);
+  }
+
   public clear(): void {
     this.cacheEpoch += 1;
     this.completedCache.clear();
@@ -310,8 +331,6 @@ export class VisualEditorRenderer implements vscode.Disposable {
     this.cursorWorker.dispose();
     this.interactiveWorker.dispose();
     this.local.dispose();
-    this.cursorLocal.dispose();
-    this.interactiveLocal.dispose();
   }
 
 }

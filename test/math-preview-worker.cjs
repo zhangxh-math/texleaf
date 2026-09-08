@@ -244,6 +244,7 @@ function render(overrides) {
     for (const tex of [
       String.raw`\bra{x}\ket{y}+\braket{x|y}+\bm{v}+\dag+\slash`,
       String.raw`\begin{align}x&=y\\\intertext{Using $x=y$, the next step is}z&=w\end{align}`,
+      String.raw`\begin{align*}a&=b\\\intertext{Using $[Q,X]=0$, Lemma \textnormal{2.3}, and \textnormal{(eq:unknown)}.}c&=d\end{align*}`,
       String.raw`\tensor{f}{^a_{bc}}`,
       String.raw`\tensor[_{ab}^c]{R}{^i_j^k_l}`,
       String.raw`\scalebox{0.7}{$-$}1`,

@@ -8,6 +8,7 @@
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import type { VisualCompiledBuild } from "./visualCompiledReferences";
 import {
   VISUAL_EDITOR_REVEAL_OPEN_RANGE_COMMAND,
   VISUAL_EDITOR_REVEAL_RANGE_COMMAND,
@@ -38,6 +39,8 @@ interface LatexWorkshopState {
   file: {
     getLangId(filePath: string): string | undefined;
     getPdfPath(filePath: string): string;
+    getAuxDir?(filePath: string): string;
+    getJobname?(filePath: string): string;
     toUri(filePath: string): vscode.Uri;
   };
   compile: {
@@ -150,6 +153,8 @@ interface LatexWorkshopModule<T> {
 }
 
 const runtimeCache = new Map<string, Promise<LatexWorkshopRuntime>>();
+const completedBuild = new vscode.EventEmitter<VisualCompiledBuild>();
+export const onDidCompleteLatexWorkshopBuild = completedBuild.event;
 const visualPdfUris = new Set<string>();
 const patchedSyncTeXStates = new WeakSet<object>();
 const LATEX_WORKSHOP_PDF_VIEW_TYPE = "latex-workshop-pdf-hook";
@@ -416,7 +421,7 @@ async function runBuild(
         rootFile,
       );
       if (external !== undefined && external !== null) {
-        return runtime.Plan.create(external);
+        return observeBuildPlan(runtime, runtime.Plan.create(external));
       }
     }
     const recipe = engine === undefined
@@ -428,7 +433,7 @@ async function runBuild(
       : explicitEngineRecipe(document.uri, rootFile, engine);
     return recipe === undefined || recipe === null
       ? undefined
-      : runtime.Plan.create(recipe);
+      : observeBuildPlan(runtime, runtime.Plan.create(recipe));
   };
 
   let operation: Promise<void>;
@@ -438,6 +443,88 @@ async function runBuild(
     executor.preparePlan = originalPreparePlan;
   }
   await operation;
+}
+
+interface ObservedBuildPlan {
+  readonly rootFile: string;
+  readonly isExternal: boolean;
+  readonly steps: readonly { readonly command: string; readonly cwd: string; readonly args: readonly string[] }[];
+  run(): Promise<unknown>;
+}
+
+/** Observe only our own Plan instance: executor.run may return while it is still queued. */
+function observeBuildPlan(runtime: LatexWorkshopRuntime, value: unknown): unknown {
+  if (value === null || typeof value !== "object" || typeof (value as ObservedBuildPlan).run !== "function") return value;
+  const plan = value as ObservedBuildPlan;
+  const run = plan.run;
+  plan.run = async function () {
+    const evidence = compiledPlanEvidence(runtime, plan);
+    const startedAt = Date.now();
+    const result = await run.call(this);
+    if (evidence !== undefined && result !== null && typeof result === "object" &&
+        (result as { status?: unknown }).status === "succeeded") {
+      completedBuild.fire({ ...evidence, status: "success", startedAt, finishedAt: Date.now() });
+    }
+    return result;
+  };
+  return value;
+}
+
+function compiledPlanEvidence(
+  runtime: LatexWorkshopRuntime,
+  plan: ObservedBuildPlan,
+): Pick<VisualCompiledBuild, "rootFile" | "tool" | "artifacts"> | undefined {
+  try {
+    const file = runtime.lw.file;
+    if (plan.isExternal !== false || typeof plan.rootFile !== "string" || !path.isAbsolute(plan.rootFile) ||
+        !Array.isArray(plan.steps) || plan.steps.length === 0 ||
+        typeof file.getAuxDir !== "function" || typeof file.getJobname !== "function") return undefined;
+    const rootFile = plan.rootFile;
+    const configuredAux = path.resolve(path.dirname(rootFile), file.getAuxDir(rootFile),
+      path.basename(file.getJobname(rootFile)) + ".aux");
+    let tool: VisualCompiledBuild["tool"] | undefined;
+    for (const step of plan.steps) {
+      tool = undefined;
+      if (typeof step.command !== "string") return undefined;
+      const command = path.basename(step.command).replace(/\.exe$/iu, "");
+      if (command === "bibtex" || command === "biber") continue;
+      if (command !== "latexmk" && command !== "pdflatex" && command !== "xelatex" && command !== "lualatex") return undefined;
+      if (typeof step.cwd !== "string" || !path.isAbsolute(step.cwd) || !Array.isArray(step.args)) return undefined;
+      // ponytail: custom recipes/config scripts have unbounded output rules; keep unknown until a public artifact API exists.
+      if (command === "latexmk" && !step.args.includes("-norc")) return undefined;
+      let outDir = step.cwd;
+      let auxDir: string | undefined;
+      let jobname = path.parse(rootFile).name;
+      let input: string | undefined;
+      const options = new Set<string>();
+      for (const arg of step.args) {
+        if (typeof arg !== "string" || /[\x00-\x1f]/u.test(arg)) return undefined;
+        const output = /^--?(out(?:put-directory|dir|-directory)|aux(?:dir|-directory)|jobname)=(.+)$/u.exec(arg);
+        if (output !== null) {
+          const option = output[1]!.startsWith("out") ? "out" : output[1]!.startsWith("aux") ? "aux" : "job";
+          if (options.has(option)) return undefined;
+          options.add(option);
+          if (option === "job") {
+            if (!/^[A-Za-z0-9_.-]+$/u.test(output[2]!)) return undefined;
+            jobname = output[2]!;
+          } else if (option === "out") outDir = path.resolve(step.cwd, output[2]!);
+          else auxDir = path.resolve(step.cwd, output[2]!);
+        } else if (/^-(?:norc|pdf|xelatex|lualatex|pdflua|pdfxe|file-line-error|halt-on-error|recorder|shell-escape|no-shell-escape|synctex=[01]|interaction=(?:batchmode|nonstopmode|scrollmode|errorstopmode))$/u.test(arg)) {
+          continue;
+        } else if (!arg.startsWith("-") && input === undefined &&
+            [arg, arg + ".tex"].some(candidate =>
+              comparableModulePath(path.resolve(step.cwd, candidate)) === comparableModulePath(rootFile))) input = arg;
+        else return undefined;
+      }
+      const auxFile = path.resolve(auxDir ?? outDir, jobname + ".aux");
+      if (input === undefined || comparableModulePath(auxFile) !== comparableModulePath(configuredAux)) return undefined;
+      tool = command;
+    }
+    return tool === undefined ? undefined : { rootFile, tool, artifacts: { auxFile: configuredAux } };
+  } catch {
+    // Unsupported Workshop runtime shapes must not change the existing build behavior.
+    return undefined;
+  }
 }
 
 function explicitEngineRecipe(

@@ -5,12 +5,14 @@
  * See LICENSE and NOTICE in the project root.
  */
 
+import { parseHomeProjectTitle } from "./homeProjectTitle";
 import type { BibTeXEntry } from "./citation";
 import { findLatexOpaqueEnvironmentEnd } from "./latexScanner";
 import { scanMathPreviewDocument } from "./mathPreview";
 import type { VisualFormulaAsset } from "./visualFormula";
 
 const MAX_VISUAL_STRUCTURE_RECORDS = 4_000;
+const MAX_VISUAL_HEADING_COUNTER = 1_000_000;
 const MAX_BIBLIOGRAPHY_PREVIEW_ENTRIES = 120;
 
 export interface VisualSourceText {
@@ -55,6 +57,8 @@ export interface VisualMakeTitleRecord {
   readonly date: VisualSourceText | undefined;
   readonly frontMatter?: {
     readonly replacement: VisualReplacementRange;
+    /** Other verified fields; intervening source remains visible. */
+    readonly replacements?: readonly VisualReplacementRange[];
     readonly sections: readonly VisualFrontMatterSection[];
   };
 }
@@ -146,6 +150,7 @@ export type VisualDocumentLanguage = "en" | "zh";
 export type VisualDocumentFragmentKind = "standalone" | "body" | "preamble";
 
 export interface VisualDocumentStructureScanOptions {
+  readonly compatibilityMode?: "basic" | "maximum";
   readonly fragmentKind?: VisualDocumentFragmentKind;
   readonly documentLanguage?: VisualDocumentLanguage;
   readonly numberingRootLevel?: VisualHeadingLevel;
@@ -156,6 +161,8 @@ export interface VisualDocumentStructureScanOptions {
    * fresh chapter/theorem sequence for every physical file.
    */
   readonly numberingMode?: "local" | "unknown";
+  /** Appendix package state inherited by an included body fragment. */
+  readonly appendicesEnabled?: boolean;
 }
 
 export interface VisualLabelRecord {
@@ -272,6 +279,7 @@ export interface VisualCitationRecord {
 }
 
 export interface VisualReferenceRecord {
+  readonly resolvedLabels?: Readonly<Record<string, string>>;
   readonly kind: "reference";
   readonly from: number;
   readonly to: number;
@@ -287,6 +295,7 @@ export interface VisualMathFragment {
   readonly sourceFrom: number;
   readonly sourceTo: number;
   readonly asset?: VisualFormulaAsset;
+  readonly previewStatus?: VisualLocalPreviewStatus;
 }
 
 export type VisualInlineContentSegment =
@@ -385,6 +394,22 @@ export interface VisualTikzcdRecord {
   readonly truncated: boolean;
   /** Exact local-TeX rendering; the geometric editor model remains available. */
   readonly asset?: VisualFormulaAsset;
+  readonly previewStatus?: VisualLocalPreviewStatus;
+}
+
+export type VisualLocalPreviewStatus = { readonly state: "modeRequired" | "pending" | "error"; readonly message: string };
+
+export interface VisualFigureRecord {
+  readonly kind: "figure";
+  readonly replacement: VisualReplacementRange;
+  readonly bodyFrom: number;
+  readonly bodyTo: number;
+  readonly tex: string;
+  readonly caption: string | undefined;
+  readonly captionSegments: readonly VisualInlineContentSegment[];
+  readonly label: VisualLabelRecord | undefined;
+  readonly asset?: VisualFormulaAsset;
+  readonly previewStatus?: VisualLocalPreviewStatus;
 }
 
 export interface VisualTikzpictureRecord {
@@ -395,6 +420,7 @@ export interface VisualTikzpictureRecord {
   /** Exact environment source submitted to the restricted local renderer. */
   readonly tex: string;
   readonly asset?: VisualFormulaAsset;
+  readonly previewStatus?: VisualLocalPreviewStatus;
 }
 
 export interface VisualImageRecord {
@@ -422,6 +448,8 @@ export interface VisualBibliographyEntry {
 /** The same bibliography fields shown by native/visual citation completion. */
 export interface VisualCitationPreview extends VisualBibliographyEntry {
   readonly source: string;
+  /** Display-only title fragments use the citation's range for macro scope. */
+  readonly titleSegments?: readonly VisualInlineContentSegment[];
 }
 
 export type VisualBibliographySettingKind =
@@ -469,6 +497,17 @@ export interface VisualDocumentEndRecord {
   readonly kind: "documentEnd";
   readonly language: VisualDocumentLanguage;
   readonly replacement: VisualReplacementRange;
+}
+
+export interface VisualFootnoteRecord {
+  readonly kind: "footnote";
+  readonly from: number;
+  readonly to: number;
+  readonly contentFrom: number;
+  readonly contentTo: number;
+  readonly number: string | undefined;
+  /** Exact editable body with the same rich inline segments as captions. */
+  readonly source: VisualSourceText;
 }
 
 export interface VisualTextStyleRecord {
@@ -522,18 +561,40 @@ export type VisualStructureRecord =
   | VisualTableRecord
   | VisualTikzcdRecord
   | VisualTikzpictureRecord
+  | VisualFigureRecord
   | VisualImageRecord
   | VisualCitationRecord
   | VisualBibliographyRecord
   | VisualTextStyleRecord
+  | VisualFootnoteRecord
   | VisualAccentRecord
   | VisualDocumentEndRecord
   | VisualCommentRecord;
+
+export interface VisualAppendixTransition {
+  readonly from: number;
+  readonly kind: "appendix" | "enter" | "exit";
+}
+
+export interface VisualHeadingCounterMutation {
+  readonly from: number;
+  readonly to: number;
+  readonly kind: "set" | "add" | "step";
+  readonly counter: VisualHeadingLevel;
+  readonly value: number;
+}
+
+export type VisualHeadingNumberingTransition = VisualAppendixTransition | VisualHeadingCounterMutation;
 
 export interface VisualDocumentStructure {
   readonly records: readonly VisualStructureRecord[];
   /** Executable standard appendix switches, replayed in project include order. */
   readonly appendixOffsets?: readonly number[];
+  readonly appendixTransitions?: readonly VisualAppendixTransition[];
+  /** Literal executable assignments, including preamble assignments, in source order. */
+  readonly headingCounterMutations?: readonly VisualHeadingCounterMutation[];
+  readonly headingCountersAmbiguous?: boolean;
+  readonly appendicesEnabled?: boolean;
   readonly bibliographyPaths: readonly string[];
   /** True when an executable bibliography resource command was parsed, even if its path is unsafe. */
   readonly hasBibliographyDeclaration: boolean;
@@ -554,6 +615,8 @@ interface ParsedArgument {
 }
 
 interface TheoremDefinition {
+  readonly requiredHeading?: boolean;
+  readonly staticBox?: boolean;
   readonly optionalHeading?: boolean;
   readonly label: string;
   readonly style: VisualTheoremStyle;
@@ -846,7 +909,12 @@ export function scanVisualDocumentStructure(
   const headingCounters = new Map<VisualHeadingLevel, number>();
   const headingNumbers = new Map<string, string>();
   const appendixOffsets: number[] = [];
-  let appendix = false;
+  const appendixTransitions: VisualAppendixTransition[] = [];
+  const headingCounterMutations: VisualHeadingCounterMutation[] = [];
+  let headingCountersAmbiguous = false;
+  let appendixState: VisualAppendixState = { active: false, appendixCounter: 0 };
+  let appendicesEnabled = options.appendicesEnabled ?? false;
+  let footnoteCounter = 0;
   const theoremCounters = new Map<string, VisualTheoremCounterState>();
   const stack: OpenEnvironment[] = [];
   let theoremStyle: VisualTheoremStyle = "plain";
@@ -858,6 +926,8 @@ export function scanVisualDocumentStructure(
   let date: VisualSourceText | undefined;
   const titleMacros = new Map<string, ParsedArgument>();
   const redefinedCommands = new Set<string>();
+  const literalTextCommands = new Set<string>();
+  const staticBoxCommands = new Map<string, {environment: string; label?: string | undefined}>();
   const frontMatterCommands: VisualReplacementRange[] = [];
   const preambleSections: VisualFrontMatterSection[] = [];
   let authblk = false;
@@ -880,6 +950,16 @@ export function scanVisualDocumentStructure(
   // non-visual fallback branch. Keep scanning the visible branch so nested
   // accents/references remain interactive, then jump over the hidden branch.
   const scanJumps = new Map<number, number>();
+
+  const preserveTheoremCountersAfterAppendices = (): void => {
+    // setcounter in appendix.sty does not step/reset descendant theorem counters.
+    for (const [environment, definition] of theoremDefinitions) {
+      const state = theoremCounters.get(definition.counter ?? environment);
+      if (state !== undefined && definition.within !== undefined) {
+        state.withinNumber = headingNumbers.get(definition.within) ?? "0";
+      }
+    }
+  };
 
   const pushRecord = (record: VisualStructureRecord): void => {
     if (records.length < MAX_VISUAL_STRUCTURE_RECORDS) {
@@ -960,16 +1040,20 @@ export function scanVisualDocumentStructure(
     const structuralFunctionalConditionalArguments =
       visualFunctionalConditionalArgumentCount(control.name);
     if (structuralFunctionalConditionalArguments !== undefined) {
-      index = skipVisualFunctionalConditional(
+      const conditionalEnd = skipVisualFunctionalConditional(
         text,
         control.end,
         text.length,
         structuralFunctionalConditionalArguments,
       ) ?? text.length;
+      headingCountersAmbiguous ||= visualConditionalMayChangeHeadingCounters(text, control.end, conditionalEnd, literalTextCommands);
+      index = conditionalEnd;
       continue;
     }
     if (isVisualLabelConditionalControl(control.name)) {
-      index = skipLiteralFalseConditional(text, control.end, text.length);
+      const conditionalEnd = skipLiteralFalseConditional(text, control.end, text.length);
+      headingCountersAmbiguous ||= visualConditionalMayChangeHeadingCounters(text, control.end, conditionalEnd, literalTextCommands);
+      index = conditionalEnd;
       continue;
     }
     if (control.name === "(" || control.name === "[") {
@@ -999,10 +1083,11 @@ export function scanVisualDocumentStructure(
         records.length = 0;
         citedKeys.length = 0;
         stack.length = 0;
-        headingCounters.clear();
-        headingNumbers.clear();
+        // Literal preamble counter assignments survive \\begin{document} in TeX.
         appendixOffsets.length = 0;
-        appendix = false;
+        appendixTransitions.length = 0;
+        appendixState = { active: false, appendixCounter: 0 };
+        footnoteCounter = 0;
         theoremCounters.clear();
         preamble = {
           kind: "preamble",
@@ -1020,6 +1105,15 @@ export function scanVisualDocumentStructure(
       // Do not create nested structure cards until the executable document
       // body has started.
       if (!inDocument) {
+        index = commandEnd;
+        continue;
+      }
+
+      if (environment === "appendices" && appendicesEnabled && !redefinedCommands.has(environment)) {
+        appendixTransitions.push({ from: index, kind: "enter" });
+        applyVisualAppendixTransition(appendixState, "enter", headingCounters, headingNumbers, numberingRootLevel);
+        preserveTheoremCountersAfterAppendices();
+        pushRecord({ kind: "accent", from: index, to: commandEnd, text: "" });
         index = commandEnd;
         continue;
       }
@@ -1116,6 +1210,12 @@ export function scanVisualDocumentStructure(
       }
 
       if (environment === "figure" || environment === "figure*") {
+        const whole = parseVisualFigureEnvironment(text, index, commandEnd, environment);
+        if (whole !== undefined) {
+          pushRecord(whole);
+          index = whole.replacement.sourceTo;
+          continue;
+        }
         const image = parseVisualImageEnvironment(
           text,
           index,
@@ -1159,7 +1259,8 @@ export function scanVisualDocumentStructure(
 
       const theorem = theoremDefinitions.get(environment);
       if (theorem !== undefined) {
-        const optional = readOptionalArgument(text, commandEnd);
+        const optional = theorem.requiredHeading ? readRequiredArgument(text, commandEnd) : readOptionalArgument(text, commandEnd);
+        if (theorem.requiredHeading && optional === undefined) { index = commandEnd; continue; }
         const optionalTitleLatex = optional === undefined
           ? undefined
           : text.slice(optional.contentFrom, optional.contentTo);
@@ -1172,7 +1273,7 @@ export function scanVisualDocumentStructure(
         stack.push({
           kind: "theorem",
           environment,
-          definition: theorem.optionalHeading && optionalTitleLatex !== undefined
+          definition: (theorem.optionalHeading || theorem.requiredHeading) && optionalTitleLatex !== undefined
             ? { ...theorem, label: latexToPlainText(optionalTitleLatex) } : theorem,
           number: numberingKnown
             ? nextVisualTheoremNumber(
@@ -1182,11 +1283,11 @@ export function scanVisualDocumentStructure(
                 headingNumbers,
               )
             : undefined,
-          optionalTitle: optional === undefined || theorem.optionalHeading
+          optionalTitle: optional === undefined || theorem.optionalHeading || theorem.requiredHeading
             ? undefined
             : latexToPlainText(optionalTitleLatex ?? ""),
-          optionalTitleLatex: theorem.optionalHeading ? undefined : optionalTitleLatex,
-          optionalTitleSegments: optional === undefined || theorem.optionalHeading ? []
+          optionalTitleLatex: theorem.optionalHeading || theorem.requiredHeading ? undefined : optionalTitleLatex,
+          optionalTitleSegments: optional === undefined || theorem.optionalHeading || theorem.requiredHeading ? []
             : visualInlineContentSegments(optionalTitleLatex ?? "", optional.contentFrom),
           labels: [...immediateLabels],
           begin,
@@ -1271,6 +1372,15 @@ export function scanVisualDocumentStructure(
         // later table/TikZ/bibliography-looking text is inert source tail, not
         // presentation or a resource request.
         break;
+      }
+
+      if (environment === "appendices" && inDocument && appendicesEnabled && !redefinedCommands.has(environment)) {
+        appendixTransitions.push({ from: index, kind: "exit" });
+        applyVisualAppendixTransition(appendixState, "exit", headingCounters, headingNumbers, numberingRootLevel);
+        preserveTheoremCountersAfterAppendices();
+        pushRecord({ kind: "accent", from: index, to: environmentArgument.end, text: "" });
+        index = environmentArgument.end;
+        continue;
       }
 
       const openIndex = findOpenEnvironment(stack, environment);
@@ -1373,8 +1483,15 @@ export function scanVisualDocumentStructure(
     }
 
     if (control.name === "newenvironment" || control.name === "renewenvironment") {
-      const parsed = parseTrivlistStatement(text, control.end);
+      const parsed = parseTrivlistStatement(text, control.end) ?? parseStaticBoxEnvironment(text, control.end);
       if (parsed !== undefined) theoremDefinitions.set(parsed.environment, parsed.definition);
+      else {
+        const name = readRequiredArgument(text, control.end);
+        const environment = name === undefined ? "" : text.slice(name.contentFrom, name.contentTo).trim();
+        const previous = theoremDefinitions.get(environment);
+        if (previous?.staticBox) theoremDefinitions.delete(environment);
+      }
+      // Command wrappers resolve their environment at use time below.
     }
 
     if (control.name === "newtheorem") {
@@ -1414,6 +1531,7 @@ export function scanVisualDocumentStructure(
           .filter((value) => value.length > 0);
         authblk ||= packages.includes("authblk");
         jhep ||= packages.includes("jheppub");
+        appendicesEnabled ||= packages.includes("appendix");
         const bibliographyPackage = packages.includes("biblatex")
           ? "biblatex"
           : packages.includes("natbib")
@@ -1522,10 +1640,74 @@ export function scanVisualDocumentStructure(
     }
 
     if (isVisualLabelDefinitionCommand(control.name)) {
+      const staticBox = parseStaticBoxCommand(text, control, theoremDefinitions);
+      if (staticBox !== undefined) staticBoxCommands.set(staticBox.name, staticBox);
       const target = collectSimpleTitleMacro(text, control, titleMacros);
-      if (target !== undefined) redefinedCommands.add(target);
+      if (target !== undefined) {
+        redefinedCommands.add(target);
+        headingCountersAmbiguous ||= isHeadingLevel(target) ||
+          target.startsWith("the") && isHeadingLevel(target.slice(3)) ||
+          ["setcounter", "addtocounter", "stepcounter", "refstepcounter"].includes(target);
+        if (staticBox?.name !== target) staticBoxCommands.delete(target);
+        literalTextCommands.delete(target);
+        if (isVisualDetokenizeWrapper(text, control)) literalTextCommands.add(target);
+      }
+      if (VISUAL_LABEL_NEW_ENVIRONMENT_DEFINITIONS.has(control.name) || VISUAL_LABEL_XPARSE_ENVIRONMENT_DEFINITIONS.has(control.name)) {
+        const argument = readRequiredArgument(text, text[control.end] === "*" ? control.end + 1 : control.end);
+        if (argument !== undefined) redefinedCommands.add(text.slice(argument.contentFrom, argument.contentTo).trim());
+      }
       index = skipVisualLabelDefinition(text, control, text.length) ?? control.end;
       continue;
+    }
+
+    if (["setcounter", "addtocounter", "stepcounter", "refstepcounter"].includes(control.name)) {
+      const argument = readRequiredArgument(text, control.end);
+      const counter = argument === undefined ? "" : visualPreambleWithoutComments(text.slice(argument.contentFrom, argument.contentTo)).trim();
+      if (isHeadingLevel(counter)) {
+        const stepped = control.name === "stepcounter" || control.name === "refstepcounter";
+        const valueArgument = stepped || argument === undefined ? undefined : readRequiredArgument(text, argument.end);
+        const literal = stepped ? "1" : valueArgument === undefined ? "" : visualPreambleWithoutComments(text.slice(valueArgument.contentFrom, valueArgument.contentTo)).trim();
+        const value = Number(literal);
+        const end = valueArgument?.end ?? argument!.end;
+        if (!redefinedCommands.has(control.name) && /^[+-]?\d+$/u.test(literal) && Number.isSafeInteger(value) &&
+            Math.abs(value) <= MAX_VISUAL_HEADING_COUNTER && headingCounterMutations.length < MAX_VISUAL_STRUCTURE_RECORDS) {
+          const mutation: VisualHeadingCounterMutation = { from: index, to: end, counter, value,
+            kind: stepped ? "step" : control.name === "setcounter" ? "set" : "add" };
+          headingCounterMutations.push(mutation);
+          headingCountersAmbiguous ||= !applyVisualHeadingCounterMutation(mutation, headingCounters, headingNumbers, numberingRootLevel, appendixState.active);
+          if (stepped && counter === "chapter") footnoteCounter = 0;
+          if (!stepped) preserveTheoremCountersAfterAppendices();
+          if (inDocument) pushRecord({ kind: "accent", from: index, to: end, text: "" });
+        } else {
+          headingCountersAmbiguous = true;
+        }
+        index = end;
+        continue;
+      }
+    }
+    if (["counterwithin", "counterwithout", "numberwithin", "@addtoreset", "@removefromreset"].includes(control.name)) {
+      const argument = readRequiredArgument(text, text[control.end] === "*" ? control.end + 1 : control.end);
+      if (argument !== undefined && isHeadingLevel(text.slice(argument.contentFrom, argument.contentTo).trim())) headingCountersAmbiguous = true;
+    }
+    if (control.name.startsWith("c@") && isHeadingLevel(control.name.slice(2))) headingCountersAmbiguous = true;
+
+    const boxAlias = inDocument ? staticBoxCommands.get(control.name) : undefined;
+    const boxCommand = boxAlias === undefined ? undefined : theoremDefinitions.get(boxAlias.environment);
+    if (boxCommand?.staticBox) {
+      const body = readRequiredArgument(text, control.end);
+      if (body !== undefined) {
+        pushRecord({ kind: "theorem", environment: control.name, label: boxAlias?.label ?? boxCommand.label,
+          style: boxCommand.style, number: undefined, optionalTitle: undefined, optionalTitleLatex: undefined,
+          labels: [], begin: lineAwareReplacement(text, index, body.contentFrom),
+          end: lineAwareReplacement(text, body.contentTo, body.end), bodyFrom: body.contentFrom, bodyTo: body.contentTo });
+        index = body.contentFrom;
+        continue;
+      }
+    }
+
+    if (inDocument && control.name === "ydiagram") {
+      const diagram = parseVisualYoungDiagramSequence(text, index);
+      if (diagram !== undefined) { pushRecord(diagram); index = diagram.replacement.sourceTo; continue; }
     }
 
     if (control.name === "nocite") {
@@ -1806,6 +1988,31 @@ export function scanVisualDocumentStructure(
       }
     }
 
+    if (control.name === "detokenize" || literalTextCommands.has(control.name)) {
+      const body = readRequiredArgument(text, control.end);
+      if (body !== undefined) {
+        pushRecord({ kind: "accent", from: index, to: body.end, text: text.slice(body.contentFrom, body.contentTo) });
+        index = body.end;
+        continue;
+      }
+    }
+
+    if (control.name === "footnote" && !redefinedCommands.has(control.name)) {
+      const optional = readOptionalArgument(text, control.end);
+      const body = readRequiredArgument(text, optional?.end ?? control.end);
+      if (body !== undefined) {
+        const marker = optional === undefined ? undefined : text.slice(optional.contentFrom, optional.contentTo).trim();
+        const number = marker === undefined ? (numberingKnown ? String(++footnoteCounter) : undefined)
+          : /^[+-]?\d+$/u.test(marker) && Number.isSafeInteger(Number(marker)) ? String(Number(marker)) : undefined;
+        const bodyText = text.slice(body.contentFrom, body.contentTo);
+        pushRecord({ kind: "footnote", from: index, to: body.end, contentFrom: body.contentFrom, contentTo: body.contentTo, number,
+          source: { from: body.contentFrom, to: body.contentTo, text: bodyText } });
+        // Keep physical labels and references discoverable inside the collapsed body.
+        index = body.contentFrom;
+        continue;
+      }
+    }
+
     const textStyle = parseVisualTextStyle(text, index, control);
     if (textStyle !== undefined) {
       pushRecord(textStyle);
@@ -1884,9 +2091,9 @@ export function scanVisualDocumentStructure(
     }
 
     if (control.name === "appendix" && !redefinedCommands.has("appendix")) {
-      appendix = true;
       appendixOffsets.push(index);
-      resetVisualHeadingCounters(headingCounters, headingNumbers, numberingRootLevel);
+      appendixTransitions.push({ from: index, kind: "appendix" });
+      applyVisualAppendixTransition(appendixState, "appendix", headingCounters, headingNumbers, numberingRootLevel);
       pushRecord({ kind: "accent", from: index, to: control.end, text: "" });
       index = control.end;
       continue;
@@ -1906,14 +2113,14 @@ export function scanVisualDocumentStructure(
           command: control.name,
           level: HEADING_LEVELS[control.name],
           starred,
-          number: starred || !numberingKnown
+          number: starred || !numberingKnown || headingCountersAmbiguous
             ? undefined
             : nextVisualHeadingNumber(
                 control.name,
                 numberingRootLevel,
                 headingCounters,
                 headingNumbers,
-                appendix,
+                appendixState.active,
               ),
           from: index,
           to: argument.end,
@@ -1930,6 +2137,7 @@ export function scanVisualDocumentStructure(
                 text.slice(shortTitle.contentFrom, shortTitle.contentTo),
               ),
         });
+        if (control.name === "chapter" && !starred) footnoteCounter = 0;
         // Keep scanning inside the visible title. The heading decoration only
         // hides the command/braces, so nested text accents/symbols (for example
         // `K\"{a}hler` or `\S`) still need their own visual replacements.
@@ -2075,16 +2283,48 @@ export function scanVisualDocumentStructure(
   }
   records.sort((left, right) => structureRecordStart(left) - structureRecordStart(right));
   const resolvedRecords = resolveVisualTheoremOptionalTitles(
-    groupVisualFrontMatter(text, records, frontMatterCommands),
+    groupVisualFrontMatter(text, resolveVisualFootnoteSegments(records), frontMatterCommands, options.compatibilityMode),
   );
   return {
     records: resolvedRecords,
     ...(appendixOffsets.length === 0 ? {} : { appendixOffsets }),
+    ...(appendixTransitions.length === 0 ? {} : { appendixTransitions }),
+    ...(headingCounterMutations.length === 0 ? {} : { headingCounterMutations }),
+    ...(headingCountersAmbiguous ? { headingCountersAmbiguous: true } : {}),
+    appendicesEnabled: appendicesEnabled && !redefinedCommands.has("appendices"),
     bibliographyPaths: uniqueStrings(bibliographyPaths),
     hasBibliographyDeclaration,
     citedKeys: uniqueStrings([...citedKeys, ...visualInlineReferenceRecords({ records: resolvedRecords })
       .flatMap(record => record.kind === "citation" ? record.keys : [])]),
   };
+}
+
+/** Reuse the scanner's visible source boundaries, including hidden link metadata. */
+function resolveVisualFootnoteSegments(records: readonly VisualStructureRecord[]): readonly VisualStructureRecord[] {
+  return records.map((record, index) => {
+    if (record.kind !== "footnote") return record;
+    const hidden: { from: number; to: number }[] = [];
+    for (let childIndex = index + 1; childIndex < records.length; childIndex += 1) {
+      const child = records[childIndex]!;
+      if (structureRecordStart(child) >= record.contentTo) break;
+      if (child.kind === "textStyle") hidden.push(
+        { from: child.prefixFrom, to: child.prefixTo }, { from: child.suffixFrom, to: child.suffixTo });
+      else if (child.kind === "label") hidden.push(child);
+      else if (child.kind === "comment") hidden.push(child.replacement);
+    }
+    let offset = 0;
+    let visible = "";
+    for (const range of hidden.sort((left, right) => left.from - right.from)) {
+      const from = Math.max(offset, range.from - record.contentFrom);
+      const to = Math.min(record.source.text.length, range.to - record.contentFrom);
+      if (to <= from) continue;
+      visible += record.source.text.slice(offset, from) + " ".repeat(to - from);
+      offset = to;
+    }
+    visible += record.source.text.slice(offset);
+    return { ...record, source: { ...record.source,
+      segments: visualInlineContentSegments(visible, record.contentFrom) } };
+  });
 }
 
 function frontMatterKeywordSection(text: string, record: VisualKeywordsRecord): VisualFrontMatterSection {
@@ -2107,6 +2347,7 @@ function groupVisualFrontMatter(
   text: string,
   records: readonly VisualStructureRecord[],
   commands: readonly VisualReplacementRange[],
+  compatibilityMode?: "basic" | "maximum",
 ): readonly VisualStructureRecord[] {
   // ponytail: interval scans are quadratic within the 4,000-record cap;
   // index ranges if large-document profiling makes this significant.
@@ -2178,9 +2419,26 @@ function groupVisualFrontMatter(
       claimed.add(candidate);
       sections.push(...candidate.sections);
     }
+    const replacements: VisualReplacementRange[] = [];
+    if (compatibilityMode === "maximum") {
+      // Only fields before this title and after the last structural boundary
+      // belong to it. Fold each field separately; never swallow report prose.
+      const boundary = records.filter(other => other.kind === "heading" || other.kind === "maketitle" || other.kind === "frame")
+        .map(structureRecordStart).filter(offset => offset < record.replacement.sourceFrom).reduce((a, b) => Math.max(a, b), 0);
+      const extraSections: VisualFrontMatterSection[] = [];
+      for (const candidate of after) {
+        const range = candidate.replacement;
+        if (claimed.has(candidate) || range.sourceFrom < boundary || range.sourceTo > from ||
+          replacements.some(outer => range.from >= outer.from && range.to <= outer.to)) continue;
+        replacements.push(range);
+        claimed.add(candidate);
+        if (candidate.sections !== undefined) extraSections.push(...candidate.sections);
+      }
+      sections.unshift(...extraSections);
+    }
     sections.unshift(...(record.frontMatter?.sections ?? []));
-    return from === record.replacement.sourceFrom && to === record.replacement.sourceTo && sections.length === 0
-      ? record : { ...record, frontMatter: { replacement: lineAwareReplacement(text, from, to), sections } };
+    return from === record.replacement.sourceFrom && to === record.replacement.sourceTo && sections.length === 0 && replacements.length === 0
+      ? record : { ...record, frontMatter: { replacement: lineAwareReplacement(text, from, to), sections, ...(replacements.length === 0 ? {} : { replacements }) } };
   });
 }
 
@@ -2231,7 +2489,7 @@ function simpleFrontMatterText(body: string): boolean {
     const name = command[1]!;
     if (!/^(?:textbf|textit|textrm|textsf|texttt|textsc|textnormal|emph|underline|LaTeX|TeX|quad|qquad|and)$/u.test(name) &&
         LATEX_NAMED_TEXT_GLYPHS[name] === undefined && LATEX_COMBINING_ACCENTS[name] === undefined &&
-        !(name.length === 1 && "&%#${}_\\".includes(name))) return false;
+        !(name.length === 1 && "&%#${}_\\,;:! ".includes(name))) return false;
   }
   return true;
 }
@@ -2258,6 +2516,12 @@ function canFoldTitleMetadata(
     if (math !== undefined) { index = math.to; continue; }
     if (body[index] === "$" && !isEscapedAt(body, index)) return false;
     const control = body[index] === "\\" ? readControl(body, index) : undefined;
+    if (control?.name === "vspace" || control?.name === "hspace") {
+      const spacing = readRequiredArgument(body, body[control.end] === "*" ? control.end + 1 : control.end);
+      if (spacing === undefined || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*(?:pt|pc|in|bp|cm|mm|dd|cc|sp|em|ex)$/u.test(body.slice(spacing.contentFrom, spacing.contentTo).trim())) return false;
+      index = spacing.end;
+      continue;
+    }
     if (control?.name === "inst") {
       const marker = readRequiredArgument(body, control.end);
       if (marker === undefined) return false;
@@ -2286,6 +2550,27 @@ function resolveVisualDate(
     }).format(new Date()) };
   }
   return resolveSimpleTitleMacro(text, source, macros);
+}
+
+/** A finite literal wrapper, not general macro expansion or TeX execution. */
+function isVisualDetokenizeWrapper(text: string, control: ParsedControl): boolean {
+  if (!VISUAL_LABEL_NEW_COMMAND_DEFINITIONS.has(control.name)) return false;
+  const start = skipTrivia(text, text[control.end] === "*" ? control.end + 1 : control.end);
+  const targetEnd = readRequiredArgument(text, start)?.end ?? readControl(text, start)?.end;
+  const arity = targetEnd === undefined ? undefined : readOptionalArgument(text, targetEnd);
+  if (arity === undefined || text.slice(arity.contentFrom, arity.contentTo).trim() !== "1") return false;
+  const body = readRequiredArgument(text, arity.end);
+  if (body === undefined) return false;
+  let value = text.slice(body.contentFrom, body.contentTo).trim();
+  while (value.length > 0) {
+    const command = readControl(value, 0);
+    const argument = command === undefined ? undefined : readRequiredArgument(value, command.end);
+    if (command === undefined || argument === undefined || argument.end !== value.length) return false;
+    value = value.slice(argument.contentFrom, argument.contentTo).trim();
+    if (command.name === "detokenize") return value === "#1";
+    if (!["texttt", "textrm", "textsf", "textnormal", "textbf", "textit", "textsc"].includes(command.name)) return false;
+  }
+  return false;
 }
 
 function collectSimpleTitleMacro(text: string, control: ParsedControl, macros: Map<string, ParsedArgument>): string | undefined {
@@ -2426,7 +2711,8 @@ export type VisualLabeledStructureRecord =
   | VisualTableRecord
   | VisualImageRecord
   | VisualTikzcdRecord
-  | VisualTikzpictureRecord;
+  | VisualTikzpictureRecord
+  | VisualFigureRecord;
 
 export interface VisualLabeledStructureTarget {
   readonly targetKind: "table" | "image" | "diagram";
@@ -2614,7 +2900,7 @@ function indexVisualLabeledStructures(
   };
 
   for (const record of records) {
-    if (record.kind !== "table" && record.kind !== "image") {
+    if (record.kind !== "table" && record.kind !== "image" && record.kind !== "figure") {
       continue;
     }
     if (
@@ -2642,7 +2928,7 @@ function indexVisualLabeledStructures(
     const key = record.label?.key.trim() ?? "";
     if (key.length > 0) {
       append(key, {
-        targetKind: record.kind,
+        targetKind: record.kind === "figure" ? "diagram" : record.kind,
         record,
       });
     }
@@ -3149,6 +3435,49 @@ function skipLiteralFalseConditional(text: string, requestedOffset: number, limi
   return limit;
 }
 
+/** Inspect skipped branches for possible counter effects, without selecting or executing a branch. */
+function visualConditionalMayChangeHeadingCounters(
+  text: string,
+  from: number,
+  to: number,
+  literalTextCommands: ReadonlySet<string>,
+): boolean {
+  let index = from;
+  while (index < to) {
+    if (text[index] === "%" && !isEscapedAt(text, index)) { index = skipComment(text, index); continue; }
+    if (text[index] === "$" && !isEscapedAt(text, index)) { index = skipDollarMath(text, index); continue; }
+    if (text[index] !== "\\") { index++; continue; }
+    const control = readControl(text, index);
+    if (control === undefined) { index++; continue; }
+    if (control.name === "verb" || control.name === "verb*") { index = skipVerb(text, control.end); continue; }
+    if (control.name === "detokenize" || literalTextCommands.has(control.name)) { index = readRequiredArgument(text, control.end)?.end ?? to; continue; }
+    if (control.name === "(" || control.name === "[") { index = skipControlMath(text, control.end, control.name === "(" ? ")" : "]"); continue; }
+    if (isVisualLabelDefinitionCommand(control.name)) {
+      const targetFrom = skipTrivia(text, text[control.end] === "*" ? control.end + 1 : control.end);
+      const grouped = readRequiredArgument(text, targetFrom);
+      const target = readControl(text, grouped === undefined ? targetFrom : skipTrivia(text, grouped.contentFrom));
+      if (target !== undefined && (isHeadingLevel(target.name) || target.name.startsWith("the") && isHeadingLevel(target.name.slice(3)))) return true;
+      index = skipVisualLabelDefinition(text, control, to) ?? to;
+      continue;
+    }
+    if (control.name === "begin") {
+      const argument = readRequiredArgument(text, control.end);
+      const environment = argument === undefined ? "" : text.slice(argument.contentFrom, argument.contentTo).trim();
+      if (argument !== undefined && (VERBATIM_ENVIRONMENTS.has(environment) || MATH_ENVIRONMENTS.has(environment))) {
+        index = skipOpaqueEnvironment(text, argument.end, environment);
+        continue;
+      }
+    }
+    if (control.name.startsWith("c@") && isHeadingLevel(control.name.slice(2))) return true;
+    if (["setcounter", "addtocounter", "stepcounter", "refstepcounter", "counterwithin", "counterwithout", "numberwithin", "@addtoreset", "@removefromreset"].includes(control.name)) {
+      const argument = readRequiredArgument(text, text[control.end] === "*" ? control.end + 1 : control.end);
+      if (argument !== undefined && isHeadingLevel(visualPreambleWithoutComments(text.slice(argument.contentFrom, argument.contentTo)).trim())) return true;
+    }
+    index = control.end;
+  }
+  return false;
+}
+
 /** One parser for body chips and references inside folded source ranges. */
 function parseVisualInlineReference(
   text: string,
@@ -3181,13 +3510,14 @@ function parseVisualInlineReference(
   };
 }
 
-function mapVisualRecordInlineSegments(
+export function mapVisualRecordInlineSegments(
   record: VisualStructureRecord,
   map: (segments: readonly VisualInlineContentSegment[]) => readonly VisualInlineContentSegment[],
 ): VisualStructureRecord {
   const source = (value: VisualSourceText | undefined): VisualSourceText | undefined =>
     value?.segments === undefined ? value : { ...value, segments: map(value.segments) };
-  if (record.kind === "image" && record.captionSegments !== undefined) {
+  if (record.kind === "footnote") return { ...record, source: source(record.source)! };
+  if ((record.kind === "image" || record.kind === "figure") && record.captionSegments !== undefined) {
     return { ...record, captionSegments: map(record.captionSegments) };
   }
   if (record.kind === "theorem" && record.optionalTitleSegments !== undefined) {
@@ -3206,6 +3536,35 @@ function mapVisualRecordInlineSegments(
     };
   }
   return record;
+}
+
+/** Reference controls inside a bounded formula, kept as source-backed navigation targets. */
+export function visualMathReferenceRecords(text: string, from: number, to: number): readonly VisualReferenceRecord[] {
+  const result: VisualReferenceRecord[] = [];
+  let index = Math.max(0, from);
+  while (index < Math.min(to, text.length) && result.length < 128) {
+    if (text[index] === "%") { index = skipComment(text, index); continue; }
+    if (text[index] !== "\\") { index++; continue; }
+    const control = readControl(text, index);
+    if (control === undefined) { index++; continue; }
+    if (control.name === "verb") { index = skipVerb(text, control.end); continue; }
+    if (control.name === "detokenize") { index = readRequiredArgument(text, control.end)?.end ?? to; continue; }
+    if (isVisualLabelDefinitionCommand(control.name)) { index = skipVisualLabelDefinition(text, control, to) ?? to; continue; }
+    const record = parseVisualInlineReference(text, index, control);
+    if (record?.kind === "reference" && record.to <= to) { result.push(record); index = record.to; }
+    else index = control.end;
+  }
+  return result;
+}
+
+/** Attach verified compiled numbers to body and folded reference controls alike. */
+export function resolveVisualReferenceLabels(structure: VisualDocumentStructure, labels: ReadonlyMap<string, string>): VisualDocumentStructure {
+  if (labels.size === 0) return structure;
+  const resolve = (record: VisualReferenceRecord): VisualReferenceRecord => ({...record,
+    resolvedLabels: Object.fromEntries(record.keys.flatMap(key => labels.has(key) ? [[key, labels.get(key)!]] : []))});
+  return {...structure, records: structure.records.map(record => record.kind === "reference" ? resolve(record)
+    : mapVisualRecordInlineSegments(record, segments => segments.map(segment => segment.kind === "reference"
+      ? {...segment, reference: resolve(segment.reference)} : segment)))};
 }
 
 /** Physical-source references, including those rendered inside folded widgets. */
@@ -3258,7 +3617,7 @@ export function resolveVisualBibliography(
       }
       const entry = byKey.get(key);
       return entry === undefined ? [] : [{
-        ...toVisualBibliographyEntry(entry), source: `${normalizedSourceName} · 已收录`,
+        ...toVisualBibliographyEntry(entry), ...visualCitationTitlePresentation(entry, record), source: `${normalizedSourceName} · 已收录`,
       }];
     }),
   });
@@ -3273,6 +3632,19 @@ export function resolveVisualBibliography(
         segment.kind === "citation" ? { ...segment, citation: resolveCitation(segment.citation) } : segment));
     }),
   };
+}
+
+function visualCitationTitlePresentation(
+  entry: { readonly title: string; readonly titleLatex?: string },
+  citation: VisualCitationRecord,
+): Pick<VisualCitationPreview, "titleSegments"> {
+  if (entry.titleLatex === undefined) return {};
+  const title = parseHomeProjectTitle(entry.titleLatex);
+  if (!title.segments.some(segment => segment.kind === "math")) return {};
+  return { titleSegments: title.segments.map(segment => segment.kind === "text" ? segment : {
+    kind: "math", math: { tex: segment.tex, fallback: segment.fallbackText,
+      sourceFrom: citation.from, sourceTo: citation.to },
+  }) };
 }
 
 export function detectVisualDocumentLanguage(text: string): VisualDocumentLanguage {
@@ -3327,28 +3699,70 @@ function visualHeadingNumberingRootLevel(text: string): number {
  * array but do not advance or reset any structural counter.
  */
 export function numberVisualHeadingSequence(
-  headings: readonly (Pick<VisualHeadingRecord, "command" | "starred"> & { readonly appendixStart?: boolean })[],
+  headings: readonly (Pick<VisualHeadingRecord, "command" | "starred"> & { readonly appendixStart?: boolean; readonly appendixTransitions?: readonly VisualAppendixTransition["kind"][]; readonly numberingTransitions?: readonly VisualHeadingNumberingTransition[] })[],
   numberingRoot: "chapter" | "section",
 ): readonly (string | undefined)[] {
   const counters = new Map<VisualHeadingLevel, number>();
   const currentNumbers = new Map<string, string>();
   const numberingRootLevel = HEADING_LEVELS[numberingRoot];
-  let appendix = false;
+  const appendixState: VisualAppendixState = { active: false, appendixCounter: 0 };
+  let known = true;
   return headings.map((heading) => {
-    if (heading.appendixStart) {
-      appendix = true;
-      resetVisualHeadingCounters(counters, currentNumbers, numberingRootLevel);
+    for (const transition of heading.numberingTransitions ?? []) {
+      if ("counter" in transition) known = applyVisualHeadingCounterMutation(transition, counters, currentNumbers, numberingRootLevel, appendixState.active) && known;
+      else applyVisualAppendixTransition(appendixState, transition.kind, counters, currentNumbers, numberingRootLevel);
     }
-    return heading.starred
+    for (const transition of heading.appendixTransitions ?? (heading.appendixStart ? ["appendix" as const] : [])) {
+      applyVisualAppendixTransition(appendixState, transition, counters, currentNumbers, numberingRootLevel);
+    }
+    return heading.starred || !known
       ? undefined
       : nextVisualHeadingNumber(
           heading.command,
           numberingRootLevel,
           counters,
           currentNumbers,
-          appendix,
+          appendixState.active,
         );
   });
+}
+
+interface VisualAppendixState {
+  active: boolean;
+  appendixCounter: number;
+  main?: { counter: number; number: string | undefined; active: boolean };
+}
+
+/** Mirror appendix.sty's root save/restore; descendant counters are not restored on exit. */
+function applyVisualAppendixTransition(
+  state: VisualAppendixState,
+  transition: VisualAppendixTransition["kind"],
+  counters: Map<VisualHeadingLevel, number>,
+  numbers: Map<string, string>,
+  rootLevel: number,
+): void {
+  const root = HEADING_COMMANDS_BY_LEVEL[rootLevel]!;
+  if (transition === "appendix") {
+    state.active = true;
+    resetVisualHeadingCounters(counters, numbers, rootLevel);
+  } else if (transition === "enter") {
+    state.main = { counter: counters.get(root) ?? 0, number: numbers.get(root), active: state.active };
+    // The package resets section, plus chapter (books) or subsection (articles).
+    for (const command of [root, HEADING_COMMANDS_BY_LEVEL[rootLevel + 1]!]) {
+      counters.set(command, 0);
+      numbers.delete(command);
+    }
+    counters.set(root, state.appendixCounter);
+    if (state.appendixCounter > 0) numbers.set(root, alphabeticOrdinal(state.appendixCounter, true));
+    state.active = true;
+  } else if (state.main !== undefined) {
+    state.appendixCounter = counters.get(root) ?? 0;
+    counters.set(root, state.main.counter);
+    if (state.main.number === undefined) numbers.delete(root);
+    else numbers.set(root, state.main.number);
+    state.active = state.main.active;
+    delete state.main;
+  }
 }
 
 function resetVisualHeadingCounters(
@@ -3371,24 +3785,63 @@ function nextVisualHeadingNumber(
   currentNumbers: Map<string, string>,
   appendix = false,
 ): string {
-  const level = HEADING_LEVELS[command];
   counters.set(command, (counters.get(command) ?? 0) + 1);
+  resetVisualHeadingDescendants(command, counters, currentNumbers);
+  const number = currentVisualHeadingNumber(command, numberingRootLevel, counters, appendix);
+  currentNumbers.set(command, number);
+  return number;
+}
+
+function resetVisualHeadingDescendants(
+  command: VisualHeadingLevel,
+  counters: Map<VisualHeadingLevel, number>,
+  numbers: Map<string, string>,
+): void {
+  // Standard classes keep part independent of the chapter/section reset chain.
+  if (command === "part") return;
   for (const deeper of HEADING_COMMANDS_BY_LEVEL) {
-    if (HEADING_LEVELS[deeper] > level) {
+    if (HEADING_LEVELS[deeper] > HEADING_LEVELS[command]) {
       counters.set(deeper, 0);
-      currentNumbers.delete(deeper);
+      numbers.delete(deeper);
     }
   }
-  const number = command === "part"
-    ? romanOrdinal(counters.get(command) ?? 1)
+}
+
+function currentVisualHeadingNumber(
+  command: VisualHeadingLevel,
+  numberingRootLevel: number,
+  counters: Map<VisualHeadingLevel, number>,
+  appendix: boolean,
+): string {
+  const level = HEADING_LEVELS[command];
+  return command === "part"
+    ? (counters.get(command) ?? 0) <= 0 ? "" : romanOrdinal(counters.get(command) ?? 1, MAX_VISUAL_HEADING_COUNTER + 1)
     : HEADING_COMMANDS_BY_LEVEL
         .slice(Math.min(level, numberingRootLevel), level + 1)
         .map((name) => appendix && HEADING_LEVELS[name] === numberingRootLevel
           ? (counters.get(name) ?? 0) > 0 ? alphabeticOrdinal(counters.get(name)!, true) : ""
           : String(counters.get(name) ?? 0))
         .join(".");
-  currentNumbers.set(command, number);
-  return number;
+}
+
+function applyVisualHeadingCounterMutation(
+  mutation: VisualHeadingCounterMutation,
+  counters: Map<VisualHeadingLevel, number>,
+  numbers: Map<string, string>,
+  numberingRootLevel: number,
+  appendix: boolean,
+): boolean {
+  const value = mutation.kind === "set" ? mutation.value : (counters.get(mutation.counter) ?? 0) + mutation.value;
+  if (!Number.isSafeInteger(value) || Math.abs(value) > MAX_VISUAL_HEADING_COUNTER) return false;
+  counters.set(mutation.counter, value);
+  if (mutation.kind === "step") resetVisualHeadingDescendants(mutation.counter, counters, numbers);
+  // Assignments change the printed prefix immediately, without resetting child counters.
+  for (const command of HEADING_COMMANDS_BY_LEVEL) {
+    if (command === mutation.counter || numbers.has(command)) {
+      numbers.set(command, currentVisualHeadingNumber(command, numberingRootLevel, counters, appendix));
+    }
+  }
+  return true;
 }
 
 function nextVisualTheoremNumber(
@@ -3588,8 +4041,8 @@ function alphabeticOrdinal(value: number, upper: boolean): string {
   return result;
 }
 
-function romanOrdinal(value: number): string {
-  let current = Math.max(1, Math.min(3_999, Math.trunc(value)));
+function romanOrdinal(value: number, maximum = 3_999): string {
+  let current = Math.max(1, Math.min(maximum, Math.trunc(value)));
   let result = "";
   for (const [amount, numeral] of [
     [1_000, "M"], [900, "CM"], [500, "D"], [400, "CD"],
@@ -3602,6 +4055,38 @@ function romanOrdinal(value: number): string {
     }
   }
   return result;
+}
+
+/** Literal wrappers reuse the existing source-backed statement presentation. */
+function parseStaticBoxEnvironment(text: string, offset: number): { environment: string; definition: TheoremDefinition } | undefined {
+  const name = readRequiredArgument(text, offset);
+  const count = name === undefined ? undefined : readOptionalArgument(text, name.end);
+  const begin = name === undefined ? undefined : readRequiredArgument(text, count?.end ?? name.end);
+  const end = begin === undefined ? undefined : readRequiredArgument(text, begin.end);
+  if (name === undefined || begin === undefined || end === undefined) return undefined;
+  const environment = text.slice(name.contentFrom, name.contentTo).trim();
+  const args = count === undefined ? "0" : text.slice(count.contentFrom, count.contentTo).trim();
+  if (!/^[A-Za-z@][A-Za-z0-9@*:-]{0,63}$/u.test(environment) || !/^[01]$/u.test(args)) return undefined;
+  const opening = /^\s*\\begin\s*\{tcolorbox\}\s*(?:\[([^\]]*)\])?\s*$/u.exec(text.slice(begin.contentFrom, begin.contentTo));
+  if (opening === null || !/^\s*\\end\s*\{tcolorbox\}\s*$/u.test(text.slice(end.contentFrom, end.contentTo))) return undefined;
+  const title = /(?:^|,)\s*title\s*=\s*\{([^{}]*)\}/u.exec(opening[1] ?? "")?.[1] ?? "";
+  if (args === "1" ? title !== "#1" : /[#\\]/u.test(title)) return undefined;
+  return { environment, definition: { label: title || "文本框", style: "definition", numbered: false,
+    staticBox: true, ...(args === "1" ? {requiredHeading: true} : {}) } };
+}
+
+function parseStaticBoxCommand(text: string, control: ParsedControl, definitions: ReadonlyMap<string, TheoremDefinition>):
+  { name: string; environment: string; label?: string | undefined } | undefined {
+  if (!["newcommand", "renewcommand", "providecommand"].includes(control.name)) return undefined;
+  const name = readRequiredArgument(text, text[control.end] === "*" ? control.end + 1 : control.end);
+  const count = name === undefined ? undefined : readOptionalArgument(text, name.end);
+  const body = count === undefined ? undefined : readRequiredArgument(text, count.end);
+  if (name === undefined || count === undefined || body === undefined || text.slice(count.contentFrom, count.contentTo).trim() !== "1") return undefined;
+  const command = /^\\([A-Za-z@]+)$/u.exec(text.slice(name.contentFrom, name.contentTo).trim())?.[1];
+  const wrapper = /^\s*\\begin\s*\{([A-Za-z@][A-Za-z0-9@*:-]*)\}\s*(?:\{([^{}\\#]*)\})?\s*#1\s*\\end\s*\{\1\}\s*$/u.exec(text.slice(body.contentFrom, body.contentTo));
+  const definition = wrapper === null ? undefined : definitions.get(wrapper[1]!);
+  if (command === undefined || definition?.staticBox !== true || (definition.requiredHeading && wrapper?.[2] === undefined)) return undefined;
+  return {name: command, environment: wrapper![1]!, label: wrapper?.[2]};
 }
 
 function parseTrivlistStatement(
@@ -4315,11 +4800,10 @@ function parseVisualTextStyle(
     ["st", { bold: false, italic: false, underline: false, strike: true, smallCaps: false }],
     ["textsc", { bold: false, italic: false, underline: false, strike: false, smallCaps: true }],
   ]);
-  const simpleStyle = simple.get(control.name) ?? (["text", "textrm", "textsf", "texttt", "textnormal", "footnote"].includes(control.name)
+  const simpleStyle = simple.get(control.name) ?? (["text", "textrm", "textsf", "texttt", "textnormal"].includes(control.name)
     ? { bold: false, italic: false, underline: false, strike: false, smallCaps: false } : undefined);
   if (simpleStyle !== undefined) {
-    const optional = control.name === "footnote" ? readOptionalArgument(text, control.end) : undefined;
-    const content = readRequiredArgument(text, optional?.end ?? control.end);
+    const content = readRequiredArgument(text, control.end);
     return content === undefined
       ? undefined
       : {
@@ -4721,6 +5205,30 @@ function parseVisualTikzcdEnvironment(
   };
 }
 
+function parseVisualYoungDiagramSequence(text: string, from: number): VisualFigureRecord | undefined {
+  let cursor = from, end = from;
+  for (let count = 0; count < 16; count++) {
+    const control = readControl(text, cursor);
+    if (control?.name !== "ydiagram") break;
+    const optional = readOptionalArgument(text, control.end);
+    const argument = readRequiredArgument(text, optional?.end ?? control.end);
+    if (argument === undefined) break;
+    end = argument.end;
+    cursor = skipTrivia(text, end);
+    const spacing = readControl(text, cursor);
+    if (spacing?.name === "quad" || spacing?.name === "qquad") cursor = skipTrivia(text, spacing.end);
+    else if (spacing?.name === "hspace") {
+      const width = readRequiredArgument(text, spacing.end);
+      if (width === undefined) break;
+      cursor = skipTrivia(text, width.end);
+    }
+  }
+  const replacement = lineAwareReplacement(text, from, end);
+  if (end === from || !replacement.block) return undefined;
+  return {kind: "figure", replacement, bodyFrom: from, bodyTo: end, tex: text.slice(from, end),
+    caption: undefined, captionSegments: [], label: undefined};
+}
+
 function parseVisualTikzpictureEnvironment(
   text: string,
   beginFrom: number,
@@ -4934,6 +5442,23 @@ function skipOpaqueEnvironment(text: string, offset: number, environment: string
 
 function splitTikzcdOptions(source: string): readonly string[] {
   return splitTikzcdOptionSlices(source, 0).map((option) => option.source);
+}
+
+function parseVisualFigureEnvironment(text: string, beginFrom: number, commandEnd: number, environment: string): VisualFigureRecord | undefined {
+  const bounds = findEnvironmentBounds(text, commandEnd, environment);
+  if (bounds === undefined) return undefined;
+  const body = text.slice(commandEnd, bounds.endFrom);
+  if (countVisualFigureObjects(text, commandEnd, bounds.endFrom) < 2 &&
+      !/\\(?:ydiagram|tikz|vbox|vcenter)\b|\\begin\s*\{tikzpicture\}/u.test(body)) return undefined;
+  const replacement = lineAwareReplacement(text, beginFrom, bounds.endTo);
+  if (!replacement.block) return undefined;
+  const options = readOptionalArgument(text, commandEnd);
+  const caption = findCommandArgument(text, commandEnd, bounds.endFrom, "caption");
+  return { kind: "figure", replacement, bodyFrom: options?.end ?? commandEnd, bodyTo: bounds.endFrom,
+    tex: text.slice(beginFrom, bounds.endTo),
+    caption: caption === undefined ? undefined : latexToPlainText(text.slice(caption.contentFrom, caption.contentTo)),
+    captionSegments: caption === undefined ? [] : visualInlineContentSegments(text.slice(caption.contentFrom, caption.contentTo), caption.contentFrom),
+    label: findLabelRecord(text, commandEnd, bounds.endFrom) };
 }
 
 function parseVisualImageEnvironment(
@@ -5186,32 +5711,36 @@ function findLabelRecord(
   return undefined;
 }
 
-function findIncludeGraphics(
-  text: string,
-  from: number,
-  to: number,
-): { readonly path: string } | undefined {
+function findIncludeGraphics(text: string, from: number, to: number): { readonly path: string } | undefined {
+  return visualImageSourcePaths(text, from, to)[0];
+}
+
+/** Literal image arguments only; offsets permit staging without changing source. */
+export function visualImageSourcePaths(text: string, from = 0, to = text.length): readonly { readonly path: string; readonly from: number; readonly to: number }[] {
+  const result: { path: string; from: number; to: number }[] = [];
   let index = from;
-  while (index < to) {
-    const next = text.indexOf("\\", index);
-    if (next < 0 || next >= to) {
-      return undefined;
+  while (index < to && result.length < 17) {
+    if (text[index] === "%" && !isEscapedAt(text, index)) { index = skipComment(text, index); continue; }
+    if (text[index] !== "\\") { index++; continue; }
+    const control = readControl(text, index);
+    if (control === undefined) { index++; continue; }
+    if (control.name === "verb") { index = skipVerb(text, control.end); continue; }
+    if (isVisualLabelDefinitionCommand(control.name)) { index = skipVisualLabelDefinition(text, control, to) ?? to; continue; }
+    if (control.name === "begin") {
+      const argument = readRequiredArgument(text, control.end);
+      const environment = argument === undefined ? "" : text.slice(argument.contentFrom, argument.contentTo).trim();
+      if (argument !== undefined && VERBATIM_ENVIRONMENTS.has(environment)) { index = skipOpaqueEnvironment(text, argument.end, environment); continue; }
     }
-    const control = readControl(text, next);
-    if (control?.name !== "includegraphics") {
-      index = control?.end ?? next + 1;
-      continue;
-    }
+    if (control.name !== "includegraphics") { index = control.end; continue; }
     const afterStar = text[control.end] === "*" ? control.end + 1 : control.end;
     const optional = readOptionalArgument(text, afterStar);
     const argument = readRequiredArgument(text, optional?.end ?? afterStar);
-    if (argument === undefined || argument.end > to) {
-      return undefined;
-    }
+    if (argument === undefined || argument.end > to) break;
     const imagePath = text.slice(argument.contentFrom, argument.contentTo).trim();
-    return validVisualImagePath(imagePath) ? { path: imagePath } : undefined;
+    if (validVisualImagePath(imagePath)) result.push({ path: imagePath, from: argument.contentFrom, to: argument.contentTo });
+    index = argument.end;
   }
-  return undefined;
+  return result;
 }
 
 function validVisualImagePath(value: string): boolean {
@@ -5958,6 +6487,8 @@ const HIDDEN_TITLE_METADATA_COMMANDS = new Set([
   "corref",
   "fnref",
   "orcidlink",
+  "vspace",
+  "hspace",
 ]);
 
 function stripTitleMetadataMarkers(value: string): string {
@@ -5983,8 +6514,9 @@ function stripTitleMetadataMarkers(value: string): string {
       index += 1;
       continue;
     }
-    const optional = readOptionalArgument(prepared, control.end);
-    const argument = readRequiredArgument(prepared, optional?.end ?? control.end);
+    const end = prepared[control.end] === "*" ? control.end + 1 : control.end;
+    const optional = readOptionalArgument(prepared, end);
+    const argument = readRequiredArgument(prepared, optional?.end ?? end);
     index = argument?.end ?? optional?.end ?? control.end;
   }
   return output;
@@ -6470,6 +7002,7 @@ function structureRecordStart(record: VisualStructureRecord): number {
     case "reference":
     case "citation":
     case "textStyle":
+    case "footnote":
     case "accent":
       return record.from;
     case "maketitle":
@@ -6477,6 +7010,7 @@ function structureRecordStart(record: VisualStructureRecord): number {
     case "keywords":
     case "table":
     case "tikzcd":
+    case "figure":
     case "tikzpicture":
     case "image":
     case "bibliography":

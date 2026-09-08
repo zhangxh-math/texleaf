@@ -1,7 +1,7 @@
 # TeXLeaf
 
 <p align="center">
-  <img src="media/icon.png" width="112" alt="TeXLeaf 图标">
+  <img src="https://raw.githubusercontent.com/zhangxh-math/texleaf/main/media/icon.png" width="112" alt="TeXLeaf 图标">
 </p>
 
 <p align="center">
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <strong>TeXLeaf 1.1.1</strong> · VS Code 1.98+ · Windows / macOS / Linux · GPL-3.0-only
+  <strong>TeXLeaf 1.2.0</strong> · VS Code 1.98+ · Windows / macOS / Linux · GPL-3.0-only
 </p>
 
 TeXLeaf 始终编辑原来的 `.tex` / `.bib` 文件，不创建中间文档，也不改变 LaTeX 源码格式。可视化模式、同标签页源码模式和 VS Code 原生编辑器共享同一份 `TextDocument`、保存状态与 Undo/Redo 历史。
@@ -18,12 +18,18 @@ TeXLeaf 不自带 TeX 编译器。编译、PDF 查看和 SyncTeX 交给 [LaTeX W
 
 当前 **TeXLeaf 是 LaTeX Workshop 桥接版**：它复用 LaTeX Workshop 的公开命令、编译配方、PDF 查看器、SyncTeX 和编译诊断，不重复实现一套 TeX 编译基础设施。后续还将推出 **TeXLeaf-Z**——不再桥接 LaTeX Workshop、提供集成编译工作流的版本；具体功能范围和发布时间以后续公告为准，敬请期待。
 
+## 后续维护方向
+
+TeXLeaf 的主要功能现已基本完成。后续更新将聚焦于问题修复，以及可视化编辑器对更多 LaTeX 模板和命令的兼容适配。模板适配将优先处理赞助者的需求。
+
+如果在使用中发现 Bug，欢迎通过 [GitHub Issues](https://github.com/zhangxh-math/texleaf/issues) 反馈。
+
 ## 功能总览
 
 | 功能 | 能做什么 |
 | --- | --- |
 | 可视化 LaTeX 编辑器 | 把完整公式、标题、定理、证明、列表、表格、图片、参考文献等显示为可编辑结构；点击任意部件可原位恢复准确源码。 |
-| 公式编辑与 Math Preview | 行内、行间及 `equation` / `align` / matrix 等环境由本地 MathJax 4 Worker 渲染；编辑时显示带精确光标的浮动预览，离开后自动恢复排版。 |
+| 公式编辑与 Math Preview | 标准模式下，行内、行间及 `equation` / `align` / matrix 等环境由本地 MathJax 4 Worker 渲染；编辑时显示带精确光标的浮动预览，离开后自动恢复排版。 |
 | 表格与交换图 | 用结构化表单编辑 table/tabular 的行列、单元格、表题、标签和样式；直接操纵 `tikzcd` 节点、箭头与标签，再安全回写原环境。 |
 | 片段与模板 | 223 条可编辑 Snippet、四个整篇 article/Beamer 模板、结构化管理器、高级 JSONC、导入/导出和 Settings Sync。 |
 | 数学输入辅助 | 自动分式、级联括号放大、Tabout、成对括号、空公式删除、matrix/align 键位、Visual 选区片段和嵌套 tabstop。 |
@@ -34,55 +40,55 @@ TeXLeaf 不自带 TeX 编译器。编译、PDF 查看和 SyncTeX 交给 [LaTeX W
 
 ## 功能演示
 
-以下 GIF 均录自隔离的 VS Code Extension Host 和当前构建，按真实鼠标、键盘与滚动过程连续取帧；文档、作者、邮箱及引用均为测试数据。
+以下 GIF 沿用仓库已有的功能演示，录自隔离的 VS Code Extension Host，按真实鼠标、键盘与滚动过程连续取帧；文档、作者、邮箱及引用均为测试数据。演示展示基本交互，界面细节以安装版本为准。
 
 ### 点击公式，原位编辑，再自动排版
 
 点击公式后恢复 LaTeX 源码；输入时浮动 Math Preview 实时更新；光标离开公式范围后重新生成静态公式。
 
-![TeXLeaf 行内公式原位编辑演示](media/demo-formula-editing.gif)
+![TeXLeaf 行内公式原位编辑演示](https://raw.githubusercontent.com/zhangxh-math/texleaf/main/media/demo-formula-editing.gif)
 
 ### Snippet 自动展开与 Tab 占位符
 
 在数学区域输入 `//` 会连续展开为分式片段；随后用 Tab 在分子、分母和最终位置之间移动，离开源码范围后立即恢复排版。
 
-![TeXLeaf Snippet 自动展开和 Tab 占位符演示](media/demo-snippets.gif)
+![TeXLeaf Snippet 自动展开和 Tab 占位符演示](https://raw.githubusercontent.com/zhangxh-math/texleaf/main/media/demo-snippets.gif)
 
 ### 定理结构、成对环境边界与多行公式
 
 定理和证明以结构卡片显示；点击“编辑环境”或对应逻辑行会同时显示 `\begin` / `\end`，其中的 `align` 仍可继续原位展开。
 
-![TeXLeaf 定理环境和多行公式编辑演示](media/demo-structure-source.gif)
+![TeXLeaf 定理环境和多行公式编辑演示](https://raw.githubusercontent.com/zhangxh-math/texleaf/main/media/demo-structure-source.gif)
 
 ### 表格可视化编辑
 
 打开结构化表格编辑器后，可以修改环境、浮动位置、宽度、对齐、横线样式、caption、label、行列和单元格；“应用”会把当前模型安全序列化回原 `.tex`。演示把 Accuracy 从 `0.97` 连续修改并回写为 `0.99`。
 
-![TeXLeaf 表格可视化编辑连续演示](media/demo-table-visualization.gif)
+![TeXLeaf 表格可视化编辑连续演示](https://raw.githubusercontent.com/zhangxh-math/texleaf/main/media/demo-table-visualization.gif)
 
 ### 交换图直接操纵编辑
 
 `tikzcd` 可切换到直接操纵画布：选择节点或箭头后编辑标签、增删行列和箭头，并在应用时只重写交换图正文、保留环境选项。演示把节点 `B` 修改为 `$B_1$` 并回写到主预览。
 
-![TeXLeaf 交换图直接操纵编辑连续演示](media/demo-commutative-diagram.gif)
+![TeXLeaf 交换图直接操纵编辑连续演示](https://raw.githubusercontent.com/zhangxh-math/texleaf/main/media/demo-commutative-diagram.gif)
 
 ### 文献引用在可视化与源码之间切换
 
 cite 以作者—年份 chip 显示；点击后编辑准确引用命令，光标移出引用范围后 chip 和文献详情生命周期一起恢复。
 
-![TeXLeaf 文献引用编辑演示](media/demo-citation-editing.gif)
+![TeXLeaf 文献引用编辑演示](https://raw.githubusercontent.com/zhangxh-math/texleaf/main/media/demo-citation-editing.gif)
 
 ### 文献详情与多行公式引用预览
 
 悬停 citation 会显示项目文献详情；移开鼠标后卡片立即消失。悬停指向 `align` 中第二个 label 的 `\eqref` 时，预览显示完整多行公式，并只高亮被引用的那一行。
 
-![TeXLeaf 文献与多行公式引用预览演示](media/demo-reference-previews.gif)
+![TeXLeaf 文献与多行公式引用预览演示](https://raw.githubusercontent.com/zhangxh-math/texleaf/main/media/demo-reference-previews.gif)
 
 ### AI 问题使用 VS Code 原生 Problems
 
 AI 语言问题与 LaTeX Workshop 编译问题共用 VS Code 原生 Problems，但由各自扩展维护；点击 AI 条目会跳到准确行列并显示应用/忽略操作。
 
-![TeXLeaf AI 原生问题面板演示](media/demo-native-problems.gif)
+![TeXLeaf AI 原生问题面板演示](https://raw.githubusercontent.com/zhangxh-math/texleaf/main/media/demo-native-problems.gif)
 
 ## 快速开始
 
@@ -93,6 +99,12 @@ AI 语言问题与 LaTeX Workshop 编译问题共用 VS Code 原生 Problems，�
 5. 从工具栏运行编译、PDF 或 SyncTeX。项目引用、Zotero 和 AI 均可按需启用，互不强制依赖。
 
 如果希望 `.tex` 默认使用原生源码编辑器，将 `texleaf.visualEditor.defaultMode` 设为 `source`；需要时运行 **TeXLeaf: 使用可视化编辑器打开**，或使用 **Reopen Editor With...**。
+
+## 可视化兼容模式
+
+工具栏可切换“标准可视化”和“增强可视化”。默认标准模式使用随扩展提供的 MathJax；增强模式调用本机 TeX 排版复杂公式、TikZ、交换图和组合图片，并提供进度、取消和图形缓存。需要本机安装相应引擎及文档使用的宏包；可通过 `texleaf.visualEditor.texBinPath` 指定 TeX 可执行文件目录。
+
+图形缓存默认上限为 128 MB，可用 `texleaf.visualEditor.graphCacheLimitMB` 调整或从工具栏清空。无法安全预览的内容保留源码与说明；完整文档的最终排版仍以 LaTeX Workshop 编译的 PDF 为准。
 
 ## 可视化编辑器的关键交互
 

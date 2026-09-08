@@ -46,6 +46,9 @@
 | `texleaf.aiWriting.maxDocumentLength` | 手动整篇检查单次最多发送的正文 UTF-16 字符数，默认 30000。 |
 | `texleaf.project.rootFile` | 可选的工作区文件夹相对主 TeX 文件。留空时依次使用有效 `% !TEX root`、当前文件的 `documentclass` 和唯一反向 include；显式值无效时 fail closed，不猜另一个 root。 |
 | `texleaf.visualEditor.defaultMode` | 普通打开 `.tex` 时默认使用 `visual`（默认）或 `source`。这是 application 级用户/Profile 选择；只管理 `*.tex` 的编辑器关联，不改其他文件类型。 |
+| `texleaf.visualEditor.compatibilityMode` | `basic`（默认）使用 MathJax；`maximum` 使用本机 TeX 排版复杂公式和图形，可在可视化工具栏切换。 |
+| `texleaf.visualEditor.graphCacheLimitMB` | 本地图形缓存容量，默认 128 MB，可设为 16–2048 MB；工具栏支持查看和清空缓存。 |
+| `texleaf.visualEditor.texBinPath` | 增强可视化模式的本机 TeX 可执行文件目录；留空时按系统 PATH 查找。 |
 | `texleaf.visualEditor.providerCompletions` | 是否通过 VS Code 官方补全提供器命令把安全普通候选与常见 Snippet 桥接到可视化/同标签页源码模式，默认开启。带命令回调、额外编辑或复杂 transform 的候选仍只在“↗ 原生”中使用。 |
 | `texleaf.visualEditor.latexWorkshopCompatibility` | 保存及可视化工具栏命令是否短暂建立 LaTeX Workshop 需要的原生 TextEditor/光标上下文，默认开启。 |
 | `texleaf.mathPreview.enabled` | 内置数学公式预览总开关，默认开启。 |
@@ -118,7 +121,9 @@ Math Preview 的项目入口环境按模板 capability、显式 `texleaf.mathPre
 
 Custom Text Editor、其同标签页源码模式和另开的原生源码编辑器共享一个 VS Code `TextDocument`。工具栏“源码模式”只在当前 Webview 内重新配置 CodeMirror：隐藏结构/公式替换，显示完整 LaTeX，继续提供随 VS Code 主题动态更新的语法颜色和活动 Math Preview；再次点击“可视化模式”原位恢复。把同一 `.tex` 的原生源码视图和可视化视图同时放在不同编辑组时，源码侧修改会经文档变化事件推送给全部可视化实例；Webview 编辑则经过有序、版本化且有范围/总量上限的 `WorkspaceEdit` 回写，因此原生源码视图立即看到同一改动。主机同步事务不会被 Webview 再次回传，避免更新循环；快速冲突或过时消息会拒绝猜测性合并，并以当前 `TextDocument` 重新同步。所有视图共享 dirty 状态、保存结果和原生 Undo/Redo 历史。自动片段响应还会核对 client revision、原始匹配文本和每个外层括号修饰范围，过时响应直接失效。可视化模式使用与源码模式相同的 SnippetRuntime、TemplateManager、分子边界、Tabout、自动括号放大和 LaTeX 上下文扫描结果；CodeMirror 只负责即时括号、选择与可导航占位符。外部修改、保存和原生 Undo/Redo 后会重新同步整份文档。
 
-LaTeX Workshop 10.18 没有对外返回编译 API，并且其公开 build/view/synctex 命令要求 `window.activeTextEditor`。兼容桥只调用这些公开命令：先在同一编辑组短暂显示原生文档并还原当前选择，待命令取得上下文后返回可视化面板。保存时也这样处理，默认 `onFileChange` 自动构建会保留约 400 ms 的原生上下文，因此可能看到短暂切换；可关闭 `texleaf.visualEditor.latexWorkshopCompatibility`，再手动进入源码模式运行 LaTeX Workshop。
+LaTeX Workshop 10.18 的公开 build/view/synctex 命令依赖原生编辑器上下文。TeXLeaf 优先通过兼容桥使用已加载的 Workshop 编译配方和执行器；运行时结构不兼容时回退到公开命令及短暂的原生上下文。保存时的自动构建兼容路径可能短暂切换编辑器；可关闭 `texleaf.visualEditor.latexWorkshopCompatibility` 后手动进入原生编辑器操作。
+
+通过 TeXLeaf 工具栏发起的、路径与成功状态可验证的构建，可为可视化引用提供 `.aux` 编号。自定义脚本、无法确定产物位置的配方、过期产物或未保存修改会继续使用源码推断；默认读取配置脚本的 `latexmk` 配方也不会被当成已验证编号来源。
 
 Webview 本身仍不是原生 Monaco `TextEditor`。可视化模式已经支持 TeXLeaf 自动/手动/Visual 片段、模板、Tab 占位符、自动分数/括号放大、Tabout、matrix/align 键位、结构预览、引用选择与导入、AI 检查标记和操作，以及显式“AI 续写”。开启 `texleaf.visualEditor.providerCompletions` 后，Webview 会调用 VS Code 官方 `vscode.executeCompletionItemProvider`，把 TeXLeaf、LaTeX Workshop 等已注册 Provider 返回的普通文本和常见 Snippet 候选显示在主题跟随的 CodeMirror 补全框中；自动触发和 `Ctrl+Space` 都受版本、选区、范围、长度与上下文校验。候选若含命令回调、`additionalTextEdits`、多行替换范围或复杂 Snippet transform 会 fail closed 跳过，因为这些行为无法在非 Monaco 宿主中原样提交。Hover、Code Action、Inline Suggest、扩展专属键位、完整原生 Suggest 交互和 TeXLeaf 自动浮现的 AI 灰字仍需工具栏“↗ 原生”或命令 `TeXLeaf: 切换到 LaTeX 源码编辑器`。同标签页“源码模式”提供完整源码、高亮和 Math Preview，但不会伪装成 Monaco Provider 宿主。所有模式始终编辑同一份文本。
 
@@ -250,7 +255,7 @@ VS Code 稳定扩展 API 没有可供此功能使用的公开 view-zone 或任�
 
 TeXLeaf 使用离线打包的 MathJax SVG 渲染器和 New Computer Modern 字体。MathJax 在首次需要公式时才在独立 Node Worker 中载入，主扩展线程不执行排版。扫描结果按 `TextDocument.version` 缓存，重复公式复用有上限的 SVG 缓存，异步结果带代次校验，过时渲染不会覆盖新内容。渲染有 5 秒超时、长度上限、宏数量/展开上限和短暂错误冷却；SVG 会拒绝脚本、事件属性、外部链接、`foreignObject` 等活动内容。
 
-文档前言中支持 `newcommand`、`renewcommand`、`providecommand` 和 `DeclareMathOperator`（含星号变体）。可视化编辑器在已确定的多文件项目中会按 TeX 顺序展开根导言内可安全解析的字面量 include，并把得到的不可变宏环境传给正文 fragment；正文文件自己的静态宏按源码位置生效，因此定义前后的公式不会错误共用一个缓存键。ThuThesis 的 `symup`、`symbf`、`symbfsf`、`uppi`、`increment` 和 `dif` 有受限的 MathJax 近似能力；条件、间接控制序列、文件 I/O、动态定义或其他无法静态翻译的 replacement 会 fail closed，不覆盖安全 fallback。独立的源码编辑器 Math Preview 仍只扫描当前物理文档；所有模式都不执行 class、package 或任意 TeX 宏，也不承诺复刻 XeLaTeX 字体与间距。渲染器只加载显式允许的 MathJax package，不启用 `require`、`autoload`、HTML/TeXHTML 或运行时 `setoptions`。
+文档前言中支持 `newcommand`、`renewcommand`、`providecommand` 和 `DeclareMathOperator`（含星号变体）。可视化编辑器在已确定的多文件项目中会按 TeX 顺序展开根导言内可安全解析的字面量 include，并把得到的不可变宏环境传给正文 fragment；正文文件自己的静态宏按源码位置生效，因此定义前后的公式不会错误共用一个缓存键。ThuThesis 的 `symup`、`symbf`、`symbfsf`、`uppi`、`increment` 和 `dif` 有受限的 MathJax 近似能力；条件、间接控制序列、文件 I/O、动态定义或其他无法静态翻译的 replacement 会 fail closed，不覆盖安全 fallback。独立的源码编辑器 Math Preview 仍只扫描当前物理文档；MathJax 标准模式不执行 class、package 或任意 TeX 宏，也不承诺复刻 XeLaTeX 字体与间距；增强可视化模式会使用本机 TeX 和项目导言排版局部预览。渲染器只加载显式允许的 MathJax package，不启用 `require`、`autoload`、HTML/TeXHTML 或运行时 `setoptions`。
 
 Math Preview 的产品方向受到 Ultra Math Preview 与 hscopes-booster 的启发；TeXLeaf 当前使用随 VSIX 提供的 MathJax Worker、区域扫描、宏处理、布局规划、缓存和 SVG 安全处理来完成活动公式预览。完整致谢和实现边界见 README、Wiki 与 `THIRD_PARTY_NOTICES.md`。
 

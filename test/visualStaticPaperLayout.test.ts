@@ -40,11 +40,11 @@ We thank the readers.
   assert.ok(records.some(r => r.kind === "heading" && r.title === "Next" && r.number === "1"));
 });
 
-test("dynamic layout, semantic counters, custom commands and invalid columns stay visible source", () => {
+test("dynamic layout, dynamic counters, custom commands and invalid columns stay visible source", () => {
   const source = String.raw`\documentclass{article}\usepackage{jheppub}
 \renewcommand{\acknowledgments}{Custom thanks}\begin{document}
 \setlength{\itemsep}{\customLength}\setlength{\customLength}{6pt}
-\setcounter{section}{1}\setcounter{page}{\nextPage}
+\setcounter{section}{\nextSection}\setcounter{page}{\nextPage}
 \begin{multicols}{\columns}Dynamic columns\end{multicols}
 \acknowledgments`;
   const records = scanVisualDocumentStructure(source).records;

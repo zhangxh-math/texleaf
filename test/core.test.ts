@@ -8885,7 +8885,7 @@ A \arrow[r] & B
   );
   assert.equal(
     findVisualLabeledStructureForLabel(source, records, 'diag:tikzpicture')?.record.kind,
-    'tikzpicture',
+    'figure',
   );
   assert.equal(
     visualReferenceDisplayLabel(source, records, 'tab:values', 'table'),
@@ -8934,7 +8934,7 @@ A \arrow[r] & B
   }
 });
 
-test('visual reference index fails closed for duplicate labels and ambiguous figures', () => {
+test('visual reference index rejects duplicate labels and resolves composite figures as complete targets', () => {
   const source = String.raw`\documentclass{article}
 \begin{document}
 \begin{table}
@@ -8978,12 +8978,11 @@ A \arrow[r] & B
     ).length,
     2,
   );
-  for (const key of [
-    'shared:duplicate',
-    'fig:mixed',
-    'fig:multiple-images',
-    'diag:multiple',
-  ]) {
+  for (const key of ['fig:mixed', 'fig:multiple-images', 'diag:multiple']) {
+    assert.equal(index.get(key)?.targetKind, 'diagram');
+    assert.equal(findVisualLabeledStructureForLabel(source, records, key)?.record.kind, 'figure');
+  }
+  for (const key of ['shared:duplicate']) {
     assert.equal(index.has(key), false);
     assert.equal(
       findVisualLabeledStructureForLabel(source, records, key),
