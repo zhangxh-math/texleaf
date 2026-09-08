@@ -12,7 +12,7 @@ import {
   VISUAL_FORMULA_FOREGROUND,
   type MathPreviewRenderInput,
 } from "./core";
-import { MathPreviewWorkerClient } from "./mathPreviewController";
+import { MathPreviewWorkerClient } from "./mathPreviewWorkerClient";
 import type { MathPreviewWorkerSuccess } from "./mathPreviewProtocol";
 import { LocalLatexPreviewRenderer } from "./localLatexPreviewRenderer";
 
@@ -22,14 +22,13 @@ const CURSOR_RENDER_CACHE_ITEMS = 8;
 const CURSOR_RENDER_CACHE_BYTES = 8 * 1024 * 1024;
 const CURSOR_WORKER_WARMUP_COLOR = "#ff2d95";
 
-type RenderLane = "static" | "cursor" | "interactive";
+type RenderLane = "static" | "structure" | "cursor" | "interactive";
 
 interface CompletedRenderEntry {
   readonly result: MathPreviewWorkerSuccess;
   readonly bytes: number;
 }
 
-/** A byte- and item-bounded LRU containing only completed SVG assets. */
 class CompletedRenderCache {
   private readonly entries = new Map<string, CompletedRenderEntry>();
   private bytes = 0;
@@ -95,17 +94,17 @@ export class VisualEditorRenderer implements vscode.Disposable {
   private readonly local = new LocalLatexPreviewRenderer();
   private readonly cursorLocal = new LocalLatexPreviewRenderer();
   private readonly interactiveLocal = new LocalLatexPreviewRenderer();
-  /** Static and interactive lanes share completed assets only. */
+  /** Static, structure, and interactive lanes share only completed assets. */
   private readonly completedCache = new CompletedRenderCache(
     COMPLETED_RENDER_CACHE_ITEMS,
     COMPLETED_RENDER_CACHE_BYTES,
   );
-  /** Short-lived caret states must not evict document formulae. */
+  /** Cursor states are short-lived and must never evict document formulae. */
   private readonly cursorCache = new CompletedRenderCache(
     CURSOR_RENDER_CACHE_ITEMS,
     CURSOR_RENDER_CACHE_BYTES,
   );
-  /** Pending work is kept outside the completed LRU and cannot be evicted. */
+  /** Pending work stays outside the completed LRU and cannot be evicted. */
   private readonly inFlight = new Map<string, Promise<MathPreviewWorkerSuccess>>();
   private readonly cursorReady: Promise<void>;
   private cacheEpoch = 0;
@@ -113,6 +112,9 @@ export class VisualEditorRenderer implements vscode.Disposable {
 
   public constructor(context: vscode.ExtensionContext) {
     const workerPath = context.asAbsolutePath("dist/mathPreviewWorker.js");
+    // Macro environments are comparatively numerous in document rendering but
+    // tiny in the cursor lane. Per-lane bounds avoid retaining 36 heavyweight
+    // MathJax documents across three workers and reduce long-session GC pauses.
     this.worker = new MathPreviewWorkerClient(workerPath, 8);
     this.cursorWorker = new MathPreviewWorkerClient(workerPath, 2);
     this.interactiveWorker = new MathPreviewWorkerClient(workerPath, 4);
@@ -134,8 +136,25 @@ export class VisualEditorRenderer implements vscode.Disposable {
   public render(
     input: MathPreviewRenderInput,
     scale: number,
+    texBinPath?: string,
   ): Promise<MathPreviewWorkerSuccess> {
-    return this.renderInternal("static", input, scale, this.worker, this.local);
+    return this.renderInternal("static", input, scale, this.worker, this.local, texBinPath);
+  }
+
+  /** Low-priority document-structure asset, isolated from viewport cache keys. */
+  public renderStructure(
+    input: MathPreviewRenderInput,
+    scale: number,
+    texBinPath?: string,
+  ): Promise<MathPreviewWorkerSuccess> {
+    return this.renderInternal(
+      "structure",
+      input,
+      scale,
+      this.worker,
+      this.local,
+      texBinPath,
+    );
   }
 
   /** Render the active-source formula without the normal presentation cap. */
@@ -143,6 +162,7 @@ export class VisualEditorRenderer implements vscode.Disposable {
     input: MathPreviewRenderInput,
     scale: number,
     cursorMarkerColor: string,
+    texBinPath?: string,
   ): Promise<MathPreviewWorkerSuccess> {
     return this.cursorReady.then(() => this.renderInternal(
       "cursor",
@@ -150,6 +170,7 @@ export class VisualEditorRenderer implements vscode.Disposable {
       scale,
       this.cursorWorker,
       this.cursorLocal,
+      texBinPath,
       cursorMarkerColor,
       false,
     ));
@@ -165,6 +186,7 @@ export class VisualEditorRenderer implements vscode.Disposable {
   public renderCommittedFormula(
     input: MathPreviewRenderInput,
     scale: number,
+    texBinPath?: string,
   ): Promise<MathPreviewWorkerSuccess> {
     return this.renderInternal(
       "interactive",
@@ -172,6 +194,7 @@ export class VisualEditorRenderer implements vscode.Disposable {
       scale,
       this.interactiveWorker,
       this.interactiveLocal,
+      texBinPath,
     );
   }
 
@@ -182,6 +205,7 @@ export class VisualEditorRenderer implements vscode.Disposable {
   public renderInteractive(
     input: MathPreviewRenderInput,
     scale: number,
+    texBinPath?: string,
   ): Promise<MathPreviewWorkerSuccess> {
     return this.renderInternal(
       "interactive",
@@ -189,6 +213,7 @@ export class VisualEditorRenderer implements vscode.Disposable {
       scale,
       this.interactiveWorker,
       this.interactiveLocal,
+      texBinPath,
     );
   }
 
@@ -198,6 +223,7 @@ export class VisualEditorRenderer implements vscode.Disposable {
     scale: number,
     worker: MathPreviewWorkerClient,
     local: LocalLatexPreviewRenderer,
+    texBinPath?: string,
     cursorMarkerColor?: string,
     latestOnly = false,
   ): Promise<MathPreviewWorkerSuccess> {
@@ -212,6 +238,7 @@ export class VisualEditorRenderer implements vscode.Disposable {
       input.display,
       input.macroFingerprint,
       scale,
+      usesLocalRenderer ? texBinPath : undefined,
       cursorMarkerColor,
     ]);
     const completed = lane === "cursor" ? this.cursorCache : this.completedCache;
@@ -220,8 +247,9 @@ export class VisualEditorRenderer implements vscode.Disposable {
       return Promise.resolve(cached);
     }
 
-    // Pending work stays lane-specific: an interactive request may duplicate a
-    // background render instead of inheriting the background queue's latency.
+    // Keep pending work lane-specific. A user-requested interactive render may
+    // duplicate one currently waiting in a background lane instead of inheriting
+    // that queue's latency; once either completes, all lanes share the result.
     const inFlightKey = `${lane}\u0000${key}`;
     const existing = this.inFlight.get(inFlightKey);
     if (existing !== undefined) {
@@ -230,7 +258,7 @@ export class VisualEditorRenderer implements vscode.Disposable {
 
     const epoch = this.cacheEpoch;
     const rendered = usesLocalRenderer
-      ? local.render(input, scale, cursorMarkerColor)
+      ? local.render(input, scale, cursorMarkerColor, texBinPath)
       : worker[latestOnly ? "renderLatest" : "render"]({
           tex: input.tex,
           display: input.display,
@@ -285,4 +313,5 @@ export class VisualEditorRenderer implements vscode.Disposable {
     this.cursorLocal.dispose();
     this.interactiveLocal.dispose();
   }
+
 }

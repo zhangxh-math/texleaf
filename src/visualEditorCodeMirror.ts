@@ -11,19 +11,47 @@ import {
   type Completion,
 } from "@codemirror/autocomplete";
 import { isolateHistory } from "@codemirror/commands";
-import { indentService, indentUnit } from "@codemirror/language";
+import { indentService, indentUnit, matchBrackets } from "@codemirror/language";
 import {
   EditorSelection,
   EditorState,
+  RangeSet,
+  RangeValue,
   Transaction,
   type AnnotationType,
   type Extension,
+  type Text,
 } from "@codemirror/state";
 import {
   innermostLatexMathRegion,
   planVisualEnvironmentNameSync,
 } from "./core/visualEditing";
+import {
+  latexDelimiterPairAt,
+  latexDelimiterTokenOverlaps,
+  scanLatexDelimiterPairs,
+  type LatexDelimiterScan,
+} from "./core/latexDelimiterMatcher";
 import { scanLatexSegment } from "./core/latexScanner";
+import type { VisualEditorSelection } from "./visualEditorProtocol";
+
+/**
+ * Choose the first CodeMirror selection without letting a stale Webview restore
+ * override an explicit external `file.tex:line` request.
+ *
+ * Ordinary tab restoration still prefers the persisted caret. A forced open is
+ * different: its requested selection represents the action that opened this
+ * Webview and therefore has to win on the very first frame.
+ */
+export function visualInitialSelectionCandidate(
+  persisted: VisualEditorSelection | undefined,
+  requested: VisualEditorSelection | undefined,
+  explicitRequest: boolean,
+): VisualEditorSelection {
+  return explicitRequest
+    ? requested ?? persisted ?? { anchor: 0, head: 0 }
+    : persisted ?? requested ?? { anchor: 0, head: 0 };
+}
 
 export interface CodeMirrorSnippetTarget {
   readonly state: EditorState;
@@ -80,6 +108,154 @@ export interface ChangedDocumentLineFilter {
   readonly filterFrom: number;
   readonly filterTo: number;
   filter(from: number, to: number): boolean;
+}
+
+export interface VisualSelectionPresentationRange {
+  readonly from: number;
+  readonly to: number;
+}
+
+export interface VisualActiveBracketPair {
+  readonly first: { readonly from: number; readonly to: number };
+  readonly second: { readonly from: number; readonly to: number };
+}
+
+const visualLatexDelimiterScanCache = new WeakMap<Text, LatexDelimiterScan>();
+
+function visualLatexDelimiterScan(state: EditorState): LatexDelimiterScan {
+  const cached = visualLatexDelimiterScanCache.get(state.doc);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const scan = scanLatexDelimiterPairs(state.doc.toString());
+  visualLatexDelimiterScanCache.set(state.doc, scan);
+  return scan;
+}
+
+/**
+ * Resolve the LaTeX delimiter or literal bracket pair touching every empty
+ * CodeMirror caret.
+ *
+ * Semantic LaTeX atoms win over the character immediately to their left. This
+ * matters at boundaries such as `]\left(`, where a caret on the backslash must
+ * select the scalable pair rather than the preceding square bracket. Ordinary
+ * `()`, `[]`, and `{}` retain CodeMirror's own lookup order. The Webview paints
+ * these ranges without adding mark decorations, keeping the Windows IME DOM
+ * flat.
+ */
+export function visualActiveBracketPairs(
+  state: EditorState,
+): readonly VisualActiveBracketPair[] {
+  const pairs = new Map<string, VisualActiveBracketPair>();
+  const latexScan = visualLatexDelimiterScan(state);
+  for (const selection of state.selection.ranges) {
+    if (!selection.empty) {
+      continue;
+    }
+    const head = selection.head;
+    const latexMatch = latexDelimiterPairAt(latexScan, head);
+    if (latexMatch.touched) {
+      if (latexMatch.pair !== undefined) {
+        const pair = latexMatch.pair;
+        pairs.set(
+          `${pair.first.from}:${pair.first.to}:${pair.second.from}:${pair.second.to}`,
+          pair,
+        );
+      }
+      // A malformed semantic token remains authoritative. Falling through to
+      // the literal glyph inside `\left(` would claim an unrelated `)` and
+      // falsely present half-written LaTeX as a valid structural pair.
+      continue;
+    }
+    const match = matchBrackets(state, head, -1, {
+      brackets: "()[]{}",
+    }) ??
+      (head > 0
+        ? matchBrackets(state, head - 1, 1, { brackets: "()[]{}" })
+        : null) ??
+      matchBrackets(state, head, 1, { brackets: "()[]{}" }) ??
+      (head < state.doc.length
+        ? matchBrackets(state, head + 1, -1, { brackets: "()[]{}" })
+        : null);
+    if (!match?.matched || match.end === undefined) {
+      continue;
+    }
+    if (
+      latexDelimiterTokenOverlaps(latexScan, match.start.from, match.start.to) ||
+      latexDelimiterTokenOverlaps(latexScan, match.end.from, match.end.to)
+    ) {
+      continue;
+    }
+    const [first, second] = match.start.from <= match.end.from
+      ? [match.start, match.end]
+      : [match.end, match.start];
+    const pair = { first, second } as const;
+    pairs.set(
+      `${first.from}:${first.to}:${second.from}:${second.to}`,
+      pair,
+    );
+  }
+  return [...pairs.values()];
+}
+
+export class VisualSelectionPresentationRangeValue extends RangeValue {
+  public override readonly startSide = 1;
+  public override readonly endSide = -1;
+
+  public constructor(public readonly identity: number) {
+    super();
+  }
+
+  public override eq(other: RangeValue): boolean {
+    return other instanceof VisualSelectionPresentationRangeValue &&
+      other.identity === this.identity;
+  }
+}
+
+export type VisualSelectionPresentationRangeSet =
+  RangeSet<VisualSelectionPresentationRangeValue>;
+
+/** Build a mappable interval index for selection-dependent visual widgets. */
+export function buildVisualSelectionPresentationRangeSet(
+  ranges: readonly VisualSelectionPresentationRange[],
+): VisualSelectionPresentationRangeSet {
+  return RangeSet.of(
+    ranges
+      .filter((range) => range.from >= 0 && range.from < range.to)
+      .map((range, identity) =>
+        new VisualSelectionPresentationRangeValue(identity).range(
+          range.from,
+          range.to,
+        )
+      ),
+    true,
+  );
+}
+
+/**
+ * Identify only the hidden/source ranges whose presentation is affected by
+ * the current selection. Moving the caret anywhere else keeps the same key and
+ * can reuse the existing DecorationSets.
+ */
+export function visualSelectionPresentationKey(
+  state: EditorState,
+  ranges: VisualSelectionPresentationRangeSet,
+): string {
+  if (ranges.size === 0) {
+    return "";
+  }
+  const identities = new Set<number>();
+  for (const selection of state.selection.ranges) {
+    ranges.between(selection.from, selection.to, (from, to, value) => {
+      const touches = selection.empty
+        ? selection.head > from && selection.head < to
+        : selection.from < to && selection.to > from;
+      if (touches) {
+        identities.add(value.identity);
+      }
+    });
+  }
+  return [...identities].sort((left, right) => left - right).join(",");
 }
 
 export interface ProtectedFullwidthImeInsertion {
@@ -166,15 +342,8 @@ export function resolveVisualImeCompositionStartRange(
     valid(stableFrom, stableTo) &&
     valid(currentFrom, currentTo) &&
     (
-      // A collapsed caret captured immediately before Chromium broadened the
-      // formula selection remains authoritative only when it lies inside that
-      // broadened range.
       (stableFrom === stableTo &&
         stableFrom >= currentFrom && stableFrom <= currentTo) ||
-      // Non-empty stable ranges are recorded only for an explicit pointer drag.
-      // Chromium may broaden that genuine selection afterwards, so preserve the
-      // deliberate subset while requiring it to remain wholly inside the live
-      // range.
       (stableFrom < stableTo! &&
         stableFrom >= currentFrom && stableTo! <= currentTo)
     )
@@ -182,11 +351,8 @@ export function resolveVisualImeCompositionStartRange(
     return { from: stableFrom, to: stableTo! };
   }
   if (valid(currentFrom, currentTo)) {
-    // A decorated/replaced formula can expose a transient non-empty DOM range
-    // even though the user only placed a caret. Treating that range as a real
-    // selection lets the first Pinyin letter erase existing TeX (for example
-    // `+y^2`). With no trustworthy selection evidence, insertion at the right
-    // edge is lossless and matches the ordinary left-to-right caret position.
+    // With no trustworthy selection evidence, insertion at the right edge is
+    // lossless and matches the ordinary left-to-right caret position.
     return { from: currentTo, to: currentTo };
   }
   return undefined;
@@ -317,10 +483,10 @@ export function planProtectedFullwidthImeInsertion(
  * composition started.
  *
  * Chromium normally reports the same local replacement that the IME exposes
- * through `CompositionEvent.data`.  Around replaced visual decorations it may
+ * through `CompositionEvent.data`. Around replaced visual decorations it may
  * instead diff a much larger DOM fragment and report that unrelated TeX
- * braces, environment delimiters, or line breaks disappeared.  Applying that
- * broad replacement corrupts the source.  The composition event still carries
+ * braces, environment delimiters, or line breaks disappeared. Applying that
+ * broad replacement corrupts the source. The composition event still carries
  * the complete provisional text, so rebuild the one legitimate local edit and
  * let callers use the native transaction only when both documents agree.
  *
@@ -369,20 +535,17 @@ export function planVisualImeCompositionUpdate(
       locallyReportedCandidate.length >= current.length
     )
   ) {
-    // Microsoft Pinyin can consume Backspace itself (closing or shortening the
-    // candidate window) while Chromium reports a no-op replacement at the end
-    // of the provisional range.  In that event the visible candidate already
-    // lives in CodeMirror's document, so a no-op DOM diff must still remove one
-    // logical code point.  A genuinely shrinking local replacement remains the
-    // more precise signal and is handled by the branch below.
+    // Microsoft Pinyin can consume Backspace itself while Chromium reports a
+    // no-op replacement at the end of the provisional range. A no-op DOM diff
+    // must still remove one logical code point from the candidate.
     insert = removeLastUnicodeCodePoint(current);
   } else if (options.finalCommit === true && compositionText !== undefined) {
     // Chromium/CodeMirror can emit one final compose-tagged insertion after
     // `compositionend`, even though the provisional candidate is already in
     // the document. Treat that event as the authoritative replacement for the
-    // complete candidate, not as text appended to its end. This is both
-    // idempotent for punctuation (`；` must stay one `；`) and correct when a
-    // Pinyin candidate such as `ni` is committed as `你`.
+    // complete candidate, not as text appended to its end. This keeps a single
+    // full-width punctuation commit idempotent and still replaces Pinyin such
+    // as `ni` with the selected Chinese candidate `你`.
     insert = compositionText;
   } else if (locallyReportedCandidate !== undefined) {
     // A native edit wholly inside the currently tracked candidate is the most
@@ -577,12 +740,32 @@ export function visualEnvironmentNameSyncExtension(
       return transaction;
     }
     const changedRanges: Array<{ start: number; end: number }> = [];
+    let mayTouchEnvironmentName = false;
     transaction.changes.iterChanges(
-      (_fromA, _toA, fromB, toB) => {
+      (fromA, toA, fromB, toB) => {
         changedRanges.push({ start: fromB, end: toB });
+        mayTouchEnvironmentName ||=
+          visualEnvironmentNameTouchesDocumentRange(
+            transaction.startState.doc,
+            fromA,
+            toA,
+          ) ||
+          visualEnvironmentNameTouchesDocumentRange(
+            transaction.newDoc,
+            fromB,
+            toB,
+          );
       },
       true,
     );
+    // Nearly every ordinary keystroke is prose or mathematics, not an edit to
+    // a `\\begin{...}`/`\\end{...}` name. Avoid materialising and scanning the
+    // complete CodeMirror document unless a bounded old/new window can
+    // actually contain such a boundary. The old window is essential for
+    // deletions that remove the command itself.
+    if (!mayTouchEnvironmentName) {
+      return transaction;
+    }
     const mirrorChanges = planVisualEnvironmentNameSync(
       transaction.newDoc.toString(),
       changedRanges,
@@ -597,6 +780,110 @@ export function visualEnvironmentNameSyncExtension(
           },
         ];
   });
+}
+
+const VISUAL_ENVIRONMENT_NAME_MAX_LENGTH = 128;
+const VISUAL_ENVIRONMENT_GUARD_MAX_CHANGE_LENGTH = 4_096;
+const VISUAL_ENVIRONMENT_NAME_PATTERN = /^[A-Za-z0-9@*:_-]{0,128}$/u;
+const VISUAL_ENVIRONMENT_COMMAND_SUFFIX_PATTERN = /\\(?:begin|end)$/u;
+const VISUAL_ENVIRONMENT_WHITESPACE_CHUNK_LENGTH = 256;
+
+/**
+ * Cheaply decide whether one CodeMirror change can touch a real environment
+ * name. A nearby `\\begin`/`\\end` is not enough: short theorem/list bodies
+ * often keep both commands within a few hundred characters of every keystroke,
+ * and treating proximity as a hit restores the full-document scan this guard
+ * is meant to avoid.
+ *
+ * Environment names are bounded to 128 characters by the structural planner,
+ * so only a small window around an ordinary edit needs to be inspected. The
+ * command itself is resolved backwards from the opening brace. That backwards
+ * walk deliberately accepts arbitrary same-line spaces/tabs, matching
+ * `scanVisualEnvironmentTokens` rather than imposing a fixed scan radius.
+ */
+export function visualEnvironmentNameTouchesDocumentRange(
+  document: Text,
+  requestedFrom: number,
+  requestedTo: number,
+): boolean {
+  const requestedStart = Math.min(requestedFrom, requestedTo);
+  const requestedEnd = Math.max(requestedFrom, requestedTo);
+  const rangeFrom = Math.max(
+    0,
+    Math.min(document.length, Math.trunc(requestedStart)),
+  );
+  const rangeTo = Math.max(
+    rangeFrom,
+    Math.min(document.length, Math.trunc(requestedEnd)),
+  );
+  if (rangeTo - rangeFrom > VISUAL_ENVIRONMENT_GUARD_MAX_CHANGE_LENGTH) {
+    // Large replacements are uncommon and may contain several complete
+    // commands. Conservatively run the authoritative planner for them.
+    return true;
+  }
+
+  const scanFrom = Math.max(
+    0,
+    rangeFrom - VISUAL_ENVIRONMENT_NAME_MAX_LENGTH - 1,
+  );
+  const scanTo = Math.min(
+    document.length,
+    rangeTo + VISUAL_ENVIRONMENT_NAME_MAX_LENGTH + 1,
+  );
+  const local = document.sliceString(scanFrom, scanTo);
+  let openingOffset = local.indexOf("{");
+  while (openingOffset >= 0) {
+    const closingOffset = local.indexOf("}", openingOffset + 1);
+    if (
+      closingOffset >= 0 &&
+      closingOffset - openingOffset - 1 <= VISUAL_ENVIRONMENT_NAME_MAX_LENGTH
+    ) {
+      const name = local.slice(openingOffset + 1, closingOffset);
+      if (VISUAL_ENVIRONMENT_NAME_PATTERN.test(name)) {
+        const opening = scanFrom + openingOffset;
+        const nameFrom = opening + 1;
+        const nameTo = scanFrom + closingOffset;
+        const touchesName = rangeFrom === rangeTo
+          ? rangeFrom >= nameFrom && rangeFrom <= nameTo
+          : rangeFrom <= nameTo && rangeTo >= nameFrom;
+        if (
+          touchesName &&
+          visualEnvironmentCommandPrecedesBrace(document, opening)
+        ) {
+          return true;
+        }
+      }
+    }
+    openingOffset = local.indexOf("{", openingOffset + 1);
+  }
+  return false;
+}
+
+function visualEnvironmentCommandPrecedesBrace(
+  document: Text,
+  opening: number,
+): boolean {
+  const lineFrom = document.lineAt(opening).from;
+  let cursor = opening;
+  while (cursor > lineFrom) {
+    const chunkFrom = Math.max(
+      lineFrom,
+      cursor - VISUAL_ENVIRONMENT_WHITESPACE_CHUNK_LENGTH,
+    );
+    const chunk = document.sliceString(chunkFrom, cursor);
+    let offset = chunk.length;
+    while (offset > 0 && /[ \t]/u.test(chunk[offset - 1] ?? "")) {
+      offset -= 1;
+    }
+    cursor = chunkFrom + offset;
+    if (offset > 0) {
+      break;
+    }
+  }
+  const commandFrom = Math.max(lineFrom, cursor - "\\begin".length);
+  return VISUAL_ENVIRONMENT_COMMAND_SUFFIX_PATTERN.test(
+    document.sliceString(commandFrom, cursor),
+  );
 }
 
 /**
@@ -656,10 +943,9 @@ function changedRangeBetweenTexts(
 }
 
 /**
- * Keep an environment body one editor indentation unit deeper than its
- * matching `\\begin`, and align a closing `\\end` with that opener. This owns
- * only LaTeX environments; all other lines defer to CodeMirror's language
- * indentation service.
+ * Keep environment and display-math bodies one editor indentation unit deeper
+ * than their opener, and align a closing boundary with that opener. All other
+ * lines defer to CodeMirror's language indentation service.
  */
 export function visualLatexEnvironmentIndentationExtension(): Extension {
   return indentService.of((context, pos) => {
@@ -668,9 +954,16 @@ export function visualLatexEnvironmentIndentationExtension(): Extension {
     const scanState = scanLatexSegment(
       context.state.doc.sliceString(0, scanTo),
     );
-    const environmentName = /^\\end\s*\{([^{}]+)\}/u.exec(
-      line.text.trimStart(),
-    )?.[1]?.trim();
+    const trimmedLine = line.text.trimStart();
+    const environmentName = /^\\end\s*\{([^{}]+)\}/u.exec(trimmedLine)?.[1]?.trim();
+
+    if (scanState.verbatimEnvironment !== undefined) {
+      // Opaque environments own literal whitespace. Preserve the preceding
+      // physical line's indentation instead of adding a structural level.
+      return line.from > 0
+        ? context.lineIndent(context.lineAt(line.from - 1, -1).from)
+        : undefined;
+    }
 
     if (environmentName !== undefined) {
       const opener = [...scanState.environments]
@@ -679,6 +972,20 @@ export function visualLatexEnvironmentIndentationExtension(): Extension {
       if (opener !== undefined) {
         return context.lineIndent(opener.startOffset);
       }
+    }
+
+    const delimiter = scanState.delimiter;
+    if (delimiter?.kind === "bracket") {
+      const openerIndent = context.lineIndent(delimiter.startOffset);
+      return /^\\\]/u.test(trimmedLine)
+        ? openerIndent
+        : openerIndent + context.unit;
+    }
+    if (delimiter?.kind === "dollar-block") {
+      const openerIndent = context.lineIndent(delimiter.startOffset);
+      return /^\$\$/u.test(trimmedLine)
+        ? openerIndent
+        : openerIndent + context.unit;
     }
 
     const active = [...scanState.environments]

@@ -1776,6 +1776,8 @@ async function run() {
           "texleaf.visualEditor.defaultMode",
           "texleaf.visualEditor.providerCompletions",
           "texleaf.visualEditor.latexWorkshopCompatibility",
+          "texleaf.visualEditor.syntaxTheme",
+          "texleaf.visualEditor.texBinPath",
         ],
         [
           "texleaf.mathPreview.enabled",
@@ -1952,7 +1954,7 @@ async function run() {
     );
     assert.equal(
       configurationProperties["texleaf.mathPreview.macros"].propertyNames.pattern,
-      "^[A-Za-z@]+$",
+      "^(?:[A-Za-z@]+|[!-~])$",
     );
     assert.equal(
       configurationProperties["texleaf.mathPreview.macros"].additionalProperties
@@ -6981,6 +6983,10 @@ C(\mathbf{d}) & =\sum_{j=1}^{n}\frac{2d_{j}+1}{\chi(\mathbf{d})-1}C(d_{1},\dots,
       "simultaneously open visual and native source views for one URI",
     );
 
+    // Allow a newly opened background webview to finish its first paint.
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    assert.strictEqual(vscode.window.activeTextEditor, sourceEditor,
+      "late visual initialization must not steal native source focus");
     const sourceWordOffset = visualEditorDocument.getText().indexOf("visual");
     const versionBeforeSourceEdit = visualEditorDocument.version;
     assert.equal(

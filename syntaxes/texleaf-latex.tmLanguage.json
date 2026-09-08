@@ -1,0 +1,399 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "TeXLeaf LaTeX",
+  "scopeName": "text.tex.latex",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#verbatim" },
+    { "include": "#headings" },
+    { "include": "#definitions" },
+    { "include": "#preamble" },
+    { "include": "#references" },
+    { "include": "#links" },
+    { "include": "#math-environments" },
+    { "include": "#display-math" },
+    { "include": "#inline-math" },
+    { "include": "#environments" },
+    { "include": "#macro-parameters" },
+    { "include": "#numbers" },
+    { "include": "#commands" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.percentage.tex",
+          "begin": "(?<!\\\\)%",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.tex" }
+          },
+          "end": "$"
+        }
+      ]
+    },
+    "verbatim": {
+      "patterns": [
+        {
+          "name": "markup.raw.block.tex",
+          "begin": "(\\\\begin)\\s*(\\{)(verbatim\\*?|lstlisting|minted|comment)(\\})",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.environment.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "entity.name.tag.environment.tex" },
+            "4": { "name": "punctuation.definition.arguments.end.latex" }
+          },
+          "end": "(\\\\end)\\s*(\\{)\\3(\\})",
+          "endCaptures": {
+            "1": { "name": "keyword.control.environment.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "punctuation.definition.arguments.end.latex" }
+          }
+        },
+        {
+          "name": "markup.raw.inline.tex",
+          "match": "\\\\verb\\*?(.).*?\\1"
+        }
+      ]
+    },
+    "headings": {
+      "patterns": [
+        {
+          "name": "meta.function.section.latex",
+          "begin": "(\\\\(?:part|chapter|section|subsection|subsubsection|paragraph|subparagraph))\\*?\\s*(\\{)",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.section.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" }
+          },
+          "contentName": "entity.name.section.latex",
+          "end": "(\\})",
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.arguments.end.latex" }
+          },
+          "patterns": [
+            { "include": "#commands" },
+            { "include": "#numbers" }
+          ]
+        },
+        {
+          "name": "meta.function.title.latex",
+          "begin": "(\\\\(?:title|subtitle|author|date|thanks))\\s*(\\{)",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.metadata.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" }
+          },
+          "contentName": "entity.name.title.latex",
+          "end": "(\\})",
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.arguments.end.latex" }
+          },
+          "patterns": [
+            { "include": "#commands" }
+          ]
+        }
+      ]
+    },
+    "definitions": {
+      "patterns": [
+        {
+          "name": "meta.function.definition.latex",
+          "match": "(\\\\(?:newcommand|renewcommand|providecommand|DeclareRobustCommand))\\*?\\s*(\\{)(\\\\[A-Za-z@]+)(\\})",
+          "captures": {
+            "1": { "name": "storage.type.function.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "entity.name.function.latex" },
+            "4": { "name": "punctuation.definition.arguments.end.latex" }
+          }
+        },
+        {
+          "name": "meta.function.definition.primitive.latex",
+          "match": "(\\\\(?:def|gdef|edef|xdef))\\s*(\\\\[A-Za-z@]+)",
+          "captures": {
+            "1": { "name": "storage.type.function.latex" },
+            "2": { "name": "entity.name.function.latex" }
+          }
+        },
+        {
+          "name": "meta.environment.definition.latex",
+          "match": "(\\\\(?:newenvironment|renewenvironment|newtheorem))\\*?\\s*(\\{)([^{}]+)(\\})",
+          "captures": {
+            "1": { "name": "storage.type.function.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "entity.name.tag.environment.tex" },
+            "4": { "name": "punctuation.definition.arguments.end.latex" }
+          }
+        }
+      ]
+    },
+    "preamble": {
+      "patterns": [
+        {
+          "name": "meta.preamble.documentclass.latex",
+          "match": "(\\\\documentclass)\\*?\\s*(?:(\\[)([^\\]]*)(\\]))?\\s*(\\{)([^{}]+)(\\})",
+          "captures": {
+            "1": { "name": "keyword.control.preamble.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "string.other.option.latex" },
+            "4": { "name": "punctuation.definition.arguments.end.latex" },
+            "5": { "name": "punctuation.definition.arguments.begin.latex" },
+            "6": { "name": "entity.name.type.documentclass.latex" },
+            "7": { "name": "punctuation.definition.arguments.end.latex" }
+          }
+        },
+        {
+          "name": "meta.preamble.package.latex",
+          "match": "(\\\\(?:usepackage|RequirePackage))\\*?\\s*(?:(\\[)([^\\]]*)(\\]))?\\s*(\\{)([^{}]+)(\\})",
+          "captures": {
+            "1": { "name": "keyword.control.preamble.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "string.other.option.latex" },
+            "4": { "name": "punctuation.definition.arguments.end.latex" },
+            "5": { "name": "punctuation.definition.arguments.begin.latex" },
+            "6": { "name": "entity.name.type.package.latex" },
+            "7": { "name": "punctuation.definition.arguments.end.latex" }
+          }
+        },
+        {
+          "name": "meta.path-command.latex",
+          "match": "(\\\\(?:input|include|subfile|includegraphics|bibliography|addbibresource))\\*?\\s*(?:\\[[^\\]]*\\]\\s*)?(\\{)([^{}]+)(\\})",
+          "captures": {
+            "1": { "name": "support.function.general.tex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "string.other.path.latex" },
+            "4": { "name": "punctuation.definition.arguments.end.latex" }
+          }
+        },
+        {
+          "name": "keyword.control.preamble.latex",
+          "match": "\\\\(?:DeclareMathOperator|DeclarePairedDelimiter|setlength|addtolength|geometry|hypersetup)\\*?\\b"
+        }
+      ]
+    },
+    "references": {
+      "patterns": [
+        {
+          "name": "meta.citation.latex",
+          "match": "(\\\\cite[A-Za-z@]*)\\*?\\s*(?:\\[[^\\]]*\\]\\s*){0,2}(\\{)([^{}]*)(\\})",
+          "captures": {
+            "1": { "name": "support.function.reference.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "constant.other.reference.citation.latex" },
+            "4": { "name": "punctuation.definition.arguments.end.latex" }
+          }
+        },
+        {
+          "name": "meta.reference.latex",
+          "match": "(\\\\(?:ref|eqref|pageref|autoref|cref|Cref|vref|nameref))\\*?\\s*(\\{)([^{}]*)(\\})",
+          "captures": {
+            "1": { "name": "support.function.reference.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "constant.other.reference.label.latex" },
+            "4": { "name": "punctuation.definition.arguments.end.latex" }
+          }
+        },
+        {
+          "name": "meta.label.latex",
+          "match": "(\\\\label)\\s*(\\{)([^{}]*)(\\})",
+          "captures": {
+            "1": { "name": "support.function.reference.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "constant.other.reference.label.latex" },
+            "4": { "name": "punctuation.definition.arguments.end.latex" }
+          }
+        }
+      ]
+    },
+    "links": {
+      "patterns": [
+        {
+          "name": "meta.link.url.latex",
+          "match": "(\\\\(?:url|path))\\s*(\\{)([^{}]*)(\\})",
+          "captures": {
+            "1": { "name": "support.function.reference.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "string.other.url.latex markup.underline.link.latex" },
+            "4": { "name": "punctuation.definition.arguments.end.latex" }
+          }
+        },
+        {
+          "name": "meta.link.href.latex",
+          "match": "(\\\\href)\\s*(\\{)([^{}]*)(\\})",
+          "captures": {
+            "1": { "name": "support.function.reference.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "string.other.url.latex markup.underline.link.latex" },
+            "4": { "name": "punctuation.definition.arguments.end.latex" }
+          }
+        }
+      ]
+    },
+    "math-environments": {
+      "patterns": [
+        {
+          "name": "meta.math.environment.latex",
+          "begin": "(\\\\begin)\\s*(\\{)((?:equation|align|alignat|gather|multline|flalign|split|math|displaymath|cases|matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix)\\*?)(\\})",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.environment.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "entity.name.tag.environment.tex" },
+            "4": { "name": "punctuation.definition.arguments.end.latex" }
+          },
+          "end": "(\\\\end)\\s*(\\{)((?:equation|align|alignat|gather|multline|flalign|split|math|displaymath|cases|matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix)\\*?)(\\})",
+          "endCaptures": {
+            "1": { "name": "keyword.control.environment.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "entity.name.tag.environment.tex" },
+            "4": { "name": "punctuation.definition.arguments.end.latex" }
+          },
+          "patterns": [
+            { "include": "#comments" },
+            { "include": "#math-content" }
+          ]
+        }
+      ]
+    },
+    "display-math": {
+      "patterns": [
+        {
+          "name": "meta.math.block.latex",
+          "begin": "(?<!\\\\)(\\$\\$)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.math.begin.tex" }
+          },
+          "end": "(?<!\\\\)(\\$\\$)",
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.math.end.tex" }
+          },
+          "patterns": [
+            { "include": "#comments" },
+            { "include": "#math-content" }
+          ]
+        },
+        {
+          "name": "meta.math.block.latex",
+          "begin": "\\\\\\[",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.math.begin.tex" }
+          },
+          "end": "\\\\\\]",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.math.end.tex" }
+          },
+          "patterns": [
+            { "include": "#comments" },
+            { "include": "#math-content" }
+          ]
+        }
+      ]
+    },
+    "inline-math": {
+      "patterns": [
+        {
+          "name": "meta.math.inline.latex",
+          "begin": "(?<!\\\\)\\$(?!\\$)",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.math.begin.tex" }
+          },
+          "end": "(?<!\\\\)\\$(?!\\$)",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.math.end.tex" }
+          },
+          "patterns": [
+            { "include": "#math-content" }
+          ]
+        },
+        {
+          "name": "meta.math.inline.latex",
+          "begin": "\\\\\\(",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.math.begin.tex" }
+          },
+          "end": "\\\\\\)",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.math.end.tex" }
+          },
+          "patterns": [
+            { "include": "#math-content" }
+          ]
+        }
+      ]
+    },
+    "math-content": {
+      "patterns": [
+        { "include": "#comments" },
+        {
+          "name": "support.function.math-operator.latex",
+          "match": "\\\\(?:sum|prod|coprod|int|iint|iiint|oint|lim|sup|inf|max|min|sin|cos|tan|cot|sec|csc|log|ln|exp|det|gcd|Pr)\\b"
+        },
+        {
+          "name": "constant.numeric.math.tex",
+          "match": "(?<![A-Za-z])(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?![A-Za-z])"
+        },
+        { "include": "#macro-parameters" },
+        { "include": "#commands" },
+        {
+          "name": "variable.other.math.latex",
+          "match": "[A-Za-z]"
+        },
+        {
+          "name": "punctuation.math.operator.tex",
+          "match": "[+\\-*/=<>_^&|]"
+        },
+        {
+          "name": "punctuation.definition.math.latex",
+          "match": "[{}\\[\\](),;:]"
+        }
+      ]
+    },
+    "environments": {
+      "patterns": [
+        {
+          "name": "meta.environment.latex",
+          "match": "(\\\\(?:begin|end))\\s*(\\{)([^{}]+)(\\})",
+          "captures": {
+            "1": { "name": "keyword.control.environment.latex" },
+            "2": { "name": "punctuation.definition.arguments.begin.latex" },
+            "3": { "name": "entity.name.tag.environment.tex" },
+            "4": { "name": "punctuation.definition.arguments.end.latex" }
+          }
+        }
+      ]
+    },
+    "macro-parameters": {
+      "patterns": [
+        {
+          "name": "variable.parameter.macro.latex",
+          "match": "#[1-9]"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.latex",
+          "match": "(?<![A-Za-z])(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?![A-Za-z])"
+        }
+      ]
+    },
+    "commands": {
+      "patterns": [
+        {
+          "name": "support.function.general.tex",
+          "match": "\\\\(?:[A-Za-z@]+|.)"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.definition.arguments.begin.latex",
+          "match": "[\\{\\[]"
+        },
+        {
+          "name": "punctuation.definition.arguments.end.latex",
+          "match": "[\\}\\]]"
+        }
+      ]
+    }
+  }
+}

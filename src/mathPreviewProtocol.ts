@@ -5,6 +5,16 @@
  * See LICENSE and NOTICE in the project root.
  */
 
+// Shared scanner/worker bounds: accommodate large paper preambles while keeping
+// each isolated renderer request finite. Expansion and output limits are separate.
+export const MATH_PREVIEW_MAX_MACRO_COUNT = 512;
+export const MATH_PREVIEW_MAX_MACRO_SERIALIZED_LENGTH = 65_536;
+
+// TeX control words, or one printable ASCII control symbol (without its slash).
+export function isMathPreviewMacroName(name: string): boolean {
+  return /^(?:[A-Za-z@]+|[!-~])$/u.test(name);
+}
+
 export type MathJaxMacroOption =
   | string
   | readonly [string, number]

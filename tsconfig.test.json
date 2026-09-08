@@ -11,6 +11,8 @@
   },
   "include": [
     "src/core/**/*.ts",
-    "test/**/*.ts"
+    "test/**/*.ts",
+    "src/pdf/bibliographyMapping.ts",
+    "src/projectFilesystemSafety.ts"
   ]
 }

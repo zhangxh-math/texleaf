@@ -172,49 +172,6 @@ export interface VisualLatexCompletionContext {
   readonly argumentIndex?: number;
 }
 
-export interface VisualSelectionSourceRange {
-  readonly from: number;
-  readonly to: number;
-  readonly head: number;
-}
-
-export interface VisualSourceActivationRange {
-  readonly from: number;
-  readonly to: number;
-}
-
-/**
- * Match the strict source-range rule used by collapsed visual replacements.
- * A caret at either boundary is outside; a non-empty selection touches the
- * range only when the two half-open intervals overlap.
- */
-export function visualSelectionTouchesSourceRange(
-  ranges: readonly VisualSelectionSourceRange[],
-  from: number,
-  to: number,
-): boolean {
-  return ranges.some((range) =>
-    range.from === range.to
-      ? range.head > from && range.head < to
-      : range.from < to && range.to > from
-  );
-}
-
-/**
- * Whether a visual replacement's source is still deliberately exposed. A
- * paired/manual reveal can keep source visible while the caret sits at an exact
- * boundary, so consumers such as citation detail cards must honor both inputs.
- */
-export function visualSourceRangeRemainsExpanded(
-  selections: readonly VisualSelectionSourceRange[],
-  reveals: readonly VisualSourceActivationRange[],
-  from: number,
-  to: number,
-): boolean {
-  return visualSelectionTouchesSourceRange(selections, from, to) ||
-    reveals.some((range) => range.from < to && range.to > from);
-}
-
 export interface VisualCompletedArgumentCursorOptions {
   readonly citationCommands?: readonly string[];
   /**
@@ -322,6 +279,133 @@ export function visualSingleTextDifference(
   return { from, to: beforeTo, insert: after.slice(from, afterTo) };
 }
 
+export type VisualFloatingPreviewSide = "right" | "left" | "below" | "above";
+export type VisualFloatingPreviewPlacement = VisualFloatingPreviewSide | "overlay";
+
+export interface VisualLatexSearchQueryInput {
+  readonly search: string;
+  readonly replace: string;
+  readonly caseSensitive: boolean;
+  readonly regexp: boolean;
+  readonly wholeWord: boolean;
+}
+
+/**
+ * Build the CodeMirror search query used by the visual editor.
+ *
+ * Ordinary editor search must treat TeX backslashes literally. CodeMirror's
+ * default non-literal query turns `\\t`, `\\r`, and `\\n` into control
+ * characters, which makes commands such as `\\theta`, `\\rho`, and `\\nabla`
+ * impossible to find. `SearchQuery.literal` does not disable regular-expression
+ * parsing—the regexp engine reads `search` directly—but it also controls how
+ * replacement text is unquoted. Keep it enabled in every mode so a replacement
+ * such as `\\theta` can never turn into a tab character; regexp captures such
+ * as `$1` retain their normal semantics.
+ */
+export function visualLatexSearchQuerySpec(
+  input: VisualLatexSearchQueryInput,
+): VisualLatexSearchQueryInput & { readonly literal: boolean } {
+  return {
+    ...input,
+    literal: true,
+  };
+}
+
+export interface VisualNativeInputHistoryKey {
+  readonly key: string;
+  readonly code?: string;
+  readonly keyCode?: number;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly altKey: boolean;
+}
+
+/**
+ * Identify native text-control Undo/Redo keys before VS Code's Webview preload
+ * cancels them and forwards them to the document command service. `code` and
+ * legacy keyCode are intentionally accepted because an active IME can expose
+ * `key === "Process"` while the physical Z/Y identity remains available.
+ */
+export function visualSearchInputUsesNativeHistory(
+  input: VisualNativeInputHistoryKey,
+): boolean {
+  if (input.altKey || (!input.ctrlKey && !input.metaKey)) {
+    return false;
+  }
+  const key = input.key.toLocaleLowerCase();
+  return key === "z" || key === "y" ||
+    input.code === "KeyZ" || input.code === "KeyY" ||
+    input.keyCode === 90 || input.keyCode === 89;
+}
+
+export interface VisualFloatingPreviewSpace {
+  readonly right: number;
+  readonly left: number;
+  readonly below: number;
+  readonly above: number;
+}
+
+/**
+ * Choose a side for a floating preview from the real available space. Prefer a
+ * side that can show the complete card; when none can, choose the direction
+ * that preserves the largest fraction of its natural size. The stable order
+ * keeps ordinary right-side details predictable without ever requiring them
+ * to stay there when the editor is narrow or split.
+ */
+export function visualFloatingPreviewSide(
+  space: VisualFloatingPreviewSpace,
+  size: { readonly width: number; readonly height: number },
+): VisualFloatingPreviewSide {
+  const width = finitePositiveDimension(size.width);
+  const height = finitePositiveDimension(size.height);
+  const candidates: readonly {
+    readonly side: VisualFloatingPreviewSide;
+    readonly available: number;
+    readonly required: number;
+  }[] = [
+    { side: "right", available: finiteAvailableSpace(space.right), required: width },
+    { side: "left", available: finiteAvailableSpace(space.left), required: width },
+    { side: "below", available: finiteAvailableSpace(space.below), required: height },
+    { side: "above", available: finiteAvailableSpace(space.above), required: height },
+  ];
+  const fitting = candidates.find((candidate) =>
+    candidate.available >= candidate.required);
+  if (fitting !== undefined) {
+    return fitting.side;
+  }
+  return candidates.reduce((best, candidate) =>
+    candidate.available / candidate.required > best.available / best.required
+      ? candidate
+      : best).side;
+}
+
+/** Fall back to a clamped overlay before a side becomes too narrow to read. */
+export function visualFloatingPreviewPlacement(
+  space: VisualFloatingPreviewSpace,
+  size: { readonly width: number; readonly height: number },
+  minimumReadable: { readonly width: number; readonly height: number } = {
+    width: 160,
+    height: 96,
+  },
+): VisualFloatingPreviewPlacement {
+  const side = visualFloatingPreviewSide(space, size);
+  const horizontal = side === "right" || side === "left";
+  const available = finiteAvailableSpace(space[side]);
+  const natural = finitePositiveDimension(horizontal ? size.width : size.height);
+  const minimum = finitePositiveDimension(
+    horizontal ? minimumReadable.width : minimumReadable.height,
+  );
+  return available >= Math.min(natural, minimum) ? side : "overlay";
+}
+
+function finitePositiveDimension(value: number): number {
+  return Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+function finiteAvailableSpace(value: number): number {
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 const VISUAL_REFERENCE_COMPLETION_COMMANDS = new Set([
   "ref",
   "pageref",
@@ -397,7 +481,7 @@ interface VisualOwningArgument {
 /**
  * Classify the token at a visual-editor caret once, before any provider is
  * queried.  This is the shared replacement-range contract for CodeMirror,
- * TeXLeaf, VS Code completion providers and the LaTeX Workshop adapter.
+ * TeXLeaf's built-in completion catalog and user-defined snippets.
  *
  * The scan is deliberately bounded and walks balanced delimiters backwards.
  * It therefore handles wrapped arguments and nested macros without doing an
@@ -457,7 +541,11 @@ export function visualLatexCompletionContextAt(
     };
   }
 
-  const snippetMatch = /[\p{L}\p{N}_:@.-]+$/u.exec(local);
+  // `@` shortcuts deliberately include punctuation such as `@/`, `@{` and
+  // `@|`.  Keep the replacement range anchored at the `@` instead of letting
+  // the generic word scanner collapse to an empty range after punctuation.
+  const atShortcutMatch = /@[^\s\\]*$/u.exec(local);
+  const snippetMatch = atShortcutMatch ?? /[\p{L}\p{N}_:@.-]+$/u.exec(local);
   const from = snippetMatch === null ? to : lowerBound + snippetMatch.index;
   return {
     kind: "snippet",
@@ -1421,12 +1509,20 @@ function parseVsCodeSnippetChoice(
     const character = source[index];
     if (character === "\\") {
       const escaped = source[index + 1];
-      if (escaped !== undefined && [",", "|", "\\"].includes(escaped)) {
+      if (escaped === undefined) {
+        return undefined;
+      }
+      if ([",", "|", "\\"].includes(escaped)) {
         value += escaped;
         index += 2;
         continue;
       }
-      return undefined;
+      // In VS Code's choice grammar only comma, pipe and backslash need
+      // escaping.  A LaTeX command such as `\\Huge` is therefore literal
+      // choice text and must retain its backslash.
+      value += `\\${escaped}`;
+      index += 2;
+      continue;
     }
     if (character === ",") {
       values.push(value);
@@ -1949,11 +2045,8 @@ export function planVisualLogicalLineNavigation(
         formula.from >= 0 &&
         formula.to > formula.from &&
         formula.to <= source.length &&
-        visualSourceRangeIntersectsLogicalLine(
-          formula.from,
-          formula.to,
-          targetLine,
-        ),
+        formula.from <= targetLine.to &&
+        formula.to >= targetLine.from,
     )
     .sort(
       (left, right) =>
@@ -1962,7 +2055,7 @@ export function planVisualLogicalLineNavigation(
     );
   const formula = intersectingFormulas.find(
     (candidate) =>
-      cursorOffset >= candidate.from && cursorOffset < candidate.to,
+      cursorOffset >= candidate.from && cursorOffset <= candidate.to,
   ) ?? intersectingFormulas.find((candidate) => candidate.display);
   if (formula !== undefined) {
     return {
@@ -2024,24 +2117,6 @@ export function planVisualLogicalLineNavigation(
   };
 }
 
-/**
- * Source ranges are half-open. In particular, a formula whose `to` offset is
- * exactly the `from` offset of the following logical line does not belong to
- * that line. Treating both ends as inclusive made the first position after an
- * environment (and an adjacent `\\begin{...}` line) reopen the preceding
- * display formula.
- */
-function visualSourceRangeIntersectsLogicalLine(
-  from: number,
-  to: number,
-  line: VisualLogicalLineTarget,
-): boolean {
-  if (line.from === line.to) {
-    return from <= line.from && to > line.from;
-  }
-  return from < line.to && to > line.from;
-}
-
 function visualPhysicalSourceLineAt(
   source: string,
   offset: number,
@@ -2097,7 +2172,7 @@ function innermostVisualEnvironmentPair(
  * Return whether a snippet's next target would cross the closing boundary of
  * the nearest real LaTeX environment or block-math delimiter. Visual mode
  * reserves both transitions for Shift+Enter. Inline math is the sole
- * exception: Tab may still leave `$...$` or `\(...\)` after all inner fields
+ * exception: Tab may still leave `$...$` or `\\(...\\)` after all inner fields
  * have been traversed.
  */
 export function visualTabTargetLeavesEnvironment(
@@ -2131,39 +2206,50 @@ export function visualTabTargetLeavesEnvironment(
 
 function visualExitBlankLinePlan(
   source: string,
+  openingFrom: number,
   closingEnd: number,
   boundaryKind: VisualEnvironmentExitPlan["boundaryKind"],
   environmentName?: string,
+  preferredEol?: "\n" | "\r\n",
 ): VisualEnvironmentExitPlan {
-  const eol = source.includes("\r\n") ? "\r\n" : "\n";
-  const closingLineStart = source.lastIndexOf("\n", Math.max(0, closingEnd - 1)) + 1;
-  const closingLinePrefix = source.slice(closingLineStart, closingEnd);
-  const outerIndent = /^[ \t]*/u.exec(closingLinePrefix)?.[0] ?? "";
+  const indentation = visualLineLeadingWhitespaceAt(source, openingFrom);
+  const fallbackEol = preferredEol ?? (source.includes("\r\n") ? "\r\n" : "\n");
+  let replacementFrom = closingEnd;
   let trailing = closingEnd;
   while (trailing < source.length && /[ \t]/u.test(source[trailing] ?? "")) {
     trailing += 1;
   }
 
-  const lineBreakLength = source.startsWith("\r\n", trailing)
-    ? 2
-    : source[trailing] === "\n" || source[trailing] === "\r"
-      ? 1
-      : 0;
-  if (lineBreakLength === 0) {
+  // A comment following an environment closer belongs to the physical closing
+  // line. Shift+Enter must create its editable blank line after that comment,
+  // rather than moving the comment into the newly created paragraph.
+  if (source[trailing] === "%") {
+    while (
+      trailing < source.length &&
+      source[trailing] !== "\r" &&
+      source[trailing] !== "\n"
+    ) {
+      trailing += 1;
+    }
+    replacementFrom = trailing;
+  }
+
+  const localLineBreak = visualLineBreakAt(source, trailing);
+  if (localLineBreak === undefined) {
     const sameLineHasContent = trailing < source.length;
     const insert = sameLineHasContent
-      ? `${eol}${outerIndent}${eol}`
-      : `${eol}${outerIndent}`;
+      ? `${fallbackEol}${indentation}${fallbackEol}${indentation}`
+      : `${fallbackEol}${indentation}`;
     return {
-      range: { start: closingEnd, end: closingEnd },
+      range: { start: replacementFrom, end: trailing },
       insert,
-      cursorOffset: closingEnd + eol.length + outerIndent.length,
+      cursorOffset: replacementFrom + fallbackEol.length + indentation.length,
       boundaryKind,
       ...(environmentName === undefined ? {} : { environmentName }),
     };
   }
 
-  const nextLineStart = trailing + lineBreakLength;
+  const nextLineStart = trailing + localLineBreak.length;
   let nextLineEnd = nextLineStart;
   while (
     nextLineEnd < source.length &&
@@ -2172,38 +2258,81 @@ function visualExitBlankLinePlan(
   ) {
     nextLineEnd += 1;
   }
-  const nextLine = source.slice(nextLineStart, nextLineEnd);
-  if (/^[ \t]*$/u.test(nextLine)) {
-    const needsIndentReplacement = nextLine !== outerIndent;
+  if (/^[ \t]*$/u.test(source.slice(nextLineStart, nextLineEnd))) {
+    const existingIndentation = source.slice(nextLineStart, nextLineEnd);
+    if (replacementFrom === trailing && existingIndentation === indentation) {
+      return {
+        range: { start: nextLineStart, end: nextLineStart },
+        insert: "",
+        cursorOffset: nextLineStart + indentation.length,
+        boundaryKind,
+        ...(environmentName === undefined ? {} : { environmentName }),
+      };
+    }
+    const insert = `${localLineBreak.text}${indentation}`;
     return {
-      range: {
-        start: nextLineStart,
-        end: needsIndentReplacement ? nextLineEnd : nextLineStart,
-      },
-      insert: needsIndentReplacement ? outerIndent : "",
-      cursorOffset: nextLineStart + outerIndent.length,
+      range: { start: replacementFrom, end: nextLineEnd },
+      insert,
+      cursorOffset: replacementFrom + insert.length,
       boundaryKind,
       ...(environmentName === undefined ? {} : { environmentName }),
     };
   }
+  if (replacementFrom === trailing) {
+    const insert = `${indentation}${localLineBreak.text}`;
+    return {
+      range: { start: nextLineStart, end: nextLineStart },
+      insert,
+      cursorOffset: nextLineStart + indentation.length,
+      boundaryKind,
+      ...(environmentName === undefined ? {} : { environmentName }),
+    };
+  }
+  const insert = `${localLineBreak.text}${indentation}${localLineBreak.text}`;
   return {
-    range: { start: nextLineStart, end: nextLineStart },
-    insert: `${outerIndent}${eol}`,
-    cursorOffset: nextLineStart + outerIndent.length,
+    range: { start: replacementFrom, end: nextLineStart },
+    insert,
+    cursorOffset: replacementFrom + localLineBreak.text.length + indentation.length,
     boundaryKind,
     ...(environmentName === undefined ? {} : { environmentName }),
   };
 }
 
+function visualLineLeadingWhitespaceAt(source: string, offset: number): string {
+  const bounded = Math.max(0, Math.min(source.length, offset));
+  const before = Math.max(0, bounded - 1);
+  const lineStart = Math.max(
+    source.lastIndexOf("\n", before),
+    source.lastIndexOf("\r", before),
+  ) + 1;
+  return /^[\t ]*/u.exec(source.slice(lineStart, bounded))?.[0] ?? "";
+}
+
+function visualLineBreakAt(
+  source: string,
+  offset: number,
+): { readonly text: "\n" | "\r" | "\r\n"; readonly length: 1 | 2 } | undefined {
+  if (source.startsWith("\r\n", offset)) {
+    return { text: "\r\n", length: 2 };
+  }
+  if (source[offset] === "\n" || source[offset] === "\r") {
+    return { text: source[offset], length: 1 };
+  }
+  return undefined;
+}
+
 /**
  * Plan Shift+Enter as an atomic exit to a real blank line after the nearest
- * structural boundary. True environments and display delimiters compete by
- * span, so an inner `\[...\]` exits before its theorem.
+ * structural boundary. True environments and display
+ * delimiters compete by span, so an inner `\[...\]` exits before its theorem.
  */
 export function planVisualEnvironmentExit(
   source: string,
   cursorOffset: number,
-  options: { readonly displayOnly?: boolean } = {},
+  options: {
+    readonly displayOnly?: boolean;
+    readonly eol?: "\n" | "\r\n";
+  } = {},
 ): VisualEnvironmentExitPlan | undefined {
   if (
     !Number.isSafeInteger(cursorOffset) ||
@@ -2270,9 +2399,11 @@ export function planVisualEnvironmentExit(
     ? undefined
     : visualExitBlankLinePlan(
         source,
+        candidate.from,
         candidate.closingEnd,
         candidate.boundaryKind,
         candidate.environmentName,
+        options.eol,
       );
 }
 
@@ -2509,6 +2640,64 @@ function visualAlignmentRowCommandEnd(
  * fresh input would expand the parenthesis snippet a second time and produce
  * `())`.
  */
+export interface VisualAutomaticSnippetInputPlan {
+  readonly matchOffset: number;
+  /** Remove CodeMirror's generated closer only when a snippet actually wins. */
+  readonly generatedCloser?: {
+    readonly from: number;
+    readonly to: number;
+    readonly expectedText: string;
+    readonly insert: "";
+  };
+}
+
+/**
+ * Classify an ordinary input transaction or CodeMirror's synthetic paired
+ * insertion. Keeping the generated closer as a separate modifier lets an
+ * automatic snippet consume it atomically, while unmatched input keeps the
+ * editor's immediate `()`, `[]`, `{}`, `""`, or `''` pairing.
+ */
+export function planVisualAutomaticSnippetInput(
+  changes: readonly {
+    readonly from: number;
+    readonly to: number;
+    readonly insert: string;
+  }[],
+  cursorOffset: number,
+): VisualAutomaticSnippetInputPlan | undefined {
+  if (changes.length !== 1) {
+    return undefined;
+  }
+  const change = changes[0];
+  if (
+    change === undefined ||
+    change.insert.length === 0 ||
+    /[\r\n]/u.test(change.insert)
+  ) {
+    return undefined;
+  }
+  if (cursorOffset === change.from + change.insert.length) {
+    return { matchOffset: cursorOffset };
+  }
+  const pairedCloser = visualGeneratedPairCloser(change.insert);
+  if (
+    pairedCloser === undefined ||
+    change.from !== change.to ||
+    cursorOffset !== change.from + 1
+  ) {
+    return undefined;
+  }
+  return {
+    matchOffset: cursorOffset,
+    generatedCloser: {
+      from: cursorOffset,
+      to: cursorOffset + 1,
+      expectedText: pairedCloser,
+      insert: "",
+    },
+  };
+}
+
 export function shouldRunVisualAutomaticSnippet(
   changes: readonly {
     readonly from: number;
@@ -2517,14 +2706,24 @@ export function shouldRunVisualAutomaticSnippet(
   }[],
   cursorOffset: number,
 ): boolean {
-  if (changes.length !== 1) {
-    return false;
+  return planVisualAutomaticSnippetInput(changes, cursorOffset) !== undefined;
+}
+
+function visualGeneratedPairCloser(insert: string): string | undefined {
+  switch (insert) {
+    case "()":
+      return ")";
+    case "[]":
+      return "]";
+    case "{}":
+      return "}";
+    case '""':
+      return '"';
+    case "''":
+      return "'";
+    default:
+      return undefined;
   }
-  const change = changes[0];
-  return change !== undefined &&
-    change.insert.length > 0 &&
-    !/[\r\n]/u.test(change.insert) &&
-    cursorOffset === change.from + change.insert.length;
 }
 
 /** Pure equivalent of the source editor's post-input automatic fraction plan. */
@@ -2705,3 +2904,47 @@ function stripCompleteOuterParentheses(value: string): string {
   }
   return depth === 0 ? value.slice(1, -1) : value;
 }
+
+export interface VisualSelectionSourceRange {
+  readonly from: number;
+  readonly to: number;
+  readonly head: number;
+}
+
+export interface VisualSourceActivationRange {
+  readonly from: number;
+  readonly to: number;
+}
+
+/**
+ * Match the strict source-range rule used by collapsed visual replacements.
+ * A caret at either boundary is outside; a non-empty selection touches the
+ * range only when the two half-open intervals overlap.
+ */
+export function visualSelectionTouchesSourceRange(
+  ranges: readonly VisualSelectionSourceRange[],
+  from: number,
+  to: number,
+): boolean {
+  return ranges.some((range) =>
+    range.from === range.to
+      ? range.head > from && range.head < to
+      : range.from < to && range.to > from
+  );
+}
+
+/**
+ * Whether a visual replacement's source is still deliberately exposed. A
+ * paired/manual reveal can keep source visible while the caret sits at an exact
+ * boundary, so consumers such as citation detail cards must honor both inputs.
+ */
+export function visualSourceRangeRemainsExpanded(
+  selections: readonly VisualSelectionSourceRange[],
+  reveals: readonly VisualSourceActivationRange[],
+  from: number,
+  to: number,
+): boolean {
+  return visualSelectionTouchesSourceRange(selections, from, to) ||
+    reveals.some((range) => range.from < to && range.to > from);
+}
+

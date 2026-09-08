@@ -97,3 +97,59 @@ SOFTWARE.
 以上两个 MathJax 组件的完整 Apache-2.0 许可证文本随发行包保存在 [licenses/Apache-2.0.txt](licenses/Apache-2.0.txt)。TeXLeaf 没有修改这些依赖的源文件；发布时只把所需模块打进独立 worker bundle。
 
 TeXLeaf 的 Math Preview 产品方向受到 Ultra Math Preview 与 hscopes-booster 公开功能和架构的启发。当前发行包中的实际渲染组件与许可证如上所列；归档不包含这两个仓库的源码、正则表达式、CSS、图标、动画、文档或测试。若未来发行内容发生变化，本通知也必须同步更新。
+
+
+## Mozilla PDF.js
+
+- 组件：pdfjs-dist 6.2.108
+- 项目：https://github.com/mozilla/pdf.js
+- 用途：可视化编辑器中的 PDF 插图预览、PDF worker、CMap、ICC、WASM 解码器和标准字体数据
+- 主要许可证：Apache License 2.0
+- 上游许可证：https://github.com/mozilla/pdf.js/blob/master/LICENSE
+
+Copyright 2012 Mozilla Foundation.
+
+PDF.js 本体依照 Apache License 2.0 提供。Apache-2.0 全文随项目保存在 [licenses/Apache-2.0.txt](licenses/Apache-2.0.txt)。
+
+pdfjs-dist 的运行资源还包含各自的上游许可文件。打包时必须与对应资源一起保留：
+
+- cmaps/LICENSE
+- iccs/LICENSE
+- standard_fonts/LICENSE_FOXIT
+- standard_fonts/LICENSE_LIBERATION
+- wasm/LICENSE_JBIG2
+- wasm/LICENSE_OPENJPEG
+- wasm/LICENSE_PDFJS_JBIG2
+- wasm/LICENSE_PDFJS_OPENJPEG
+- wasm/LICENSE_PDFJS_QCMS
+- wasm/LICENSE_QCMS
+
+其中 Liberation 标准字体数据按 SIL Open Font License 1.1 提供；Foxit/PDFium 字体数据使用其目录内的 BSD 风格许可。各 WASM 与数据组件的准确版权和条款以随资源复制的上述文件为准。
+
+
+## GitHub Primer Prettylights 配色
+
+- 项目：https://github.com/primer/primitives 与 https://github.com/primer/github-vscode-theme
+- 用途：TeXLeaf 源码模式固定的浅色/深色 LaTeX 语法前景色；LaTeX scope 分类与角色映射由 TeXLeaf 独立实现
+- 许可证：MIT License
+- 上游版权：Copyright (c) 2018 GitHub Inc.；Copyright (c) 2020 Primer
+
+TeXLeaf 只内置经校验的 Prettylights 语义色值，不安装、启动或桥接 GitHub VS Code Theme。完整许可证与版权声明随项目保存在 [licenses/Primer-MIT.txt](licenses/Primer-MIT.txt)。
+
+
+## vscode-textmate
+
+- 组件：vscode-textmate 9.2.0
+- 项目：https://github.com/microsoft/vscode-textmate
+- 用途：Custom Editor 源码模式的 TextMate tokenization
+- 许可证：MIT License
+
+
+## vscode-oniguruma
+
+- 组件：vscode-oniguruma 2.0.1
+- 项目：https://github.com/microsoft/vscode-oniguruma
+- 用途：TextMate grammar 使用的 Oniguruma WebAssembly 运行时
+- 许可证：MIT License
+
+Oniguruma 本身包含其上游 BSD 风格许可证与版权声明；发行包随附完整通知副本：[`licenses/Oniguruma-BSD.txt`](licenses/Oniguruma-BSD.txt)。

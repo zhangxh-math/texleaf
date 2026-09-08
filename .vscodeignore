@@ -36,3 +36,15 @@ prettier.config.*
 pnpm-lock.yaml
 pnpm-workspace.yaml
 esbuild.mjs
+
+*.vsix.sha256
+
+.agents/**
+
+.codex/**
+
+docs/superpowers/**
+
+docs/*compatibility-report.md
+
+.gitattributes

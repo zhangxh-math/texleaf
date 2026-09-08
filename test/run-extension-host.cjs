@@ -17,10 +17,24 @@ const {
 } = require("./storageMigrationFixture.cjs");
 
 const extensionDevelopmentPath = path.resolve(__dirname, "..");
-const extensionTestsPath = path.resolve(__dirname, "extensionHost.cjs");
+const extensionTestsModule = path.resolve(__dirname, "extensionHost.cjs");
 const isolatedRoot = fs.mkdtempSync(
   path.join(os.tmpdir(), "texleaf-extension-host-profile-"),
 );
+const extensionTestsPath = path.join(isolatedRoot, "test-entry.cjs");
+const testResultPath = path.join(isolatedRoot, "test-result.json");
+fs.writeFileSync(extensionTestsPath, `
+const fs = require("node:fs");
+exports.run = async () => {
+  try {
+    await require(${JSON.stringify(extensionTestsModule)}).run();
+    fs.writeFileSync(${JSON.stringify(testResultPath)}, JSON.stringify({ passed: true }));
+  } catch (error) {
+    fs.writeFileSync(${JSON.stringify(testResultPath)}, JSON.stringify({ passed: false, error: String(error.stack || error) }));
+    throw error;
+  }
+};
+`);
 const userDataDir = path.join(isolatedRoot, "user-data");
 const extensionsDir = path.join(isolatedRoot, "extensions");
 const workspaceRootA = path.join(isolatedRoot, "paper-a");
@@ -126,6 +140,13 @@ try {
   if (result.error !== undefined) {
     throw result.error;
   }
+  const testResult = fs.existsSync(testResultPath)
+    ? JSON.parse(fs.readFileSync(testResultPath, "utf8"))
+    : undefined;
+  if (testResult?.passed !== true) {
+    throw new Error(testResult?.error || "VS Code exited without completing the extension-host tests.");
+  }
+  console.log("Extension-host test module completed successfully.");
   if (result.status !== 0) {
     process.exitCode = result.status ?? 1;
   }

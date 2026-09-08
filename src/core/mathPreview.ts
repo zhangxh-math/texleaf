@@ -5,7 +5,9 @@
  * See LICENSE and NOTICE in the project root.
  */
 
-import { isLatexOpaqueEnvironmentEndAt, scanLatexRegions } from "./latexScanner";
+import { isLatexOpaqueEnvironmentEndAt, scanLatexRegions, type LatexEnvironmentAlias } from "./latexScanner";
+import { isMathPreviewMacroName, MATH_PREVIEW_MAX_MACRO_COUNT, MATH_PREVIEW_MAX_MACRO_SERIALIZED_LENGTH } from "../mathPreviewProtocol";
+export { MATH_PREVIEW_MAX_MACRO_COUNT, MATH_PREVIEW_MAX_MACRO_SERIALIZED_LENGTH } from "../mathPreviewProtocol";
 import type { LatexMathRegion, OffsetRange } from "./types";
 
 export type MathPreviewSyntax =
@@ -37,6 +39,17 @@ export interface MathPreviewMacro {
 export interface MathPreviewMacroEnvironment {
   readonly macros: Readonly<Record<string, MathPreviewMacro>>;
   readonly macroFingerprint: string;
+}
+
+export interface UnorderedMathPreviewPreambleMacroResolution {
+  /** Safe union of definitions whose meaning does not depend on file order. */
+  readonly environment: MathPreviewMacroEnvironment;
+  /** Same-name definitions that disagreed across supplemental files. */
+  readonly conflictingMacroNames: readonly string[];
+  /** Definitions discarded because they depend on a conflicting definition. */
+  readonly dependentMacroNames: readonly string[];
+  /** True when input or renderer bounds required dropping otherwise safe clues. */
+  readonly incomplete: boolean;
 }
 
 export interface MathPreviewMacroEnvironmentTransition {
@@ -76,9 +89,7 @@ export interface MathPreviewScanOptions {
 }
 
 const DEFAULT_MAX_SOURCE_LENGTH = 8_192;
-export const MATH_PREVIEW_MAX_MACRO_COUNT = 128;
 export const MATH_PREVIEW_MAX_MACRO_REPLACEMENT_LENGTH = 2_048;
-export const MATH_PREVIEW_MAX_MACRO_SERIALIZED_LENGTH = 16_384;
 const MATH_PREVIEW_MAX_MACRO_CONTROL_SEQUENCE_COUNT = 256;
 
 /**
@@ -150,6 +161,99 @@ export function createMathPreviewMacroEnvironment(
 }
 
 /**
+ * Resolve manually declared preamble files without inventing a TeX load order.
+ * A name is retained only when every declaration of that name has the exact
+ * same renderer-safe meaning. Definitions depending on an order-conflicted
+ * name are removed transitively as well.
+ */
+export function resolveUnorderedMathPreviewPreambleMacros(
+  sources: readonly string[],
+): UnorderedMathPreviewPreambleMacroResolution {
+  const maximumSources = 256;
+  const maximumSourceLength = 1_000_000;
+  const maximumTotalLength = 8_000_000;
+  if (
+    !Array.isArray(sources) ||
+    sources.length > maximumSources ||
+    sources.some((source) =>
+      typeof source !== "string" || source.length > maximumSourceLength
+    ) ||
+    sources.reduce((total, source) => total + source.length, 0) > maximumTotalLength
+  ) {
+    return Object.freeze({
+      environment: createMathPreviewMacroEnvironment({}),
+      conflictingMacroNames: Object.freeze([]),
+      dependentMacroNames: Object.freeze([]),
+      incomplete: true,
+    });
+  }
+
+  const definitions = new Map<
+    string,
+    { readonly fingerprint: string; readonly macro: MathPreviewMacro }
+  >();
+  const conflicts = new Set<string>();
+  for (const source of sources) {
+    const snapshot = scanMathPreviewDocument(source, {
+      fragmentKind: "preamble",
+      maxSourceLength: 32_768,
+    });
+    for (const name of Object.keys(snapshot.macros)) {
+      const macro = snapshot.macros[name];
+      if (macro === undefined || conflicts.has(name)) {
+        continue;
+      }
+      const fingerprint = mathPreviewMacroDefinitionFingerprint(macro);
+      const previous = definitions.get(name);
+      if (previous === undefined) {
+        definitions.set(name, { fingerprint, macro });
+      } else if (previous.fingerprint !== fingerprint) {
+        definitions.delete(name);
+        conflicts.add(name);
+      }
+    }
+  }
+
+  const excluded = new Set(conflicts);
+  const dependents = new Set<string>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [name, definition] of definitions) {
+      if (excluded.has(name)) {
+        continue;
+      }
+      const referenced = mathPreviewMacroControlSequenceNames(definition.macro);
+      if ([...referenced].some((dependency) => excluded.has(dependency))) {
+        excluded.add(name);
+        dependents.add(name);
+        changed = true;
+      }
+    }
+  }
+
+  const safe = createMutableMacroTable();
+  for (const name of [...definitions.keys()].sort()) {
+    if (!excluded.has(name)) {
+      const macro = definitions.get(name)?.macro;
+      if (macro !== undefined) {
+        safe[name] = macro;
+      }
+    }
+  }
+  const environment = createMathPreviewMacroEnvironment(safe);
+  const retainedNames = new Set(Object.keys(environment.macros));
+  const expectedNames = Object.keys(safe);
+  return Object.freeze({
+    environment,
+    conflictingMacroNames: Object.freeze([...conflicts].sort()),
+    dependentMacroNames: Object.freeze([...dependents].sort()),
+    incomplete: retainedNames.size !== expectedNames.length ||
+      expectedNames.some((name) => !retainedNames.has(name)),
+  });
+}
+
+/**
  * Build the preview index for one immutable document snapshot.
  *
  * The existing TeXLeaf scanner remains the single source of truth for math
@@ -173,12 +277,20 @@ export function scanMathPreviewDocument(
     32_768,
   );
   const fragmentKind = normalizeMathPreviewFragmentKind(options.fragmentKind);
-  const document = collectDocumentMacros(text, fragmentKind !== "standalone");
+  const configured = sanitizeMathPreviewConfiguredMacros(options.configuredMacros ?? {});
+  const inherited = normalizeInheritedMacroEnvironment(options.inheritedMacroEnvironment);
+  const document = collectDocumentMacros(
+    text, fragmentKind !== "standalone", seedMathPreviewMacros(configured, inherited),
+  );
+  const bodyFragmentHasExplicitDocument = fragmentKind === "body" &&
+    document.bodyRange.start > 0;
   const normalizedFormulas = fragmentKind === "preamble"
     ? []
-    : normalizeMathRegions(text, scanLatexRegions(text)).filter(
+    : normalizeMathRegions(text, scanLatexRegions(text, document.environmentAliases,
+        [...document.definitionRanges, ...document.inactiveRanges].sort((a, b) => a.start - b.start),
+      )).filter(
         (formula) =>
-          (fragmentKind === "body" ||
+          ((fragmentKind === "body" && !bodyFragmentHasExplicitDocument) ||
             (formula.outerRange.start >= document.bodyRange.start &&
               formula.outerRange.end <= document.bodyRange.end)) &&
           !isInsideMacroDefinition(
@@ -189,12 +301,6 @@ export function scanMathPreviewDocument(
           !isInsideInactiveMathPreviewRange(formula, document.inactiveRanges) &&
           formula.bodyRange.end - formula.bodyRange.start <= maxSourceLength,
       );
-  const configured = sanitizeMathPreviewConfiguredMacros(
-    options.configuredMacros ?? {},
-  );
-  const inherited = normalizeInheritedMacroEnvironment(
-    options.inheritedMacroEnvironment,
-  );
 
   if (fragmentKind === "body") {
     return createBodyFragmentSnapshot(
@@ -461,7 +567,7 @@ function wrapMathPreviewBody(
 ): string {
   return environmentName === undefined
     ? body
-    : `\\begin{${environmentName}}${body}\\end{${environmentName}}`;
+    : `\\begin{${environmentName}}${body}\n\\end{${environmentName}}`;
 }
 
 interface ProtectedCursorSpan {
@@ -1245,11 +1351,12 @@ function mathDelimiterSyntax(
 }
 
 interface ParsedMacro extends MathPreviewMacro {
-  readonly kind: "newcommand" | "renewcommand" | "providecommand" | "operator";
+  readonly kind: "newcommand" | "renewcommand" | "providecommand" | "operator" | "def";
   readonly sourceRange: OffsetRange;
 }
 
 interface DocumentMacroScan {
+  readonly environmentAliases: ReadonlyMap<number, LatexEnvironmentAlias>;
   readonly macros: readonly ParsedMacro[];
   readonly definitionRanges: readonly OffsetRange[];
   readonly inactiveRanges: readonly OffsetRange[];
@@ -1574,6 +1681,36 @@ function macroFingerprint(
   );
 }
 
+function mathPreviewMacroDefinitionFingerprint(macro: MathPreviewMacro): string {
+  return JSON.stringify([
+    macro.name,
+    macro.replacement,
+    macro.argumentCount,
+    macro.optionalDefault ?? null,
+  ]);
+}
+
+function mathPreviewMacroControlSequenceNames(
+  macro: MathPreviewMacro,
+): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const source of [macro.replacement, macro.optionalDefault ?? ""]) {
+    let index = 0;
+    while (index < source.length) {
+      if (source[index] !== "\\") {
+        index += 1;
+        continue;
+      }
+      const control = readControlSequence(source, index);
+      if (control.name.length > 0) {
+        names.add(control.name);
+      }
+      index = Math.max(index + 1, control.end);
+    }
+  }
+  return names;
+}
+
 function normalizeMathPreviewFragmentKind(
   value: MathPreviewFragmentKind | undefined,
 ): MathPreviewFragmentKind {
@@ -1606,13 +1743,25 @@ function isInsideInactiveMathPreviewRange(
 function collectDocumentMacros(
   text: string,
   collectAllMacros: boolean,
+  resolved: Record<string, MathPreviewMacro>,
 ): DocumentMacroScan {
   const result: ParsedMacro[] = [];
+  const environmentAliases = new Map<number, LatexEnvironmentAlias>();
+  const fontCommands = new Map<string, string>();
+  const fontFamilies = new Map<string, string>([["0", "mathrm"], ["1", "mathit"]]);
   const definitionRanges: OffsetRange[] = [];
   const inactiveRanges: OffsetRange[] = [];
   let index = 0;
   let groupDepth = 0;
   const environmentStack: string[] = [];
+  const aliasShadows = new Map<string, { groupDepth: number; environmentDepth: number }>();
+  const restoreAliasShadows = (): void => {
+    for (const [name, scope] of aliasShadows) {
+      if (scope.groupDepth > groupDepth || scope.environmentDepth > environmentStack.length) {
+        aliasShadows.delete(name);
+      }
+    }
+  };
   let environmentScopeUncertain = false;
   let inComment = false;
   let verbatimDelimiter: string | undefined;
@@ -1660,6 +1809,7 @@ function collectDocumentMacros(
         groupDepth += 1;
       } else if (character === "}") {
         groupDepth = Math.max(0, groupDepth - 1);
+        restoreAliasShadows();
       }
       index += 1;
       continue;
@@ -1673,6 +1823,7 @@ function collectDocumentMacros(
     }
     if (command.name === "endgroup") {
       groupDepth = Math.max(0, groupDepth - 1);
+      restoreAliasShadows();
       index = command.end;
       continue;
     }
@@ -1713,17 +1864,27 @@ function collectDocumentMacros(
       }
       continue;
     }
-    if (command.name === "begin" || command.name === "end") {
-      const environment = readRequiredGroup(text, command.end);
+    const aliasMacro = aliasShadows.has(command.name) ? undefined : resolved[command.name];
+    const alias = aliasMacro?.argumentCount === 0
+      ? /^\s*\\(begin|end)\s*\{([A-Za-z]+\*?)\}\s*$/u.exec(aliasMacro.replacement)
+      : null;
+    const environmentCommand = alias?.[1] ?? command.name;
+    if (alias !== null && alias?.[2] !== undefined) {
+      environmentAliases.set(index, { command: alias[1] as "begin" | "end", name: alias[2] });
+    }
+    if (environmentCommand === "begin" || environmentCommand === "end") {
+      const environment = alias?.[2] === undefined
+        ? readRequiredGroup(text, command.end)
+        : { value: alias[2], end: command.end };
       if (environment !== undefined) {
         const name = environment.value.trim();
-        if (command.name === "begin" && name === "document") {
+        if (environmentCommand === "begin" && name === "document") {
           documentBodyStart ??= environment.end;
           index = environment.end;
           continue;
         }
         if (
-          command.name === "end" &&
+          environmentCommand === "end" &&
           name === "document" &&
           documentBodyStart !== undefined
         ) {
@@ -1736,7 +1897,7 @@ function collectDocumentMacros(
         }
         const normalizedEnvironment = name.endsWith("*") ? name.slice(0, -1) : name;
         if (
-          command.name === "begin" &&
+          environmentCommand === "begin" &&
           [
             "verbatim",
             "Verbatim",
@@ -1752,10 +1913,11 @@ function collectDocumentMacros(
           index = environment.end;
           continue;
         }
-        if (command.name === "begin") {
+        if (environmentCommand === "begin") {
           environmentStack.push(name);
         } else if (environmentStack.at(-1) === name) {
           environmentStack.pop();
+          restoreAliasShadows();
         } else {
           // LaTeX environments form groups. A malformed/mismatched stack makes
           // later scope unknowable, so never promote subsequent definitions to
@@ -1767,20 +1929,32 @@ function collectDocumentMacros(
       }
     }
 
-    const parsed = parseMacroDefinition(text, index, command.name, command.end);
+    if (groupDepth === 0 && environmentStack.length === 0 && !environmentScopeUncertain) {
+      recordLegacyMathFont(text, command.name, command.end, fontCommands, fontFamilies);
+    }
+    const parsed = parseMacroDefinition(text, index, command.name, command.end, fontFamilies);
     if (parsed !== undefined) {
+      const declaredName = parsed.macro?.name ?? parsed.declaredName;
+      if (declaredName !== undefined && (groupDepth > 0 || environmentStack.length > 0) &&
+          Object.hasOwn(resolved, declaredName) && command.name !== "providecommand" &&
+          !aliasShadows.has(declaredName)) {
+        // Local definitions are not promoted to the document macro table, but
+        // their inherited aliases must stay inactive until this scope closes.
+        aliasShadows.set(declaredName, { groupDepth, environmentDepth: environmentStack.length });
+      }
       if (
         parsed.macro !== undefined &&
         groupDepth === 0 &&
         environmentStack.length === 0 &&
         !environmentScopeUncertain &&
-        result.length < MATH_PREVIEW_MAX_MACRO_COUNT
+        result.length < 4_096
       ) {
         result.push(Object.freeze(parsed.macro));
+        applyLocalMacro(resolved, parsed.macro);
       }
-      if (definitionRanges.length < MATH_PREVIEW_MAX_MACRO_COUNT) {
-        definitionRanges.push(Object.freeze({ start: index, end: parsed.end }));
-      }
+      // Exclusion ranges are source structure, not renderer payload. Even a
+      // definition beyond the macro budget must never become visible math.
+      definitionRanges.push(Object.freeze({ start: index, end: parsed.end }));
       index = parsed.end;
     } else {
       index = Math.max(index + 1, command.end);
@@ -1788,6 +1962,7 @@ function collectDocumentMacros(
   }
   return Object.freeze({
     macros: Object.freeze(result),
+    environmentAliases,
     definitionRanges: Object.freeze(definitionRanges),
     inactiveRanges: Object.freeze(inactiveRanges),
     bodyRange: Object.freeze({
@@ -1805,7 +1980,9 @@ const MATH_PREVIEW_CONDITIONAL_PRIMITIVES = new Set([
 ]);
 
 function isMathPreviewConditionalControl(name: string): boolean {
-  return MATH_PREVIEW_CONDITIONAL_PRIMITIVES.has(name) || /^if[A-Za-z@]+$/u.test(name);
+  return name !== "iff" && (
+    MATH_PREVIEW_CONDITIONAL_PRIMITIVES.has(name) || /^if[A-Za-z@]+$/u.test(name)
+  );
 }
 
 function skipMathPreviewNewIfDeclaration(
@@ -1990,6 +2167,12 @@ const UNSAFE_STATIC_MACRO_COMMANDS: readonly string[] = Object.freeze([
   "delcode",
   "global",
   "globaldefs",
+  "fam",
+  "font",
+  "textfont",
+  "scriptfont",
+  "scriptscriptfont",
+  "newfam",
   "advance",
   "multiply",
   "divide",
@@ -2043,12 +2226,151 @@ function isSafeStaticMacroReplacement(replacement: string): boolean {
   return true;
 }
 
+// Read only literal, top-level font assignments. Names are document-defined;
+// the finite mapping describes established TeX font families, not paper macros.
+function recordLegacyMathFont(
+  text: string,
+  command: string,
+  from: number,
+  fonts: Map<string, string>,
+  families: Map<string, string>,
+): void {
+  if (command !== "font" && command !== "textfont") {
+    return;
+  }
+  const tail = text.slice(from, from + 256);
+  if (command === "font") {
+    const declaration = /^\s*\\([A-Za-z@]+)\s*=?\s*([A-Za-z]+)\d+\b/u.exec(tail);
+    if (declaration?.[1] === undefined || declaration[2] === undefined) {
+      return;
+    }
+    const variants: Readonly<Record<string, string>> = {
+      cmr: "mathrm", cmmi: "mathit", cmmib: "boldsymbol", cmbx: "mathbf",
+      cmss: "mathsf", msbm: "mathbb", eusm: "mathscr", eufm: "mathfrak",
+    };
+    const variant = variants[declaration[2]];
+    if (variant === undefined) {
+      fonts.delete(declaration[1]);
+    } else {
+      fonts.set(declaration[1], variant);
+    }
+    return;
+  }
+  const assignment = /^\s*\\([A-Za-z@]+)\s*=?\s*\\([A-Za-z@]+)/u.exec(tail);
+  if (assignment?.[1] !== undefined && assignment[2] !== undefined) {
+    const variant = fonts.get(assignment[2]);
+    if (variant === undefined) {
+      families.delete(assignment[1]);
+    } else {
+      families.set(assignment[1], variant);
+    }
+  }
+}
+
+function translateLegacyMathFont(
+  replacement: string,
+  families: ReadonlyMap<string, string>,
+): string {
+  const selection = /^\s*\{\s*\\fam\s*(?:\\([A-Za-z@]+)|([01]))\s*\\relax\s*#1\s*\}\s*$/u.exec(replacement);
+  const family = selection?.[1] ?? selection?.[2];
+  const variant = family === undefined ? undefined : families.get(family);
+  return variant === undefined ? replacement : `\\${variant}{#1}`;
+}
+
+// Standard OT1/OML slots, as declared by LaTeX's fontmath.ltx. Emit the
+// character itself so a later redefinition of e.g. \xi cannot change its meaning.
+function legacyMathCharacter(code: number): string | undefined {
+  if (!Number.isInteger(code) || code < 0 || code > 0x7fff) {
+    return undefined;
+  }
+  const family = (code >> 8) & 0xf;
+  const slot = code & 0xff;
+  const upper = "ΓΔΘΛΞΠΣΥΦΨΩ";
+  const lower = "αβγδϵζηθικλμνξπρστυϕχψωεϑϖϱςφ";
+  let glyph = family === 0 || family === 1
+    ? upper[slot] ?? (family === 1 ? lower[slot - 11] : undefined)
+    : undefined;
+  if (glyph === undefined && (family === 0 || family === 1) &&
+      /[A-Za-z0-9]/u.test(String.fromCharCode(slot))) {
+    glyph = family === 0 ? `\\mathrm{${String.fromCharCode(slot)}}` : String.fromCharCode(slot);
+  }
+  if (glyph === undefined) {
+    return undefined;
+  }
+  const atom = ["mathord", "mathop", "mathbin", "mathrel", "mathopen", "mathclose", "mathpunct"][code >> 12];
+  return atom === undefined ? glyph : `\\${atom}{${glyph}}`;
+}
+
 function parseMacroDefinition(
   text: string,
   start: number,
   command: string,
   commandEnd: number,
-): { readonly macro?: ParsedMacro; readonly end: number } | undefined {
+  fontFamilies: ReadonlyMap<string, string>,
+): { readonly macro?: ParsedMacro; readonly declaredName?: string; readonly end: number } | undefined {
+  if (command === "newcolumntype") {
+    const name = readRequiredGroup(text, commandEnd);
+    if (name === undefined) return undefined;
+    const count = readOptionalGroup(text, name.end);
+    const body = readRequiredGroup(text, count?.end ?? name.end);
+    return body === undefined ? undefined : { end: body.end };
+  }
+  if (command === "newenvironment" || command === "renewenvironment") {
+    let cursor = skipTeXWhitespaceAndComments(text, commandEnd);
+    if (text[cursor] === "*") cursor += 1;
+    const name = readRequiredGroup(text, cursor);
+    if (name === undefined) return undefined;
+    cursor = name.end;
+    for (let optional = 0; optional < 2; optional += 1) {
+      cursor = readOptionalGroup(text, cursor)?.end ?? cursor;
+    }
+    const opening = readRequiredGroup(text, cursor);
+    const closing = opening === undefined ? undefined : readRequiredGroup(text, opening.end);
+    return closing === undefined ? undefined : { end: closing.end };
+  }
+  if (command === "mathchardef") {
+    const target = readControlSequence(text, skipTeXWhitespaceAndComments(text, commandEnd));
+    const name = normalizeMacroName(target.name);
+    const number = /^\s*=?\s*(?:"([0-9a-f]+)|'([0-7]+)|([0-9]+))/iu.exec(text.slice(target.end));
+    if (number === null) {
+      return undefined;
+    }
+    const end = target.end + number[0].length;
+    const code = Number.parseInt(number[1] ?? number[2] ?? number[3]!, number[1] !== undefined ? 16 : number[2] !== undefined ? 8 : 10);
+    const replacement = legacyMathCharacter(code);
+    return name === undefined || replacement === undefined
+      ? { end, ...(name === undefined ? {} : { declaredName: name }) } : {
+      macro: { kind: "def", name, replacement, argumentCount: 0,
+        sourceRange: Object.freeze({ start, end }) }, end,
+    };
+  }
+  if (["def", "gdef", "edef", "xdef"].includes(command)) {
+    const nameStart = skipTeXWhitespaceAndComments(text, commandEnd);
+    const target = readControlSequence(text, nameStart);
+    const name = normalizeMacroName(target.name);
+    const open = text.indexOf("{", target.end);
+    if (open < 0) {
+      return undefined;
+    }
+    const group = readBalancedGroup(text, open, "{", "}");
+    if (group === undefined) {
+      return undefined;
+    }
+    const parameters = text.slice(target.end, open).trim();
+    const argumentCount = parameters.length / 2;
+    const expected = Array.from({ length: Math.min(9, Math.ceil(argumentCount)) }, (_, i) => `#${i + 1}`).join("");
+    const replacement = translateLegacyMathFont(group.value, fontFamilies);
+    if (name === undefined || command !== "def" || parameters !== expected || argumentCount > 9 ||
+        replacement.length > MATH_PREVIEW_MAX_MACRO_REPLACEMENT_LENGTH ||
+        !isSafeStaticMacroReplacement(replacement)) {
+      return { end: group.end, ...(name === undefined ? {} : { declaredName: name }) };
+    }
+    return {
+      macro: { kind: "def", name, replacement, argumentCount,
+        sourceRange: Object.freeze({ start, end: group.end }) },
+      end: group.end,
+    };
+  }
   if (
     command !== "newcommand" &&
     command !== "renewcommand" &&
@@ -2092,7 +2414,7 @@ function parseMacroDefinition(
       operator.value.length > MATH_PREVIEW_MAX_MACRO_REPLACEMENT_LENGTH ||
       !isSafeStaticMacroReplacement(operator.value)
     ) {
-      return { end: operator.end };
+      return { end: operator.end, declaredName: name };
     }
     return {
       macro: {
@@ -2136,7 +2458,7 @@ function parseMacroDefinition(
     !safeOptionalDefault ||
     !isSafeStaticMacroReplacement(replacement.value)
   ) {
-    return { end: replacement.end };
+    return { end: replacement.end, declaredName: name };
   }
   argumentCount = Math.max(argumentCount, inferArgumentCount(replacement.value));
   return {
@@ -2177,7 +2499,7 @@ function readRequiredGroup(
   text: string,
   from: number,
 ): { readonly value: string; readonly end: number } | undefined {
-  const open = skipHorizontalWhitespace(text, from);
+  const open = skipTeXWhitespaceAndComments(text, from);
   return readBalancedGroup(text, open, "{", "}");
 }
 
@@ -2185,7 +2507,7 @@ function readOptionalGroup(
   text: string,
   from: number,
 ): { readonly value: string; readonly end: number } | undefined {
-  const open = skipHorizontalWhitespace(text, from);
+  const open = skipTeXWhitespaceAndComments(text, from);
   return readBalancedGroup(text, open, "[", "]");
 }
 
@@ -2200,10 +2522,19 @@ function readBalancedGroup(
   }
   let depth = 1;
   let index = open + 1;
+  let segmentStart = index;
+  let value = "";
   while (index < text.length) {
     const character = text[index];
     if (character === "\\") {
       index = Math.min(text.length, index + 2);
+      continue;
+    }
+    if (character === "%") {
+      value += text.slice(segmentStart, index);
+      const newline = text.indexOf("\n", index + 1);
+      index = newline < 0 ? text.length : newline + 1;
+      segmentStart = index;
       continue;
     }
     if (character === opening) {
@@ -2211,7 +2542,7 @@ function readBalancedGroup(
     } else if (character === closing) {
       depth -= 1;
       if (depth === 0) {
-        return { value: text.slice(open + 1, index), end: index + 1 };
+        return { value: value + text.slice(segmentStart, index), end: index + 1 };
       }
     }
     index += 1;
@@ -2220,8 +2551,8 @@ function readBalancedGroup(
 }
 
 function normalizeMacroName(name: string): string | undefined {
-  const normalized = name.trim().replace(/^\\+/u, "");
-  return /^[A-Za-z@]+$/u.test(normalized) ? normalized : undefined;
+  const normalized = name.trim().replace(/^\\(?=.)/u, "");
+  return isMathPreviewMacroName(normalized) ? normalized : undefined;
 }
 
 function inferArgumentCount(replacement: string): number {

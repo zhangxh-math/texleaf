@@ -13,11 +13,20 @@ import { RegisterHTMLHandler } from "@mathjax/src/cjs/handlers/html.js";
 import { TeX } from "@mathjax/src/cjs/input/tex.js";
 import "@mathjax/src/cjs/input/tex/ams/AmsConfiguration.js";
 import "@mathjax/src/cjs/input/tex/boldsymbol/BoldsymbolConfiguration.js";
+import "@mathjax/src/cjs/input/tex/braket/BraketConfiguration.js";
+import { CommandMap } from "@mathjax/src/cjs/input/tex/TokenMap.js";
+import { Configuration } from "@mathjax/src/cjs/input/tex/Configuration.js";
+import TexParser from "@mathjax/src/cjs/input/tex/TexParser.js";
+import type { ParseMethod } from "@mathjax/src/cjs/input/tex/Types.js";
+import { ParseUtil } from "@mathjax/src/cjs/input/tex/ParseUtil.js";
 import "@mathjax/src/cjs/input/tex/color/ColorConfiguration.js";
 import "@mathjax/src/cjs/input/tex/configmacros/ConfigMacrosConfiguration.js";
 import "@mathjax/src/cjs/input/tex/mathtools/MathtoolsConfiguration.js";
 import "@mathjax/src/cjs/input/tex/newcommand/NewcommandConfiguration.js";
+import "@mathjax/src/cjs/input/tex/textcomp/TextcompConfiguration.js";
+import "@mathjax/src/cjs/input/tex/textmacros/TextMacrosConfiguration.js";
 import { SVG } from "@mathjax/src/cjs/output/svg.js";
+import { isMathPreviewMacroName, MATH_PREVIEW_MAX_MACRO_COUNT, MATH_PREVIEW_MAX_MACRO_SERIALIZED_LENGTH } from "./mathPreviewProtocol";
 import type {
   MathPreviewCursorGeometry,
   MathPreviewWorkerRequest,
@@ -25,8 +34,8 @@ import type {
 } from "./mathPreviewProtocol";
 
 const HARD_MAX_SOURCE_LENGTH = 32_768;
-const HARD_MAX_MACRO_COUNT = 128;
-const HARD_MAX_MACRO_TEXT = 16_384;
+const HARD_MAX_MACRO_COUNT = MATH_PREVIEW_MAX_MACRO_COUNT;
+const HARD_MAX_MACRO_TEXT = MATH_PREVIEW_MAX_MACRO_SERIALIZED_LENGTH;
 const HARD_MAX_SVG_LENGTH = 4_000_000;
 const DEFAULT_ENGINE_CACHE_LIMIT = 12;
 const configuredEngineCacheLimit = typeof workerData === "object" &&
@@ -123,6 +132,17 @@ const engineCache = new Map<string, Engine>();
 // otherwise valid preview.  Put it after request macros: document/configured
 // macros must not turn metadata into visible or stateful preview content.
 const PREVIEW_FALLBACK_MACROS = {
+  // NewCM has no small-caps text variant; preserve the literal text and spacing.
+  textsc: [String.raw`\text{#1}`, 1] as const,
+  // The bundled font has double-struck glyphs, but no dsfont/bbm variants.
+  mathds: [String.raw`\mathbb{#1}`, 1] as const,
+  mathbbmss: [String.raw`\mathbb{#1}`, 1] as const,
+  bm: [String.raw`\boldsymbol{#1}`, 1] as const,
+  dag: String.raw`\dagger`,
+  slash: "/",
+  o: "ø",
+  O: "Ø",
+  intertext: [String.raw`\text{#1}\\`, 1] as const,
   llangle: String.raw`\langle\!\langle`,
   rrangle: String.raw`\rangle\!\rangle`,
 };
@@ -134,6 +154,100 @@ const PREVIEW_INTERNAL_MACROS = {
   // command only makes an otherwise valid align/align* fail in MathJax.
   qedhere: "",
 };
+
+// Keep layout translations in the isolated MathJax parser, never rewrite source
+// text: editor ranges and cursor planning must continue to use original offsets.
+new CommandMap("texleaf-preview-layout", {
+  ref: previewReferenceLabel,
+  eqref: [previewReferenceLabel, true],
+  vspace(parser: TexParser, command: Parameters<ParseMethod>[1]): void {
+    const name = String(command);
+    parser.GetStar();
+    parser.GetArgument(name); // Page-level vertical glue has no detached-card counterpart.
+  },
+  scalebox(parser: TexParser, command: Parameters<ParseMethod>[1]): void {
+    const name = String(command);
+    const horizontal = Number(parser.GetArgument(name));
+    const vertical = Number(parser.GetBrackets(name, String(horizontal)));
+    // ponytail: uniform scaling only; add affine SVG transforms for reflected or anisotropic boxes.
+    if (!Number.isFinite(horizontal) || horizontal <= 0 || horizontal > 20 || vertical !== horizontal) {
+      throw new Error("Preview supports uniform positive scalebox factors up to 20.");
+    }
+    const content = ParseUtil.internalMath(parser, parser.GetArgument(name));
+    parser.Push(parser.create("node", "mstyle", content, { mathsize: `${horizontal * 100}%` }));
+  },
+  tensor(parser: TexParser, command: Parameters<ParseMethod>[1]): void {
+    const name = String(command);
+    const compact = parser.GetStar();
+    const before = parser.GetBrackets(name, "");
+    const base = parser.GetArgument(name);
+    const after = parser.GetArgument(name);
+    const [preUpper, preLower] = tensorScripts(parser, name, before, compact);
+    const [upper, lower] = tensorScripts(parser, name, after, compact);
+    const nucleus = before.length === 0 ? `{${base}}`
+      : String.raw`\prescript{${preUpper}}{${preLower}}{${base}}`;
+    const tex = `${nucleus}^{${upper}}_{${lower}}`;
+    if (tex.length > HARD_MAX_SOURCE_LENGTH) {
+      throw new Error("Expanded tensor indices exceed the preview limit.");
+    }
+    parser.Push(new TexParser(tex, parser.stack.env, parser.configuration).mml());
+  },
+});
+Configuration.create("texleaf-preview-layout", {
+  handler: { macro: ["texleaf-preview-layout"] },
+  priority: 4, // Before native AMS refs (5), after configured macros (3).
+});
+new CommandMap("texleaf-preview-text-labels", {
+  ref: previewReferenceLabel,
+  eqref: [previewReferenceLabel, true],
+  boldmath(parser: TexParser): void { parser.stack.env.boldsymbol = true; },
+  unboldmath(parser: TexParser): void { parser.stack.env.boldsymbol = false; },
+});
+Configuration.create("texleaf-preview-text-labels", {
+  parser: "text",
+  handler: { macro: ["texleaf-preview-text-labels"] },
+  priority: 0, // Before text-base refs (1); use the same literal-label policy.
+});
+
+function previewReferenceLabel(
+  parser: TexParser,
+  command: Parameters<ParseMethod>[1],
+  parenthesized = false,
+): void {
+  parser.GetStar();
+  const label = parser.GetArgument(String(command));
+  // A detached card has no authoritative document-wide numbering. Preserve
+  // the source key as literal text, including underscores and control symbols.
+  const text = parenthesized ? `([${label}])` : `[${label}]`;
+  parser.Push(parser.create("token", "mtext", {}, text));
+}
+
+function tensorScripts(parser: TexParser, name: string, source: string, compact: boolean): readonly [string, string] {
+  const savedSource = parser.string;
+  const savedIndex = parser.i;
+  let upper = "";
+  let lower = "";
+  try {
+    parser.string = source;
+    parser.i = 0;
+    while (parser.GetNext() !== "") {
+      const side = parser.GetNext();
+      // ponytail: tensor* alignment markers need measured script-column widths.
+      if (side !== "^" && side !== "_") {
+        throw new Error("Tensor indices must be superscript or subscript arguments.");
+      }
+      parser.i += 1;
+      const index = `{${parser.GetArgument(name)}}`;
+      const spacer = compact ? "" : String.raw`\hphantom{${index}}`;
+      upper += side === "^" ? index : spacer;
+      lower += side === "_" ? index : spacer;
+    }
+  } finally {
+    parser.string = savedSource;
+    parser.i = savedIndex;
+  }
+  return [upper, lower];
+}
 
 let renderQueue: Promise<void> = Promise.resolve();
 
@@ -168,6 +282,7 @@ async function renderMessage(value: unknown): Promise<MathPreviewWorkerResponse>
     const cursor = request.cursorMarkerColor === undefined
       ? undefined
       : tagAndMeasureCursor(svgNode, request.cursorMarkerColor);
+    pruneMathJaxSourceMetadata(svgNode);
     const source = adaptor.serializeXML(svgNode);
     if (source.length > HARD_MAX_SVG_LENGTH) {
       throw new Error("MathJax SVG exceeded the safe output limit.");
@@ -187,6 +302,27 @@ async function renderMessage(value: unknown): Promise<MathPreviewWorkerResponse>
       id: request.id,
       message: normalizeError(error),
     };
+  }
+}
+
+/**
+ * MathJax annotates nearly every generated group with the original TeX and an
+ * internal MathML node name. The cursor geometry walker has already consumed
+ * data-latex at this point. Keep only the three table node names used by the
+ * Webview's aligned-row sizing and remove the rest before cloning/caching the
+ * SVG; real papers save roughly a third of their preview payload this way.
+ */
+function pruneMathJaxSourceMetadata(svg: SvgNode): void {
+  for (const group of adaptor.tags(svg, "g")) {
+    adaptor.removeAttribute(group, "data-latex");
+    const mathNode = stringAttribute(group, "data-mml-node");
+    if (
+      mathNode !== "mtable" &&
+      mathNode !== "mtr" &&
+      mathNode !== "mlabeledtr"
+    ) {
+      adaptor.removeAttribute(group, "data-mml-node");
+    }
   }
 }
 
@@ -230,19 +366,32 @@ function engineCacheKey(request: MathPreviewWorkerRequest): string {
 }
 
 function createEngine(macros: MathPreviewWorkerRequest["macros"]): Engine {
+  const previewMacros = { ...macros };
+  // Source wrappers cannot supply authoritative cross-formula numbers either.
+  delete previewMacros.ref;
+  delete previewMacros.eqref;
   const input = new TeX({
     packages: [
       "base",
       "ams",
       "boldsymbol",
+      "braket",
+      "texleaf-preview-layout",
       "color",
       "configmacros",
       "mathtools",
       "newcommand",
+      "textcomp",
+      "textmacros",
     ],
+    textmacros: { packages: ["text-base", "textcomp", "texleaf-preview-text-labels"] },
+    environments: Object.fromEntries(
+      ["tiny", "scriptsize", "footnotesize", "small", "normalsize", "large", "Large", "LARGE", "huge", "Huge"]
+        .map((size) => [size, [`{\\${size}`, "}"]]),
+    ),
     macros: {
       ...PREVIEW_FALLBACK_MACROS,
-      ...macros,
+      ...previewMacros,
       ...PREVIEW_INTERNAL_MACROS,
     },
     maxBuffer: 32_768,
@@ -297,7 +446,7 @@ function parseRequest(value: unknown): MathPreviewWorkerRequest | undefined {
     names.length > HARD_MAX_MACRO_COUNT ||
     JSON.stringify(macros).length > HARD_MAX_MACRO_TEXT ||
     names.some(
-      (name) => !/^[A-Za-z@]+$/u.test(name) || !isMacroOption(macros[name]),
+      (name) => !isMathPreviewMacroName(name) || !isMacroOption(macros[name]),
     )
   ) {
     return undefined;

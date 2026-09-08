@@ -12,6 +12,7 @@ import {
   EditorState,
   MapMode,
   Prec,
+  RangeSet,
   StateEffect,
   StateField,
   Transaction,
@@ -25,15 +26,20 @@ import {
   drawSelection,
   dropCursor,
   EditorView,
+  GutterMarker,
   highlightActiveLine,
   highlightActiveLineGutter,
   highlightSpecialChars,
   keymap,
+  lineNumberMarkers,
+  lineNumberWidgetMarker,
   lineNumbers,
   rectangularSelection,
   repositionTooltips,
+  runScopeHandlers,
   showTooltip,
   tooltips,
+  type Panel,
   type Tooltip,
   type TooltipView,
   ViewPlugin,
@@ -74,14 +80,32 @@ import {
   foldGutter,
   indentUnit,
   indentOnInput,
+  syntaxHighlighting,
   StreamLanguage,
 } from "@codemirror/language";
-import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
+import { classHighlighter } from "@lezer/highlight";
+import { getDocument, GlobalWorkerOptions, PDFWorker, type PDFDocumentLoadingTask, type RenderTask } from "pdfjs-dist";
+import {
+  SearchQuery,
+  closeSearchPanel,
+  findNext,
+  findPrevious,
+  getSearchQuery,
+  highlightSelectionMatches,
+  replaceAll,
+  replaceNext,
+  search,
+  searchKeymap,
+  selectMatches,
+  setSearchQuery,
+} from "@codemirror/search";
 import { stex } from "@codemirror/legacy-modes/mode/stex";
 import {
   VISUAL_EDITOR_PROTOCOL,
   type VisualEditorAiIssue,
   type VisualEditorBackground,
+  type VisualEditorBracketToken,
+  type VisualEditorCapabilities,
   type VisualEditorChange,
   type VisualEditorCompletionItem,
   type VisualEditorDiagnostic,
@@ -92,6 +116,7 @@ import {
   type VisualMathPreviewPlacement,
   type VisualEditorReferenceFormulaPreview,
   type VisualEditorReferenceHeadingPreview,
+  type VisualEditorReferenceStructurePreview,
   type VisualEditorReferenceTheoremPreview,
   type VisualEditorSelection,
   type VisualEditorSyntaxPalette,
@@ -116,10 +141,11 @@ import {
   replacementPartsToCodeMirrorSnippet,
   shouldActivateVisualProviderCompletion,
   visualCompletedArgumentCursor,
+  visualFloatingPreviewPlacement,
+  visualLatexSearchQuerySpec,
   visualLatexCompletionContextAt,
-  visualSelectionTouchesSourceRange,
+  visualSearchInputUsesNativeHistory,
   visualSingleTextDifference,
-  visualSourceRangeRemainsExpanded,
   visualTabTargetLeavesEnvironment,
   type VisualInlineStyleTogglePlan,
   type VirtualSnippetEncoding,
@@ -127,10 +153,28 @@ import {
   type VirtualSnippetRange,
 } from "./core/visualEditing";
 import {
+  resolveVisualPointerPosition,
+  visualPointerTargetsCollapsedSource,
+} from "./core/visualPointer";
+import {
+  visualBlockReplacementInclusiveEnd,
+  visualDocumentEndFollowingLinePosition,
+  visualSourceLineNumberRange,
+  visualSourceRangeLineNumberLayout,
+  visualTerminalSyntheticEofLinePosition,
+  type VisualSourceRangeLineNumberLayout,
+} from "./core/visualLineNumbers";
+import {
   DEFAULT_CITATION_COMMANDS,
 } from "./core/citation";
 import {
+  rebindVisualFormulaAssetSource,
+  visualFormulaAssetsHaveCurrentSource,
+} from "./core/visualFormula";
+import { resolveVisualFormulaActivationTarget } from "./core/visualFormulaActivation";
+import {
   applyAtomicCodeMirrorSnippet,
+  buildVisualSelectionPresentationRangeSet,
   insertLiteralMathApostrophe,
   mergeVisualImeCompositionInputIntent,
   planProtectedFullwidthImeInsertion,
@@ -139,9 +183,14 @@ import {
   shouldProtectVisualImeInput,
   synchronizeVisualEnvironmentNamesAfterComposition,
   type AtomicCodeMirrorSnippetField,
+  type VisualSelectionPresentationRange,
+  type VisualSelectionPresentationRangeSet,
   type VisualImeCompositionInputIntent,
   visualEnvironmentNameSyncExtension,
+  visualActiveBracketPairs,
+  visualInitialSelectionCandidate,
   visualLatexEnvironmentIndentationExtension,
+  visualSelectionPresentationKey,
 } from "./visualEditorCodeMirror";
 import { planLeftRightEnter } from "./core/leftRightEnter";
 import { planTabout } from "./core/tabout";
@@ -149,10 +198,17 @@ import type { ReplacementPart } from "./core/types";
 import {
   coalesceVisualLatexIndentationChanges,
   planVisualLatexIndentationFormat,
-  planVisualLeadingIndentation,
+  visualSourceIndentationColumns,
+  VISUAL_LATEX_INDENT_UNIT,
 } from "./core/visualIndentation";
 import { createMathPreviewErrorCard } from "./mathPreviewCard";
 import { resolveMathPreviewAppearance } from "./mathPreviewAppearance";
+import {
+  VISUAL_THEOREM_BORDER_PROPERTY,
+  VISUAL_THEOREM_BORDER_VALUE,
+  VISUAL_THEOREM_FRAME_BORDER,
+  VISUAL_THEOREM_FRAME_RADIUS,
+} from "./visualEditorTheoremFrame";
 import {
   pairedVisualEnvironmentBoundaryReveal,
   selectionRetainsVisualStructureSourceReveal,
@@ -160,9 +216,9 @@ import {
   type VisualStructureSourceReveal as StructureSourceReveal,
 } from "./visualEditorStructureReveal";
 import {
-  findVisualHeadingForLabel,
-  visualReferenceDisplayLabel,
+  indexVisualStructureReferences,
   type VisualReferenceTargetKind,
+  type VisualStructureReferencePresentation,
 } from "./core/visualStructure";
 import type {
   VisualAbstractRecord,
@@ -172,6 +228,7 @@ import type {
   VisualBibliographySetting,
   VisualCitationPreview,
   VisualCitationRecord,
+  VisualDocumentEndRecord,
   VisualFrameRecord,
   VisualHeadingRecord,
   VisualImageRecord,
@@ -188,6 +245,8 @@ import type {
   VisualMathFragment,
   VisualStructureRecord,
   VisualTableCell,
+  VisualTableOfContentsNotice,
+  VisualTableOfContentsRecord,
   VisualTableRecord,
   VisualTextStyleRecord,
   VisualTheoremRecord,
@@ -218,6 +277,11 @@ interface RenderedFormula {
   readonly errorMessage?: string;
 }
 
+interface FormulaRenderUpdate {
+  readonly formulaId: string;
+  readonly rendered: RenderedFormula;
+}
+
 interface CursorRenderedFormula {
   readonly formulaId: string;
   readonly cursorOffset: number;
@@ -233,6 +297,8 @@ interface FormulaSourceTooltip extends Tooltip {
 
 interface FormulaFieldValue {
   readonly records: readonly VisualFormulaRecord[];
+  readonly activeFormulaIds: ReadonlySet<string>;
+  readonly recordById: ReadonlyMap<string, VisualFormulaRecord>;
   readonly rendered: ReadonlyMap<string, RenderedFormula>;
   readonly cursorRendered: CursorRenderedFormula | undefined;
   /** Stable IDs of formulas whose source is currently exposed. */
@@ -245,34 +311,27 @@ interface FormulaFieldValue {
 }
 
 interface NativeSyntaxFieldValue {
-  /**
-   * Authoritative TextMate decorations, including marks temporarily hidden
-   * from an actively edited formula.
-   */
+  /** Authoritative TextMate decorations, including active-formula tokens. */
   readonly base: DecorationSet;
-  /** Decorations that CodeMirror is currently allowed to put in the DOM. */
+  /** Decorations currently allowed into CodeMirror's content DOM. */
   readonly decorations: DecorationSet;
-  /**
-   * Changes only when a completed Windows IME composition left Chromium's
-   * live formula DOM out of sync with the authoritative EditorState.
-   *
-   * The value is copied into the active formula mark attributes so CodeMirror
-   * must rebuild that one decorated source range. Ordinary compositions never
-   * change it and therefore keep their existing DOM untouched.
-   */
+  /** Forces a one-formula DOM rebuild after a malformed IME presentation. */
   readonly imeRepairVersion: number;
+}
+
+interface NativeBracketFieldValue {
+  readonly base: DecorationSet;
+  readonly decorations: DecorationSet;
+  readonly enabled: boolean;
 }
 
 interface StructureFieldValue {
   readonly records: readonly VisualStructureRecord[];
   /**
-   * Formula records from the same host snapshot as `records`.
+   * Formula records from the same host snapshot as the structure records.
    *
-   * Keep this copy here instead of reading `formulaField` while
-   * `structureField` is being updated. Formula presentation legitimately reads
-   * the structure field to inherit theorem styling; making the structure field
-   * read the formula field in return creates a CodeMirror StateField cycle on
-   * the first visual-editor transaction.
+   * Formula presentation reads this structure field for theorem styling, so
+   * caching the shared snapshot here avoids a circular StateField read.
    */
   readonly formulaRecords: readonly VisualFormulaRecord[];
   readonly preambleExpanded: boolean;
@@ -280,6 +339,9 @@ interface StructureFieldValue {
   readonly enabled: boolean;
   readonly decorations: DecorationSet;
   readonly atomic: DecorationSet;
+  /** Mappable ranges whose hidden/source presentation depends on selection. */
+  readonly selectionRanges: VisualSelectionPresentationRangeSet;
+  readonly selectionPresentationKey: string;
 }
 
 declare function acquireVsCodeApi(): VsCodeApi;
@@ -306,6 +368,7 @@ const topViewPdfButton = requiredElement<HTMLButtonElement>("top-view-pdf");
 const topOpenSourceButton = requiredElement<HTMLButtonElement>("top-open-source");
 const topOpenNativeSourceButton = requiredElement<HTMLButtonElement>("top-open-native-source");
 const topSaveDocumentButton = requiredElement<HTMLButtonElement>("top-save-document");
+const topFormatDocumentButton = requiredElement<HTMLButtonElement>("top-format-document");
 const viewPdfButton = requiredElement<HTMLButtonElement>("view-pdf");
 const synctexButton = requiredElement<HTMLButtonElement>("synctex");
 const saveDocumentButton = requiredElement<HTMLButtonElement>("save-document");
@@ -329,7 +392,6 @@ const editRedoButton = requiredElement<HTMLButtonElement>("edit-redo");
 const editCutButton = requiredElement<HTMLButtonElement>("edit-cut");
 const editCopyButton = requiredElement<HTMLButtonElement>("edit-copy");
 const editPasteButton = requiredElement<HTMLButtonElement>("edit-paste");
-const editFormatDocumentButton = requiredElement<HTMLButtonElement>("edit-format-document");
 const topPickSnippetButton = requiredElement<HTMLButtonElement>("top-pick-snippet");
 const topPickCitationButton = requiredElement<HTMLButtonElement>("top-pick-citation");
 const topOpenSnippetManagerButton = requiredElement<HTMLButtonElement>("top-open-snippet-manager");
@@ -370,21 +432,13 @@ const hostSyncAnnotations = [
 const syntheticSnippetCompletion: Completion = { label: "TeXLeaf snippet" };
 const editableCompartment = new Compartment();
 const bracketMatchingCompartment = new Compartment();
+const syntaxHighlightingCompartment = new Compartment();
 const setFormulaDocument = StateEffect.define<{
   readonly records: readonly VisualFormulaRecord[];
   readonly enabled: boolean;
   readonly placement: VisualMathPreviewPlacement;
 }>();
-const setFormulaRender = StateEffect.define<{
-  readonly formulaId: string;
-  readonly rendered: RenderedFormula;
-}>();
-const setFormulaRenders = StateEffect.define<
-  readonly {
-    readonly formulaId: string;
-    readonly rendered: RenderedFormula;
-  }[]
->();
+const setFormulaRenders = StateEffect.define<readonly FormulaRenderUpdate[]>();
 const setFormulaCursorRender = StateEffect.define<CursorRenderedFormula>();
 const clearFormulaCursorRender = StateEffect.define<null>();
 const setFormulaEnabled = StateEffect.define<boolean>();
@@ -403,6 +457,15 @@ const patchNativeSyntaxTokens = StateEffect.define<{
   readonly from: number;
   readonly to: number;
   readonly tokens: readonly VisualEditorSyntaxToken[];
+}>();
+const setNativeBracketTokens = StateEffect.define<{
+  readonly enabled: boolean;
+  readonly tokens?: readonly VisualEditorBracketToken[];
+}>();
+const patchNativeBracketTokens = StateEffect.define<{
+  readonly from: number;
+  readonly to: number;
+  readonly tokens: readonly VisualEditorBracketToken[];
 }>();
 const repairVisualImeFormulaPresentation = StateEffect.define<number>();
 const setVisualSnippetFrames = StateEffect.define<readonly VisualSnippetFrame[]>();
@@ -488,6 +551,26 @@ const visualSnippetFramesField = StateField.define<readonly VisualSnippetFrame[]
   },
 });
 
+function mapVisualFormulaRecord(
+  record: VisualFormulaRecord,
+  changes: ChangeDesc,
+): VisualFormulaRecord {
+  return {
+    ...record,
+    from: changes.mapPos(record.from, 1),
+    to: changes.mapPos(record.to, -1),
+    // The body is a half-open range. Text typed just inside either delimiter
+    // belongs to the formula, while text typed just outside remains prose.
+    bodyFrom: changes.mapPos(record.bodyFrom, -1),
+    bodyTo: changes.mapPos(record.bodyTo, 1),
+    labels: record.labels.map((label) => ({
+      ...label,
+      from: changes.mapPos(label.from, 1),
+      to: changes.mapPos(label.to, -1),
+    })),
+  };
+}
+
 const reverseSyncFlashField = StateField.define<DecorationSet>({
   create: () => Decoration.none,
   update(value, transaction) {
@@ -506,12 +589,14 @@ const reverseSyncFlashField = StateField.define<DecorationSet>({
         transaction.state.doc.length,
       );
       const line = transaction.state.doc.lineAt(position);
+      const attributes = {
+        "data-texleaf-reverse-sync-target": "line",
+        "data-texleaf-reverse-sync-sequence": String(effect.value.sequence),
+      };
       value = Decoration.set([
         Decoration.line({
-          class: "texleaf-reverse-sync-flash",
-          attributes: {
-            "data-texleaf-reverse-sync-sequence": String(effect.value.sequence),
-          },
+          class: "texleaf-reverse-sync-flash texleaf-reverse-sync-flash-line",
+          attributes,
         }).range(line.from),
       ]);
     }
@@ -660,12 +745,19 @@ interface AtomicVisualHistoryEntry {
 }
 
 let editor: EditorView | undefined;
+/** Latest host focus received while the initial EditorView is still absent. */
+let pendingHostFocus: {
+  readonly requestId?: number;
+  readonly selection: VisualEditorSelection;
+  readonly options?: VisualEditorFocusOptions;
+} | undefined;
 let visualLogicalLineGoalColumn: number | undefined;
 let editorScrollbarTrack: HTMLDivElement | undefined;
 let editorScrollbarThumb: HTMLDivElement | undefined;
 let editorScrollbarFrame = 0;
 let editorScrollbarResizeObserver: ResizeObserver | undefined;
 let editorScrollbarMutationObserver: MutationObserver | undefined;
+let persistEditorStateTimer: ReturnType<typeof setTimeout> | undefined;
 type VisualDocumentHostMessage = Extract<
   VisualEditorHostMessage,
   { readonly type: "initialize" | "document" }
@@ -694,11 +786,23 @@ let inputFeatures: VisualEditorInputFeatures = {
     "aligned",
   ],
   autoDeleteMathDelimiters: true,
-  providerCompletions: true,
+  internalCompletions: true,
+  mathPreviewEnabled: true,
+  mathPreviewDebounceMs: 120,
+  bracketPairColorizationEnabled: false,
+  highlightActiveBracketPair: true,
   citationCommands: DEFAULT_CITATION_COMMANDS,
+};
+let editorCapabilities: VisualEditorCapabilities = {
+  localFileSystem: false,
+  workspaceTrusted: false,
+  buildEnabled: false,
+  pdfViewerEnabled: false,
+  synctexEnabled: false,
 };
 let completionRequestSequence = 0;
 const pendingCompletionRequests = new Map<number, PendingCompletionRequest>();
+let mirroredCompletionRetryTimers: ReturnType<typeof setTimeout>[] = [];
 let completionReferencePreviewRequestSequence = 0;
 const pendingCompletionReferencePreviewRequests = new Map<
   number,
@@ -718,16 +822,24 @@ let virtualMathPreviewPopup: HTMLElement | undefined;
 let virtualMathPreviewBinding: VirtualLatexInputBinding | undefined;
 let viewportTimer: ReturnType<typeof setTimeout> | undefined;
 let viewportFrame: number | undefined;
+let viewportSettleTimer: ReturnType<typeof setTimeout> | undefined;
+let viewportRequestSettledPending = false;
 let lastViewportRequestAt = 0;
 let lastViewportRequestKey: string | undefined;
+let lastSettledViewportRequestKey: string | undefined;
+let lastViewportGeometryKey: string | undefined;
+let lastFormulaCacheRefillViewportKey: string | undefined;
+const pendingFormulaCacheEvictions = new Set<string>();
+let formulaCacheEvictionNoticeScheduled = false;
 let cursorPreviewFrame: number | undefined;
+let cursorPreviewTimer: ReturnType<typeof setTimeout> | undefined;
 let cursorPreviewScheduledView: EditorView | undefined;
 let cursorPreviewRequestSequence = 0;
 let formulaCommitPreviewRequestSequence = 0;
 const latestFormulaCommitPreviewRequests = new Map<string, number>();
 let reverseSyncFlashTimer: ReturnType<typeof setTimeout> | undefined;
 let reverseSyncFlashSequence = 0;
-let lastAppliedFocusRequestId = 0;
+let reverseSyncWidgetFlashElement: HTMLElement | undefined;
 let latestCursorPreviewRequestId = 0;
 let lastCursorPreviewRequestKey: string | undefined;
 let statusTimer: ReturnType<typeof setTimeout> | undefined;
@@ -778,7 +890,6 @@ let visualImePointerCaret:
       readonly position: number;
     }
   | undefined;
-
 const deferredImeHostMessages: VisualEditorHostMessage[] = [];
 const atomicVisualHistoryEntries: AtomicVisualHistoryEntry[] = [];
 
@@ -819,15 +930,20 @@ let activeReferenceHover:
        * not present in this CodeMirror document, so the extension host must
        * resolve its preview kind from the project index.
        */
-      readonly previewKind: "formula" | "theorem" | "heading" | "unknown";
+      readonly previewKind: VisualReferenceTargetKind;
     }
   | undefined;
 let referenceHoverPointerInside = false;
 let referenceHoverHideTimer: ReturnType<typeof setTimeout> | undefined;
+let referenceHoverPositionFrame = 0;
+const transientReferenceDiagramCleanups = new Map<HTMLElement, () => void>();
+let transientReferenceDiagramObserver: MutationObserver | undefined;
 
 const formulaField = StateField.define<FormulaFieldValue>({
   create: () => ({
     records: [],
+    activeFormulaIds: new Set<string>(),
+    recordById: new Map<string, VisualFormulaRecord>(),
     rendered: new Map<string, RenderedFormula>(),
     cursorRendered: undefined,
     sourceFormulaKey: "",
@@ -839,6 +955,8 @@ const formulaField = StateField.define<FormulaFieldValue>({
   }),
   update(value, transaction) {
     let records = value.records;
+    let activeFormulaIds = value.activeFormulaIds;
+    let recordById = value.recordById;
     let rendered = value.rendered;
     let cursorRendered = value.cursorRendered;
     if (transaction.docChanged && cursorRendered !== undefined) {
@@ -867,25 +985,29 @@ const formulaField = StateField.define<FormulaFieldValue>({
     let placement = value.placement;
     let changed = transaction.docChanged || transaction.selection !== undefined;
     let requiresFullDecorationRebuild = false;
+    let recordsMayNeedSorting = false;
+    const formulaRenderUpdates: FormulaRenderUpdate[] = [];
+    const changedFormulaIds = new Set<string>();
+
+    if (
+      transaction.docChanged &&
+      records.some((record) =>
+        record.display &&
+        visualFormulaReplacementRange(transaction.startState, record).to ===
+          transaction.startState.doc.length
+      )
+    ) {
+      // End-inclusive terminal widgets intentionally absorb CodeMirror's empty
+      // EOF text block. Rebuild instead of merely mapping such a decoration so
+      // text inserted at the old EOF is not temporarily swallowed by it.
+      requiresFullDecorationRebuild = true;
+    }
 
     if (transaction.docChanged && records.length > 0) {
       const nextRecords: VisualFormulaRecord[] = [];
       for (const record of records) {
         const touched = transaction.changes.touchesRange(record.from, record.to) !== false;
-        const mapped: VisualFormulaRecord = {
-          ...record,
-          from: transaction.changes.mapPos(record.from, 1),
-          to: transaction.changes.mapPos(record.to, -1),
-          // Formula bodies are half-open ranges. Typing immediately after an
-          // opening delimiter or immediately before a closing delimiter must
-          // grow the body, while text inserted outside the outer delimiters
-          // must remain outside. Using inward associations here excluded the
-          // first character typed at either body edge until the host completed
-          // a full-document rescan, which made the first preview frame appear
-          // roughly half a second late.
-          bodyFrom: transaction.changes.mapPos(record.bodyFrom, -1),
-          bodyTo: transaction.changes.mapPos(record.bodyTo, 1),
-        };
+        const mapped = mapVisualFormulaRecord(record, transaction.changes);
         // Keep the formula currently being edited as a mapped source record so
         // its Math Preview tooltip can remain mounted while the host reparses
         // the new source. Other touched formulas stay out of the visual
@@ -895,28 +1017,45 @@ const formulaField = StateField.define<FormulaFieldValue>({
           mapped.from < mapped.to
         ) {
           nextRecords.push(mapped);
+        } else if (touched) {
+          // Mapping a DecorationSet cannot remove the widget owned by a
+          // formula record that we intentionally discard while waiting for
+          // the host parser. Force one complete presentation rebuild so the
+          // stale replacement widget does not survive at its mapped range.
+          requiresFullDecorationRebuild = true;
         }
       }
       records = nextRecords;
+      activeFormulaIds = new Set(records.map((record) => record.id));
+      recordById = new Map(records.map((record) => [record.id, record]));
     }
 
     for (const effect of transaction.effects) {
       if (effect.is(setFormulaDocument)) {
         const previousRecords = records;
         records = effect.value.records;
-        const retainedFormulaIds = new Set(records.map((record) => record.id));
+        recordsMayNeedSorting = true;
+        activeFormulaIds = new Set(records.map((record) => record.id));
+        recordById = new Map(records.map((record) => [record.id, record]));
         // Formula IDs are content-derived. Keep a bounded set of inactive IDs
         // so repeated undo/redo can restore a prior SVG even when the host has
         // already de-duplicated that ID and therefore does not send it again.
-        rendered = migrateCommittedFormulaRenders(
+        const beforeMigration = retainRenderedFormulaCache(rendered, activeFormulaIds);
+        const migrated = migrateCommittedFormulaRenders(
           previousRecords,
           records,
-          retainRenderedFormulaCache(rendered, retainedFormulaIds),
+          beforeMigration.rendered,
           transaction.state,
         );
+        const afterMigration = retainRenderedFormulaCache(migrated, activeFormulaIds);
+        rendered = afterMigration.rendered;
+        scheduleFormulaCacheEvictionNotice([
+          ...beforeMigration.evictedFormulaIds,
+          ...afterMigration.evictedFormulaIds,
+        ]);
         if (
           cursorRendered !== undefined &&
-          !retainedFormulaIds.has(cursorRendered.formulaId)
+          !activeFormulaIds.has(cursorRendered.formulaId)
         ) {
           cursorRendered = undefined;
         }
@@ -925,19 +1064,11 @@ const formulaField = StateField.define<FormulaFieldValue>({
         changed = true;
         requiresFullDecorationRebuild = true;
       } else if (effect.is(setFormulaRenders)) {
-        const nextRendered = new Map(rendered);
+        formulaRenderUpdates.push(...effect.value);
         for (const update of effect.value) {
-          nextRendered.set(update.formulaId, update.rendered);
+          changedFormulaIds.add(update.formulaId);
         }
-        rendered = nextRendered;
         changed = true;
-        requiresFullDecorationRebuild = true;
-      } else if (effect.is(setFormulaRender)) {
-        const nextRendered = new Map(rendered);
-        nextRendered.set(effect.value.formulaId, effect.value.rendered);
-        rendered = nextRendered;
-        changed = true;
-        requiresFullDecorationRebuild = true;
       } else if (effect.is(setFormulaCursorRender)) {
         cursorRendered = effect.value;
         changed = true;
@@ -954,13 +1085,30 @@ const formulaField = StateField.define<FormulaFieldValue>({
         requiresFullDecorationRebuild = true;
       }
     }
+    if (formulaRenderUpdates.length > 0) {
+      const nextRendered = new Map(rendered);
+      for (const update of formulaRenderUpdates) {
+        // Refresh insertion order so the bounded Map behaves as an LRU.
+        nextRendered.delete(update.formulaId);
+        nextRendered.set(update.formulaId, update.rendered);
+      }
+      const retained = retainRenderedFormulaCache(
+        nextRendered,
+        activeFormulaIds,
+      );
+      rendered = retained.rendered;
+      for (const formulaId of retained.evictedFormulaIds) {
+        changedFormulaIds.add(formulaId);
+      }
+      scheduleFormulaCacheEvictionNotice(retained.evictedFormulaIds);
+    }
 
     if (!changed) {
       return value;
     }
-    const sortedRecords = formulaRecordsAreSorted(records)
-      ? records
-      : [...records].sort(compareFormulaRecords);
+    const sortedRecords = recordsMayNeedSorting && !formulaRecordsAreSorted(records)
+      ? [...records].sort(compareFormulaRecords)
+      : records;
     const sourceRecords = selectedFormulaRecords(transaction.state, sortedRecords);
     const sourceFormulaKey = formulaSourceRecordKey(sourceRecords);
     if (
@@ -970,8 +1118,21 @@ const formulaField = StateField.define<FormulaFieldValue>({
       let decorations = transaction.docChanged
         ? value.decorations.map(transaction.changes)
         : value.decorations;
+      if (formulaRenderUpdates.length > 0) {
+        decorations = patchFormulaRenderDecorations(
+          decorations,
+          recordById,
+          rendered,
+          changedFormulaIds,
+          enabled,
+          visual,
+          transaction.state,
+        );
+      }
       return {
         records: sortedRecords,
+        activeFormulaIds,
+        recordById,
         rendered,
         cursorRendered,
         sourceFormulaKey,
@@ -1001,6 +1162,8 @@ const formulaField = StateField.define<FormulaFieldValue>({
     );
     return {
       records: sortedRecords,
+      activeFormulaIds,
+      recordById,
       rendered,
       cursorRendered,
       sourceFormulaKey: presentation.sourceFormulaKey,
@@ -1028,7 +1191,11 @@ const structureField = StateField.define<StructureFieldValue>({
           undefined,
           state,
         )
-      : { decorations: Decoration.none, atomic: Decoration.none };
+      : emptyStructurePresentation();
+    const selectionPresentationKey = visualSelectionPresentationKey(
+      state,
+      presentation.selectionRanges,
+    );
     return {
       records: [],
       formulaRecords: [],
@@ -1037,6 +1204,8 @@ const structureField = StateField.define<StructureFieldValue>({
       enabled,
       decorations: presentation.decorations,
       atomic: presentation.atomic,
+      selectionRanges: presentation.selectionRanges,
+      selectionPresentationKey,
     };
   },
   update(value, transaction) {
@@ -1047,7 +1216,24 @@ const structureField = StateField.define<StructureFieldValue>({
       ? mapStructureSourceReveal(value.sourceReveal, transaction.changes)
       : value.sourceReveal;
     let enabled = value.enabled;
-    let rebuild = !transaction.docChanged && transaction.selection !== undefined;
+    const hadTerminalDocumentEndBlock = transaction.docChanged &&
+      value.records.some((record) =>
+        record.kind === "documentEnd" &&
+        record.replacement.block &&
+        visualTerminalSyntheticEofLinePosition(
+            transaction.startState.doc,
+            record.replacement.sourceTo,
+          ) !== undefined
+      );
+    let selectionRanges = transaction.docChanged
+      ? value.selectionRanges.map(transaction.changes)
+      : value.selectionRanges;
+    let selectionPresentationKey =
+      transaction.docChanged || transaction.selection !== undefined
+        ? visualSelectionPresentationKey(transaction.state, selectionRanges)
+        : value.selectionPresentationKey;
+    let rebuild = hadTerminalDocumentEndBlock ||
+      selectionPresentationKey !== value.selectionPresentationKey;
     if (transaction.docChanged && records.length > 0) {
       // Decorations map themselves through document edits, but their backing
       // structure records do not. Keep those source coordinates in lock-step
@@ -1056,6 +1242,15 @@ const structureField = StateField.define<StructureFieldValue>({
       // this mapping, the rebuild uses the pre-undo offsets and exposes the
       // following theorem/proof/table source at the caret.
       records = mapVisualStructureRecords(records, transaction.changes);
+    }
+    if (transaction.docChanged && formulaRecords.length > 0) {
+      // Formula records participate in reference-chip and structure rendering.
+      // Mapping them in the same local transaction lets a later idle host
+      // acknowledgement prove that nothing changed, instead of rebuilding all
+      // visual widgets merely because offsets moved after prose input.
+      formulaRecords = formulaRecords.map((record) =>
+        mapVisualFormulaRecord(record, transaction.changes)
+      );
     }
     let decorations = transaction.docChanged
       ? value.decorations.map(transaction.changes)
@@ -1095,9 +1290,8 @@ const structureField = StateField.define<StructureFieldValue>({
         sourceReveal = effect.value;
         rebuild = true;
       } else if (effect.is(setFormulaDocument)) {
-        // Formula/structure indexes arrive together. Rebuild reference chips
-        // against the new formula records immediately so their first visible
-        // state already distinguishes equation labels from numbered structure.
+        // Formula and structure indexes arrive in one host snapshot. Rebuild
+        // reference chips immediately so they never flash a stale label key.
         formulaRecords = effect.value.records;
         rebuild = true;
       }
@@ -1111,9 +1305,14 @@ const structureField = StateField.define<StructureFieldValue>({
             sourceReveal,
             transaction.state,
           )
-        : { decorations: Decoration.none, atomic: Decoration.none };
+        : emptyStructurePresentation();
       decorations = presentation.decorations;
       atomic = presentation.atomic;
+      selectionRanges = presentation.selectionRanges;
+      selectionPresentationKey = visualSelectionPresentationKey(
+        transaction.state,
+        selectionRanges,
+      );
     }
     return {
       records,
@@ -1123,6 +1322,8 @@ const structureField = StateField.define<StructureFieldValue>({
       enabled,
       decorations,
       atomic,
+      selectionRanges,
+      selectionPresentationKey,
     };
   },
   provide: (field) => [
@@ -1130,6 +1331,100 @@ const structureField = StateField.define<StructureFieldValue>({
     EditorView.atomicRanges.from(field, (value) => () => value.atomic),
   ],
 });
+
+/**
+ * Keep CodeMirror's terminal document boundary on the collapsed footer.
+ *
+ * An atomic range intentionally excludes its endpoints. Thus a caret restored,
+ * clicked, or moved to `doc.length` can otherwise sit after a collapsed
+ * `\\end{document}` even though there is no editable visual line there. This
+ * filter only redirects empty selections while the terminal footer is really
+ * collapsed. Source mode, an explicitly revealed footer, non-empty selections,
+ * and edits that create genuine tail content remain byte-for-byte untouched.
+ */
+const visualTerminalDocumentEndSelectionBarrier =
+  EditorState.transactionFilter.of((transaction) => {
+    if (transaction.docChanged) {
+      return transaction;
+    }
+    const changesTerminalPresentation = transaction.effects.some((effect) =>
+      effect.is(setStructureDocument) ||
+      effect.is(setStructureEnabled) ||
+      effect.is(setStructureSourceReveal)
+    );
+    if (transaction.selection === undefined && !changesTerminalPresentation) {
+      return transaction;
+    }
+
+    const current = transaction.startState.field(structureField, false);
+    let records = current?.records ?? [];
+    let enabled = current?.enabled === true;
+    let sourceReveal = current?.sourceReveal;
+    for (const effect of transaction.effects) {
+      if (effect.is(setStructureDocument)) {
+        records = effect.value;
+      } else if (effect.is(setStructureEnabled)) {
+        enabled = effect.value;
+      } else if (effect.is(setStructureSourceReveal)) {
+        sourceReveal = effect.value;
+      }
+    }
+    if (!enabled) {
+      return transaction;
+    }
+
+    const terminal = records.find(
+      (record): record is VisualDocumentEndRecord =>
+        record.kind === "documentEnd" &&
+        record.replacement.block &&
+        record.replacement.from < record.replacement.to &&
+        validRange(
+          record.replacement.from,
+          record.replacement.to,
+          transaction.newDoc.length,
+        ) &&
+        visualTerminalSyntheticEofLinePosition(
+            transaction.newDoc,
+            record.replacement.sourceTo,
+          ) !== undefined &&
+        !sourceRevealTouchesRange(
+          sourceReveal,
+          record.replacement.sourceFrom,
+          record.replacement.sourceTo,
+        ),
+    );
+    if (terminal === undefined) {
+      return transaction;
+    }
+
+    let corrected = false;
+    const terminalPhysicalLineEnd = transaction.newDoc.lineAt(
+      terminal.replacement.from,
+    ).to;
+    const ranges = transaction.newSelection.ranges.map((range) => {
+      if (
+        !range.empty ||
+        (range.head !== transaction.newDoc.length &&
+          range.head !== terminalPhysicalLineEnd)
+      ) {
+        return range;
+      }
+      corrected = true;
+      return EditorSelection.cursor(terminal.replacement.from, -1);
+    });
+    return corrected
+      ? [
+          transaction,
+          {
+            selection: EditorSelection.create(
+              ranges,
+              transaction.newSelection.mainIndex,
+            ),
+            sequential: true,
+          },
+        ]
+      : transaction;
+  });
 
 const aiIssueField = StateField.define<AiIssueFieldValue>({
   create: () => ({ issues: [], decorations: Decoration.none }),
@@ -1281,15 +1576,333 @@ const nativeSyntaxField = StateField.define<NativeSyntaxFieldValue>({
   ),
 });
 
+const nativeBracketField = StateField.define<NativeBracketFieldValue>({
+  create: () => ({
+    base: Decoration.none,
+    decorations: Decoration.none,
+    enabled: false,
+  }),
+  update(value, transaction) {
+    let base = transaction.docChanged
+      ? value.base.map(transaction.changes)
+      : value.base;
+    let enabled = value.enabled;
+    for (const effect of transaction.effects) {
+      if (effect.is(setNativeBracketTokens)) {
+        enabled = effect.value.enabled;
+        if (effect.value.tokens !== undefined) {
+          base = buildNativeBracketDecorations(
+            effect.value.tokens,
+            transaction.state.doc.length,
+          );
+        }
+      } else if (effect.is(patchNativeBracketTokens)) {
+        const from = Math.max(
+          0,
+          Math.min(transaction.state.doc.length, effect.value.from),
+        );
+        const to = Math.max(
+          from,
+          Math.min(transaction.state.doc.length, effect.value.to),
+        );
+        base = base.update({
+          filterFrom: from,
+          filterTo: to,
+          filter: (tokenFrom, tokenTo) =>
+            from === to
+              ? tokenFrom !== from && tokenTo !== to
+              : tokenTo <= from || tokenFrom >= to,
+          add: nativeBracketDecorationRanges(
+            effect.value.tokens,
+            transaction.state.doc.length,
+          ),
+          sort: true,
+        });
+      }
+    }
+    return {
+      base,
+      decorations: enabled ? base : Decoration.none,
+      enabled,
+    };
+  },
+  provide: (field) => EditorView.decorations.from(
+    field,
+    (value) => value.decorations,
+  ),
+});
+
+const VISUAL_SOFT_WRAP_MAX_INDENT_COLUMNS = 16;
+
+/**
+ * Preserve a physical line's leading source indentation on its soft-wrapped
+ * rows. CodeMirror intentionally leaves continuation indentation to CSS. Extra
+ * logical-start padding reserves the indentation for every visual row, while a
+ * zero-width ::before marker pulls only the first row back. This neither
+ * consumes the real borders used by visual cards nor relies on `text-indent`,
+ * whose value CodeMirror samples from the first mounted line when drawing
+ * rectangular selections.
+ */
+function visualSoftWrapIndentDecorations(view: EditorView): DecorationSet {
+  const decorations: Range<Decoration>[] = [];
+  const visitedLines = new Set<number>();
+  for (const visibleRange of view.visibleRanges) {
+    let position = view.state.doc.lineAt(visibleRange.from).from;
+    while (position <= visibleRange.to && position <= view.state.doc.length) {
+      const line = view.state.doc.lineAt(position);
+      if (!visitedLines.has(line.from)) {
+        visitedLines.add(line.from);
+        // The rendered continuation is capped below, so never materialise an
+        // arbitrarily long logical line merely to inspect its leading prefix.
+        const indentationProbe = view.state.sliceDoc(
+          line.from,
+          Math.min(
+            line.to,
+            line.from + VISUAL_SOFT_WRAP_MAX_INDENT_COLUMNS + 1,
+          ),
+        );
+        const indentation = /^[\t ]+/u.exec(indentationProbe)?.[0] ?? "";
+        const columns = visualSourceIndentationColumns(
+          indentation,
+          view.state.tabSize,
+          VISUAL_SOFT_WRAP_MAX_INDENT_COLUMNS,
+        );
+        if (columns > 0) {
+          decorations.push(
+            Decoration.line({
+              class: "texleaf-soft-wrap-indent",
+              attributes: {
+                style: `--texleaf-soft-wrap-indent:${columns}ch`,
+                "data-texleaf-soft-wrap-indent-columns": String(columns),
+              },
+            }).range(line.from),
+          );
+        }
+      }
+      if (line.to >= visibleRange.to || line.to >= view.state.doc.length) {
+        break;
+      }
+      position = line.to + 1;
+    }
+  }
+  return Decoration.set(decorations, true);
+}
+
+const visualSoftWrapIndentPlugin = ViewPlugin.fromClass(class {
+  public decorations: DecorationSet;
+
+  public constructor(view: EditorView) {
+    this.decorations = visualSoftWrapIndentDecorations(view);
+  }
+
+  public update(update: ViewUpdate): void {
+    if (
+      update.docChanged ||
+      update.viewportChanged ||
+      update.geometryChanged ||
+      update.startState.tabSize !== update.state.tabSize
+    ) {
+      this.decorations = visualSoftWrapIndentDecorations(update.view);
+    }
+  }
+}, {
+  decorations: (plugin) => plugin.decorations,
+});
+
+const VISUAL_ACTIVE_BRACKET_HIGHLIGHT_NAME =
+  "texleaf-active-bracket-pair";
+const VISUAL_ACTIVE_BRACKET_MAX_DOM_RANGE_LENGTH = 256;
+type VisualDomRange = InstanceType<typeof window.Range>;
+
+interface VisualHighlightRegistry {
+  set(name: string, highlight: Highlight): void;
+  delete(name: string): boolean;
+}
+
+interface VisualActiveBracketHighlightController {
+  schedule(): void;
+  clear(): void;
+}
+
+const visualActiveBracketHighlightControllers = new WeakMap<
+  EditorView,
+  VisualActiveBracketHighlightController
+>();
+
+function visualHighlightRegistry(): VisualHighlightRegistry | undefined {
+  const registry = CSS.highlights as HighlightRegistry &
+    Partial<VisualHighlightRegistry>;
+  return typeof registry?.set === "function" &&
+      typeof registry.delete === "function"
+    ? registry as VisualHighlightRegistry
+    : undefined;
+}
+
+function clearVisualActiveBracketHighlight(view: EditorView): void {
+  visualActiveBracketHighlightControllers.get(view)?.clear();
+}
+
+function scheduleVisualActiveBracketHighlight(view: EditorView): void {
+  visualActiveBracketHighlightControllers.get(view)?.schedule();
+}
+
+/**
+ * Visual mode cannot use CodeMirror's ordinary `cm-matchingBracket` marks:
+ * inserting/removing those nested spans next to a live Chromium IME range can
+ * corrupt the composition DOM. CSS Custom Highlight paints the same exact DOM
+ * ranges without changing the content tree. CodeMirror owns every node below
+ * contentDOM and deliberately removes foreign classes during its next
+ * decoration sync. `docViewUpdate` rebinds the DOM Ranges after CodeMirror
+ * replaces syntax/bracket token nodes. The Highlight background is painted
+ * behind glyphs from each endpoint's already-visible currentColor, so a theme
+ * cannot accidentally erase it by defining every bracket/focus token as
+ * transparent. Foreground lines, outlines, and overlays are deliberately
+ * forbidden so narrow or tightly adjacent text remains untouched.
+ */
+const visualActiveBracketHighlightPlugin = ViewPlugin.fromClass(class {
+  private frame: number | undefined;
+
+  public constructor(private readonly view: EditorView) {
+    visualActiveBracketHighlightControllers.set(view, this);
+    this.schedule();
+  }
+
+  public update(update: ViewUpdate): void {
+    const modeChanged =
+      update.startState.field(editorPresentationModeField) !==
+      update.state.field(editorPresentationModeField);
+    if (
+      update.docChanged ||
+      update.selectionSet ||
+      update.viewportChanged ||
+      update.geometryChanged ||
+      update.focusChanged ||
+      modeChanged
+    ) {
+      this.schedule();
+    }
+  }
+
+  public docViewUpdate(): void {
+    // Effect-only native syntax, bracket, formula, and structure decoration
+    // updates can rebuild text nodes without changing the document, selection,
+    // viewport, geometry, or focus. CSS Highlight ranges point at concrete DOM
+    // text nodes, so recreate them after CodeMirror has completed that redraw.
+    this.schedule();
+  }
+
+  public schedule(): void {
+    if (this.frame !== undefined) {
+      return;
+    }
+    this.frame = requestAnimationFrame(() => {
+      this.frame = undefined;
+      this.paint();
+    });
+  }
+
+  public clear(): void {
+    if (this.frame !== undefined) {
+      cancelAnimationFrame(this.frame);
+      this.frame = undefined;
+    }
+    visualHighlightRegistry()?.delete(VISUAL_ACTIVE_BRACKET_HIGHLIGHT_NAME);
+  }
+
+  public destroy(): void {
+    this.clear();
+    visualActiveBracketHighlightControllers.delete(this.view);
+  }
+
+  private paint(): void {
+    const registry = visualHighlightRegistry();
+    if (
+      !visualActiveBracketPaintingEnabled(this.view)
+    ) {
+      registry?.delete(VISUAL_ACTIVE_BRACKET_HIGHLIGHT_NAME);
+      return;
+    }
+    const ranges: VisualDomRange[] = [];
+    for (const pair of visualActiveBracketPairs(this.view.state)) {
+      const first = visualActiveBracketDomRange(
+        this.view,
+        pair.first.from,
+        pair.first.to,
+      );
+      const second = visualActiveBracketDomRange(
+        this.view,
+        pair.second.from,
+        pair.second.to,
+      );
+      // If either endpoint remains hidden behind a visual replacement, do not
+      // paint a misleading half-pair or force CodeMirror to reveal its source.
+      if (first === undefined || second === undefined) {
+        continue;
+      }
+      ranges.push(first, second);
+    }
+    if (registry !== undefined && ranges.length > 0 && typeof Highlight === "function") {
+      registry.set(
+        VISUAL_ACTIVE_BRACKET_HIGHLIGHT_NAME,
+        new Highlight(...ranges),
+      );
+    } else {
+      registry?.delete(VISUAL_ACTIVE_BRACKET_HIGHLIGHT_NAME);
+    }
+  }
+});
+
+function visualActiveBracketDomRange(
+  view: EditorView,
+  from: number,
+  to: number,
+): VisualDomRange | undefined {
+  if (
+    from < 0 ||
+    to <= from ||
+    to > view.state.doc.length ||
+    to - from > VISUAL_ACTIVE_BRACKET_MAX_DOM_RANGE_LENGTH
+  ) {
+    return undefined;
+  }
+  try {
+    const start = view.domAtPos(from);
+    const end = view.domAtPos(to);
+    const range = view.contentDOM.ownerDocument.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    return range.toString() === view.state.sliceDoc(from, to)
+      ? range
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function visualActiveBracketPaintingEnabled(view: EditorView): boolean {
+  return (
+    view.state.field(editorPresentationModeField) === "visual" &&
+    inputFeatures.highlightActiveBracketPair &&
+    view.hasFocus &&
+    !visualImeCompositionActive &&
+    !view.composing &&
+    !visualImeOwnsKeyboardInput(view)
+  );
+}
+
 const viewportPlugin = ViewPlugin.fromClass(class {
   public constructor(_view: EditorView) {
     scheduleViewportRequest();
+    scheduleSettledViewportRequest();
     scheduleCursorPreviewRequest();
   }
 
   public update(update: ViewUpdate): void {
     if (update.viewportChanged || update.docChanged || update.geometryChanged) {
       scheduleViewportRequest();
+      if (update.docChanged) {
+        scheduleSettledViewportRequest();
+      }
     }
     if (update.selectionSet || update.docChanged) {
       scheduleCursorPreviewRequest(update.view);
@@ -1306,10 +1919,217 @@ const viewportPlugin = ViewPlugin.fromClass(class {
   }
 });
 
+interface VisualLineNumberAnchorMeasurement {
+  readonly anchorId: number;
+  readonly target: HTMLElement;
+  readonly shift: number | undefined;
+}
+
+interface VisualLineNumberAnchorReadResult {
+  readonly measurements: readonly VisualLineNumberAnchorMeasurement[];
+  readonly observed: readonly Element[];
+}
+
+let visualLineNumberAnchorScopeSequence = 0;
+
+function visualLineNumberAnchorId(element: HTMLElement): number | undefined {
+  const value = Number(element.dataset.texleafLineNumberAnchorId);
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function firstVisibleTextRect(element: HTMLElement): DOMRect | undefined {
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if ((node.textContent ?? "").trim().length === 0) {
+      continue;
+    }
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const rects = range.getClientRects();
+    for (let index = 0; index < rects.length; index += 1) {
+      const rect = rects.item(index);
+      if (rect !== null && rect.width > 0 && rect.height > 0) {
+        return rect;
+      }
+    }
+  }
+  const fallback = element.getClientRects().item(0);
+  return fallback !== null && fallback.width > 0 && fallback.height > 0
+    ? fallback
+    : undefined;
+}
+
+const visualLineNumberAnchorPlugin = ViewPlugin.fromClass(class {
+  private readonly styleElement: HTMLStyleElement;
+  private readonly resizeObserver: ResizeObserver | undefined;
+  private readonly mutationObserver: MutationObserver | undefined;
+  private readonly observed = new Set<Element>();
+  private readonly scope: string;
+  private destroyed = false;
+
+  public constructor(private readonly view: EditorView) {
+    this.scope = String(++visualLineNumberAnchorScopeSequence);
+    view.dom.dataset.texleafLineNumberAnchorScope = this.scope;
+    this.styleElement = document.createElement("style");
+    if (cspNonce.length > 0) {
+      this.styleElement.setAttribute("nonce", cspNonce);
+    }
+    this.styleElement.dataset.texleafLineNumberAnchorStyles = this.scope;
+    document.head.append(this.styleElement);
+    this.resizeObserver = typeof ResizeObserver === "function"
+      ? new ResizeObserver(() => this.requestAlignment())
+      : undefined;
+    this.mutationObserver = typeof MutationObserver === "function"
+      ? new MutationObserver(() => this.requestAlignment())
+      : undefined;
+    this.mutationObserver?.observe(view.dom, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+    this.requestAlignment();
+    void document.fonts?.ready.then(() => {
+      if (!this.destroyed) {
+        this.requestAlignment();
+      }
+    });
+  }
+
+  public update(update: ViewUpdate): void {
+    if (
+      update.docChanged ||
+      update.viewportChanged ||
+      update.geometryChanged ||
+      update.selectionSet
+    ) {
+      this.requestAlignment();
+    }
+  }
+
+  public destroy(): void {
+    this.destroyed = true;
+    this.resizeObserver?.disconnect();
+    this.mutationObserver?.disconnect();
+    this.observed.clear();
+    this.styleElement.remove();
+    delete this.view.dom.dataset.texleafLineNumberAnchorScope;
+  }
+
+  private requestAlignment(): void {
+    if (this.destroyed) {
+      return;
+    }
+    this.view.requestMeasure({
+      key: this,
+      read: () => this.readAlignment(),
+      write: (result) => this.writeAlignment(result),
+    });
+  }
+
+  private readAlignment(): VisualLineNumberAnchorReadResult {
+    const anchors = new Map<number, DOMRect>();
+    const observed: Element[] = [];
+    const anchorElements = this.view.contentDOM.querySelectorAll<HTMLElement>(
+      "[data-texleaf-line-number-anchor-id]",
+    );
+    for (let index = 0; index < anchorElements.length; index += 1) {
+      const element = anchorElements[index]!;
+      if (element.classList.contains("texleaf-line-number-anchor-target")) {
+        continue;
+      }
+      observed.push(element);
+      const anchorId = visualLineNumberAnchorId(element);
+      if (anchorId === undefined || anchors.has(anchorId)) {
+        continue;
+      }
+      const rect = firstVisibleTextRect(element);
+      if (rect !== undefined) {
+        anchors.set(anchorId, rect);
+      }
+    }
+
+    const scaleY = Number.isFinite(this.view.scaleY) && this.view.scaleY > 0
+      ? this.view.scaleY
+      : 1;
+    const measurements: VisualLineNumberAnchorMeasurement[] = [];
+    const targets = this.view.dom.querySelectorAll<HTMLElement>(
+      ".texleaf-line-number-anchor-target[data-texleaf-line-number-anchor-id]",
+    );
+    for (let index = 0; index < targets.length; index += 1) {
+      const target = targets[index]!;
+      const value = target.querySelector<HTMLElement>(
+        ".texleaf-line-number-anchor-value",
+      );
+      observed.push(target);
+      if (value !== null) {
+        observed.push(value);
+      }
+      const anchorId = visualLineNumberAnchorId(target);
+      const anchorRect = anchorId === undefined ? undefined : anchors.get(anchorId);
+      const valueRect = value === null ? undefined : firstVisibleTextRect(value);
+      let shift: number | undefined;
+      if (anchorId !== undefined && anchorRect !== undefined && valueRect !== undefined) {
+        const applied = Number(target.dataset.texleafLineNumberAnchorShift);
+        const appliedShift = Number.isFinite(applied) ? applied : 0;
+        const anchorCenter = anchorRect.top + anchorRect.height / 2;
+        const paintedValueCenter = valueRect.top + valueRect.height / 2;
+        const unshiftedValueCenter = paintedValueCenter - appliedShift * scaleY;
+        const measured = (anchorCenter - unshiftedValueCenter) / scaleY;
+        if (Number.isFinite(measured) && Math.abs(measured) <= 96) {
+          shift = Math.round(measured * 4) / 4;
+        }
+      }
+      measurements.push({
+        anchorId: anchorId ?? -1,
+        target,
+        shift,
+      });
+    }
+    return { measurements, observed };
+  }
+
+  private writeAlignment(result: VisualLineNumberAnchorReadResult): void {
+    const current = new Set(result.observed.filter((element) => element.isConnected));
+    for (const element of this.observed) {
+      if (!current.has(element)) {
+        this.resizeObserver?.unobserve(element);
+        this.observed.delete(element);
+      }
+    }
+    for (const element of current) {
+      if (!this.observed.has(element)) {
+        this.observed.add(element);
+        this.resizeObserver?.observe(element);
+      }
+    }
+
+    const shifts = new Map<number, number>();
+    for (const measurement of result.measurements) {
+      if (!measurement.target.isConnected || measurement.shift === undefined) {
+        delete measurement.target.dataset.texleafLineNumberAnchorShift;
+        continue;
+      }
+      const normalized = Object.is(measurement.shift, -0) ? 0 : measurement.shift;
+      measurement.target.dataset.texleafLineNumberAnchorShift = String(normalized);
+      shifts.set(measurement.anchorId, normalized);
+    }
+    const scope = this.scope;
+    this.styleElement.textContent = [...shifts]
+      .map(([anchorId, shift]) =>
+        `.cm-editor[data-texleaf-line-number-anchor-scope="${scope}"] ` +
+        `.texleaf-line-number-anchor-target[data-texleaf-line-number-anchor-id="${anchorId}"] ` +
+        `.texleaf-line-number-anchor-value{transform:translateY(${shift}px)}`
+      )
+      .join("\n");
+  }
+});
+
 const measuredBlockPlugin = ViewPlugin.fromClass(class {
   private readonly observed = new Set<Element>();
   private readonly observer: ResizeObserver | undefined;
-  private frame: number | undefined;
+  private observationFrame: number | undefined;
+  private exactMeasureFrame: number | undefined;
 
   public constructor(private readonly view: EditorView) {
     this.observer = typeof ResizeObserver === "function"
@@ -1325,46 +2145,54 @@ const measuredBlockPlugin = ViewPlugin.fromClass(class {
   }
 
   public destroy(): void {
-    if (this.frame !== undefined) {
-      cancelAnimationFrame(this.frame);
+    if (this.observationFrame !== undefined) {
+      cancelAnimationFrame(this.observationFrame);
+    }
+    if (this.exactMeasureFrame !== undefined) {
+      cancelAnimationFrame(this.exactMeasureFrame);
     }
     this.observer?.disconnect();
     this.observed.clear();
   }
 
   private scheduleObservationSync(): void {
-    if (this.frame !== undefined) {
-      cancelAnimationFrame(this.frame);
+    if (this.observationFrame !== undefined) {
+      cancelAnimationFrame(this.observationFrame);
     }
-    this.frame = requestAnimationFrame(() => {
-      this.frame = undefined;
+    this.observationFrame = requestAnimationFrame(() => {
+      this.observationFrame = undefined;
       const current = new Set<Element>(
         Array.from(this.view.dom.querySelectorAll(
           ".texleaf-measured-block-shell, .texleaf-formula-widget-inline",
         )),
       );
+      let membershipChanged = false;
       for (const element of this.observed) {
         if (!current.has(element)) {
           this.observer?.unobserve(element);
           this.observed.delete(element);
+          membershipChanged = true;
         }
       }
       for (const element of current) {
         if (!this.observed.has(element)) {
           this.observed.add(element);
           this.observer?.observe(element);
+          membershipChanged = true;
         }
       }
-      this.view.requestMeasure();
+      if (membershipChanged || this.observer === undefined) {
+        this.view.requestMeasure();
+      }
     });
   }
 
   private requestExactMeasure(): void {
-    if (this.frame !== undefined) {
-      cancelAnimationFrame(this.frame);
+    if (this.exactMeasureFrame !== undefined) {
+      cancelAnimationFrame(this.exactMeasureFrame);
     }
-    this.frame = requestAnimationFrame(() => {
-      this.frame = undefined;
+    this.exactMeasureFrame = requestAnimationFrame(() => {
+      this.exactMeasureFrame = undefined;
       this.view.requestMeasure();
     });
   }
@@ -1378,14 +2206,24 @@ const mappedWidgetRangePlugin = ViewPlugin.fromClass(class {
       return;
     }
     const elements = update.view.dom.querySelectorAll<HTMLElement>(
-      "[data-texleaf-source-from], [data-formula-from], [data-texleaf-body-from], [data-texleaf-columns-from]",
+      "[data-texleaf-source-from], [data-formula-from], [data-texleaf-body-from], [data-texleaf-columns-from], [data-texleaf-indent-from]",
     );
-    for (const element of Array.from(elements)) {
+    for (let index = 0; index < elements.length; index += 1) {
+      const element = elements[index]!;
       mapWidgetDatasetRange(update, element, "texleafSourceFrom", "texleafSourceTo");
       mapWidgetDatasetRange(update, element, "formulaFrom", "formulaTo");
       mapWidgetDatasetRange(update, element, "formulaBodyFrom", "formulaBodyTo");
       mapWidgetDatasetRange(update, element, "texleafBodyFrom", "texleafBodyTo");
       mapWidgetDatasetRange(update, element, "texleafColumnsFrom", "texleafColumnsTo");
+      const indentationFrom = Number(element.dataset.texleafIndentFrom);
+      if (Number.isSafeInteger(indentationFrom)) {
+        const mapped = update.changes.mapPos(indentationFrom, 1);
+        const mappedText = String(mapped);
+        if (element.dataset.texleafIndentFrom !== mappedText) {
+          element.dataset.texleafIndentFrom = mappedText;
+        }
+        refreshVisualSourceIndentation(element, update.state, mapped);
+      }
     }
   }
 });
@@ -1401,9 +2239,26 @@ function mapWidgetDatasetRange(
   if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)) {
     return;
   }
-  element.dataset[fromKey] = String(update.changes.mapPos(from, 1));
-  element.dataset[toKey] = String(update.changes.mapPos(to, -1));
+  const mappedFrom = String(update.changes.mapPos(from, 1));
+  const mappedTo = String(update.changes.mapPos(to, -1));
+  if (element.dataset[fromKey] !== mappedFrom) {
+    element.dataset[fromKey] = mappedFrom;
+  }
+  if (element.dataset[toKey] !== mappedTo) {
+    element.dataset[toKey] = mappedTo;
+  }
 }
+
+const VISUAL_FRAME_SURFACE =
+  "color-mix(in srgb, var(--vscode-editorWidget-background) 72%, var(--vscode-editor-background))";
+const VISUAL_FRAME_HEADER =
+  "color-mix(in srgb, var(--vscode-textLink-foreground) 10%, var(--vscode-editorWidget-background))";
+const VISUAL_FRAME_THEOREM_SURFACE =
+  "color-mix(in srgb, var(--vscode-textLink-foreground) 5%, var(--vscode-editorWidget-background))";
+const VISUAL_FRAME_DIVIDER =
+  "1px solid color-mix(in srgb, var(--vscode-editor-foreground) 28%, var(--vscode-editorWidget-border))";
+const VISUAL_FRAME_RAIL = "3px solid var(--vscode-textLink-foreground)";
+const VISUAL_FRAME_EDGE = "2px solid var(--vscode-textLink-foreground)";
 
 const editorTheme = EditorView.theme({
   "&": {
@@ -1411,7 +2266,7 @@ const editorTheme = EditorView.theme({
     color: "var(--vscode-editor-foreground)",
     backgroundColor: "transparent",
     fontSize: "var(--vscode-editor-font-size, 14px)",
-    "--texleaf-theorem-border": "color-mix(in srgb, var(--vscode-editor-foreground) 44%, var(--vscode-editorWidget-border) 56%)",
+    [VISUAL_THEOREM_BORDER_PROPERTY]: VISUAL_THEOREM_BORDER_VALUE,
     "--texleaf-editor-scrollbar-thumb": "color-mix(in srgb, var(--vscode-scrollbarSlider-background) 62%, var(--vscode-editor-foreground) 38%)",
     "--texleaf-editor-scrollbar-track": "color-mix(in srgb, var(--vscode-editorWidget-background) 55%, transparent)",
   },
@@ -1458,115 +2313,168 @@ const editorTheme = EditorView.theme({
   ".cm-scroller::-webkit-scrollbar-thumb:active": {
     backgroundColor: "var(--vscode-scrollbarSlider-activeBackground)",
   },
-  ".cm-line.texleaf-reverse-sync-flash": {
-    position: "relative",
+  ".cm-line.texleaf-reverse-sync-flash-line": {
     animation: "texleaf-reverse-sync-flash 1.15s ease-out both",
-    boxShadow: "inset 3px 0 var(--vscode-editorInfo-foreground)",
+    boxShadow: "inset 3px 0 var(--vscode-editorInfo-foreground), inset 0 0 0 1px color-mix(in srgb, var(--vscode-editorInfo-foreground) 38%, transparent)",
+    borderRadius: "4px",
+  },
+  ".texleaf-reverse-sync-widget-flash": {
+    animation: "texleaf-reverse-sync-flash 1.15s ease-out both",
+    boxShadow: "inset 3px 0 var(--vscode-editorInfo-foreground), inset 0 0 0 1px color-mix(in srgb, var(--vscode-editorInfo-foreground) 38%, transparent)",
+    borderRadius: "4px",
+  },
+  ".texleaf-source-indented-block": {
+    // Keep this stable declaration in CSS; document edits only update the
+    // custom property when the actual source indentation column changes.
+    paddingInlineStart: "var(--texleaf-source-indent, 0ch)",
   },
   ".cm-panels": {
     color: "var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground))",
-    backgroundColor: "var(--vscode-editorWidget-background, var(--vscode-editor-background))",
     fontFamily: "var(--vscode-font-family, var(--vscode-editor-font-family, sans-serif))",
     fontSize: "var(--vscode-font-size, 13px)",
   },
-  ".cm-panels-bottom": {
-    borderTop: "1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border))",
-    boxShadow: "0 -4px 14px color-mix(in srgb, var(--vscode-widget-shadow) 48%, transparent)",
+  ".cm-panels-top:has(> .texleaf-search-panel)": {
+    position: "absolute",
+    inset: "0 0 auto 0",
+    zIndex: "40",
+    height: "0",
+    overflow: "visible",
+    pointerEvents: "none",
+    color: "inherit",
+    backgroundColor: "transparent",
+    border: "0",
   },
-  ".cm-panel.cm-search": {
+  ".cm-panel.texleaf-search-panel": {
+    boxSizing: "border-box",
+    display: "grid",
+    gap: "6px",
+    width: "min(610px, calc(100% - 16px))",
+    minWidth: "0",
+    margin: "6px 8px 0 auto",
+    padding: "6px",
+    color: "inherit",
+    backgroundColor: "var(--vscode-editorWidget-background, var(--vscode-editor-background))",
+    border: "1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border))",
+    borderRadius: "7px",
+    boxShadow: "0 5px 18px color-mix(in srgb, var(--vscode-widget-shadow) 62%, transparent)",
+    pointerEvents: "auto",
+  },
+  ".texleaf-search-row": {
     boxSizing: "border-box",
     display: "flex",
     flexWrap: "wrap",
     alignItems: "center",
-    gap: "6px 8px",
-    minHeight: "46px",
-    padding: "8px 42px 8px 10px",
-    color: "inherit",
-    backgroundColor: "transparent",
+    gap: "4px",
+    minWidth: "0",
   },
-  ".cm-panel.cm-search > br": {
-    flexBasis: "100%",
-    width: "0",
-    height: "0",
-    margin: "0",
-    padding: "0",
+  ".texleaf-search-row[hidden]": {
+    display: "none",
   },
-  ".cm-panel.cm-search .cm-textfield": {
+  ".texleaf-search-field": {
     boxSizing: "border-box",
-    flex: "1 1 17em",
-    minWidth: "11em",
-    maxWidth: "34em",
+    display: "flex",
+    alignItems: "center",
+    flex: "1 1 190px",
+    minWidth: "92px",
     height: "28px",
-    padding: "3px 8px",
     color: "var(--vscode-input-foreground, var(--vscode-editor-foreground))",
     backgroundColor: "var(--vscode-input-background, var(--vscode-editor-background))",
     border: "1px solid var(--vscode-input-border, var(--vscode-editorWidget-border))",
     borderRadius: "5px",
-    outline: "none",
-    font: "inherit",
   },
-  ".cm-panel.cm-search .cm-textfield::placeholder": {
-    color: "var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground))",
-    opacity: "1",
-  },
-  ".cm-panel.cm-search .cm-textfield:focus": {
+  ".texleaf-search-field:focus-within": {
     borderColor: "var(--vscode-focusBorder)",
     boxShadow: "0 0 0 1px var(--vscode-focusBorder)",
   },
-  ".cm-panel.cm-search .cm-button": {
+  ".texleaf-search-field > input": {
     boxSizing: "border-box",
+    flex: "1 1 auto",
+    width: "0",
+    minWidth: "0",
+    height: "26px",
+    padding: "3px 7px",
+    color: "inherit",
+    backgroundColor: "transparent",
+    border: "0",
+    outline: "0",
+    font: "inherit",
+    fontFamily: "var(--vscode-editor-font-family, monospace)",
+  },
+  ".texleaf-search-field > input::placeholder": {
+    color: "var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground))",
+    opacity: "1",
+  },
+  ".texleaf-search-status": {
+    flex: "0 0 auto",
+    minWidth: "52px",
+    padding: "0 7px 0 3px",
+    color: "var(--vscode-descriptionForeground)",
+    textAlign: "right",
+    fontSize: "0.92em",
+    fontVariantNumeric: "tabular-nums",
+    whiteSpace: "nowrap",
+  },
+  ".texleaf-search-flags": {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "2px",
+  },
+  ".texleaf-search-panel button": {
+    boxSizing: "border-box",
+    flex: "0 0 auto",
     minHeight: "28px",
     margin: "0",
-    padding: "3px 9px",
-    color: "var(--vscode-button-secondaryForeground, var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground)))",
-    backgroundColor: "var(--vscode-button-secondaryBackground, var(--vscode-toolbar-hoverBackground))",
-    backgroundImage: "none",
-    border: "1px solid var(--vscode-button-border, var(--vscode-editorWidget-border))",
-    borderRadius: "5px",
+    padding: "3px 7px",
+    color: "var(--vscode-icon-foreground, var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground)))",
+    backgroundColor: "transparent",
+    border: "1px solid transparent",
+    borderRadius: "4px",
     font: "inherit",
     lineHeight: "1.25",
     cursor: "pointer",
   },
-  ".cm-panel.cm-search .cm-button:hover": {
-    color: "var(--vscode-button-secondaryForeground, var(--vscode-editorWidget-foreground))",
-    backgroundColor: "var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground))",
+  ".texleaf-search-panel button:hover:not(:disabled)": {
+    backgroundColor: "var(--vscode-toolbar-hoverBackground)",
   },
-  ".cm-panel.cm-search .cm-button:focus-visible": {
+  ".texleaf-search-panel button:focus-visible": {
     outline: "1px solid var(--vscode-focusBorder)",
     outlineOffset: "1px",
   },
-  ".cm-panel.cm-search label": {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: "4px",
-    minHeight: "28px",
-    color: "var(--vscode-foreground, var(--vscode-editor-foreground))",
-    whiteSpace: "nowrap",
-    cursor: "pointer",
+  ".texleaf-search-panel button:disabled": {
+    opacity: "0.38",
+    cursor: "default",
   },
-  ".cm-panel.cm-search input[type=checkbox]": {
-    width: "14px",
-    height: "14px",
-    margin: "0",
-    accentColor: "var(--vscode-focusBorder)",
-  },
-  ".cm-panel.cm-search [name=close]": {
-    position: "absolute",
-    top: "8px",
-    right: "9px",
+  ".texleaf-search-icon": {
     width: "28px",
-    height: "28px",
-    padding: "0",
-    color: "var(--vscode-icon-foreground, var(--vscode-foreground))",
-    backgroundColor: "transparent",
-    border: "1px solid transparent",
-    borderRadius: "5px",
-    fontSize: "18px",
-    lineHeight: "24px",
+    padding: "0 !important",
+    fontSize: "15px !important",
   },
-  ".cm-panel.cm-search [name=close]:hover": {
-    backgroundColor: "var(--vscode-toolbar-hoverBackground)",
-    borderColor: "var(--vscode-editorWidget-border, transparent)",
+  ".texleaf-search-flag": {
+    minWidth: "28px",
+    padding: "2px 5px !important",
+    fontFamily: "var(--vscode-editor-font-family, monospace) !important",
+    fontSize: "12px !important",
+    fontWeight: "600",
+  },
+  ".texleaf-search-flag.active, .texleaf-search-flag[aria-pressed=true]": {
+    color: "var(--vscode-inputOption-activeForeground, var(--vscode-foreground))",
+    backgroundColor: "var(--vscode-inputOption-activeBackground, var(--vscode-toolbar-activeBackground))",
+    borderColor: "var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder))",
+  },
+  ".texleaf-search-text-button": {
+    whiteSpace: "nowrap",
+  },
+  ".texleaf-search-replace-row": {
+    paddingLeft: "32px",
+  },
+  ".texleaf-search-replace-field": {
+    maxWidth: "none",
+  },
+  ".texleaf-search-panel[data-search-state=not-found] .texleaf-search-field, .texleaf-search-panel[data-search-state=invalid] .texleaf-search-field": {
+    borderColor: "var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground))",
+  },
+  ".texleaf-search-panel[data-search-state=not-found] .texleaf-search-status, .texleaf-search-panel[data-search-state=invalid] .texleaf-search-status": {
+    color: "var(--vscode-errorForeground)",
   },
   ".cm-searchMatch": {
     backgroundColor: "var(--vscode-editor-findMatchHighlightBackground)",
@@ -1585,11 +2493,22 @@ const editorTheme = EditorView.theme({
     lineHeight: "inherit",
   },
   ".cm-line": {
+    // The decoration supplies only the dynamic indent custom property. Keeping
+    // each visual card's original inset in a separate base variable lets this
+    // padding coexist with its real frame borders.
+    "--texleaf-line-base-padding-inline-start": "8px",
     padding: "0 8px",
+    paddingInlineStart:
+      "calc(var(--texleaf-line-base-padding-inline-start, 8px) + var(--texleaf-soft-wrap-indent, 0ch))",
   },
-  ".texleaf-visual-leading-indent": {
-    fontSize: "0 !important",
-    letterSpacing: "0 !important",
+  ".cm-line.texleaf-soft-wrap-indent::before": {
+    // Pull only the first visual row back by the reserved amount. Its real
+    // leading spaces/tabs then place the first glyph at its unchanged source
+    // column; wrapped rows start at that same column automatically.
+    content: '""',
+    marginInlineStart:
+      "calc(0px - var(--texleaf-soft-wrap-indent, 0ch))",
+    pointerEvents: "none",
   },
   ".tok-comment": {
     color: "var(--texleaf-syntax-comment, var(--vscode-descriptionForeground, var(--vscode-editorLineNumber-foreground)))",
@@ -1634,10 +2553,10 @@ const editorTheme = EditorView.theme({
     color: "var(--texleaf-syntax-invalid, var(--vscode-editorError-foreground))",
   },
   ".texleaf-native-syntax-token": {
-    // Exact TextMate colors and font styles are applied as sanitized inline
-    // declarations by nativeSyntaxField. CodeMirror's fallback StreamLanguage
-    // spans can be nested inside this mark, so every child must inherit the
-    // resolved native token instead of repainting it with a coarse tok-* color.
+    // Authoritative TextMate colors and font styles are applied as sanitized
+    // inline declarations by nativeSyntaxField. Source-mode fallback spans can
+    // be nested inside this mark, so every child inherits the more precise
+    // host-resolved token instead of repainting it with a coarse tok-* role.
     opacity: "1",
     color: "var(--texleaf-native-foreground, inherit) !important",
     fontStyle: "var(--texleaf-native-font-style, normal) !important",
@@ -1649,6 +2568,42 @@ const editorTheme = EditorView.theme({
     fontStyle: "var(--texleaf-native-font-style, normal) !important",
     fontWeight: "var(--texleaf-native-font-weight, 400) !important",
     textDecorationLine: "var(--texleaf-native-decoration, none) !important",
+  },
+  // TextMate and bracket marks overlap on exactly one character. Depending on
+  // CodeMirror's mark ordering either can become the outer span. Paint the
+  // bracket mark, an inner native mark, and the innermost tok-* fallback
+  // directly. Avoid an intermediate camel-cased custom property: style-mod
+  // normalizes property names, while CSS custom-property references are case
+  // sensitive and would silently fall back to editor.foreground.
+  ".texleaf-bracket-depth-0, .texleaf-bracket-depth-0 .texleaf-native-syntax-token, .texleaf-bracket-depth-0 [class*='tok-']": {
+    color:
+      "var(--vscode-editorBracketHighlight-foreground1, var(--vscode-editor-foreground)) !important",
+  },
+  ".texleaf-bracket-depth-1, .texleaf-bracket-depth-1 .texleaf-native-syntax-token, .texleaf-bracket-depth-1 [class*='tok-']": {
+    color:
+      "var(--vscode-editorBracketHighlight-foreground2, var(--vscode-editor-foreground)) !important",
+  },
+  ".texleaf-bracket-depth-2, .texleaf-bracket-depth-2 .texleaf-native-syntax-token, .texleaf-bracket-depth-2 [class*='tok-']": {
+    color:
+      "var(--vscode-editorBracketHighlight-foreground3, var(--vscode-editor-foreground)) !important",
+  },
+  ".texleaf-bracket-depth-3, .texleaf-bracket-depth-3 .texleaf-native-syntax-token, .texleaf-bracket-depth-3 [class*='tok-']": {
+    color:
+      "var(--vscode-editorBracketHighlight-foreground4, var(--vscode-editor-foreground)) !important",
+  },
+  ".texleaf-bracket-depth-4, .texleaf-bracket-depth-4 .texleaf-native-syntax-token, .texleaf-bracket-depth-4 [class*='tok-']": {
+    color:
+      "var(--vscode-editorBracketHighlight-foreground5, var(--vscode-editor-foreground)) !important",
+  },
+  ".texleaf-bracket-depth-5, .texleaf-bracket-depth-5 .texleaf-native-syntax-token, .texleaf-bracket-depth-5 [class*='tok-']": {
+    color:
+      "var(--vscode-editorBracketHighlight-foreground6, var(--vscode-editor-foreground)) !important",
+  },
+  "&.cm-focused .cm-content::highlight(texleaf-active-bracket-pair), &.cm-focused .cm-content *::highlight(texleaf-active-bracket-pair)": {
+    backgroundColor:
+      "color-mix(in srgb, transparent 65%, currentColor 35%)",
+    textDecorationLine: "none",
+    textShadow: "none",
   },
   ".tok-emphasis": {
     fontStyle: "italic",
@@ -1680,7 +2635,7 @@ const editorTheme = EditorView.theme({
     cursor: "text",
   },
   ".tok-invalid, .tok-deleted": {
-    color: "var(--vscode-editorError-foreground)",
+    color: "var(--texleaf-syntax-invalid, var(--vscode-editorError-foreground))",
     textDecoration: "underline wavy",
   },
   ".cm-cursor, .cm-dropCursor": {
@@ -1724,6 +2679,140 @@ const editorTheme = EditorView.theme({
   ".cm-snippetFieldPosition": {
     borderLeft: "1px solid var(--vscode-editor-snippetFinalTabstopHighlightBorder, var(--vscode-focusBorder))",
   },
+  ".cm-lineNumbers .cm-gutterElement.texleaf-source-range-gutter": {
+    display: "flex",
+    alignItems: "stretch",
+    justifyContent: "flex-end",
+    boxSizing: "border-box",
+    paddingTop: "2px",
+    paddingInlineEnd: "3px",
+    paddingBottom: "2px",
+  },
+  ".texleaf-source-range-number": {
+    display: "grid",
+    // Keep one zero-content spacer followed by one intrinsic digit column. The
+    // marker shrink-wraps the widest endpoint and the gutter flex container
+    // keeps its right edge on the native line-number axis. Thus the frame hugs
+    // the digits instead of spanning the empty gutter, including 999 -> 1000.
+    gridTemplateColumns: "minmax(0, 1fr) max-content",
+    gridTemplateRows: "max-content minmax(8px, 1fr) max-content",
+    justifyItems: "end",
+    alignItems: "stretch",
+    alignSelf: "stretch",
+    width: "max-content",
+    maxWidth: "100%",
+    height: "100%",
+    minHeight: "0",
+    color: "inherit",
+    fontSize: "inherit",
+    fontWeight: "inherit",
+    fontVariantNumeric: "tabular-nums",
+    letterSpacing: "normal",
+    lineHeight: "1",
+    userSelect: "none",
+    // Paint the visual-range frame outside the marker's layout box. Unlike a
+    // border or padding, an outline contributes no intrinsic width, so the
+    // digit column keeps precisely the same right edge as native CodeMirror
+    // line numbers (including when it grows from three to four digits).
+    outline: "1px solid color-mix(in srgb, currentColor 58%, transparent)",
+    // Compact markers use the native one-line-height metrics, whose painted
+    // glyph bounds extend slightly beyond their CSS line boxes. Two pixels of
+    // paint-only offset keep the square frame outside those glyphs without
+    // moving either endpoint.
+    outlineOffset: "2px",
+    borderRadius: "0",
+  },
+  ".texleaf-source-range-number-compact": {
+    position: "relative",
+    display: "grid",
+    gridTemplateRows: "auto 4px auto",
+    alignItems: "center",
+    alignSelf: "center",
+    justifyItems: "end",
+    width: "max-content",
+    maxWidth: "100%",
+    height: "auto",
+    columnGap: "0",
+    rowGap: "0",
+    fontSize: "inherit",
+    letterSpacing: "normal",
+    lineHeight: "1",
+    whiteSpace: "nowrap",
+  },
+  ".texleaf-source-range-start": {
+    gridColumn: "2",
+    gridRow: "1",
+    justifySelf: "end",
+  },
+  ".texleaf-source-range-end": {
+    gridColumn: "2",
+    gridRow: "3",
+    justifySelf: "end",
+  },
+  ".texleaf-source-range-number-compact .texleaf-source-range-start": {
+    gridColumn: "2",
+    gridRow: "1",
+  },
+  ".texleaf-source-range-number-compact .texleaf-source-range-end": {
+    gridColumn: "2",
+    gridRow: "3",
+  },
+  ".texleaf-source-range-number-compact .texleaf-source-range-rule": {
+    display: "block",
+    position: "relative",
+    gridColumn: "2",
+    gridRow: "2",
+    justifySelf: "center",
+    width: "1px",
+    minHeight: "4px",
+  },
+  ".texleaf-source-range-number-capped": {
+    alignSelf: "center",
+    height: "4.5em",
+    maxHeight: "100%",
+  },
+  ".texleaf-source-range-number-single": {
+    display: "block",
+  },
+  ".texleaf-line-number-anchor-target": {
+    width: "100%",
+  },
+  ".texleaf-source-range-number.texleaf-line-number-anchor-target": {
+    // A semantic single-line marker still moves only its inner value vertically;
+    // it does not need the range frame to stretch across the whole gutter.
+    width: "max-content",
+    maxWidth: "100%",
+  },
+  ".texleaf-line-number-anchor-value": {
+    display: "inline-block",
+  },
+  ".texleaf-source-range-rule": {
+    position: "relative",
+    display: "block",
+    justifySelf: "stretch",
+    gridColumn: "2",
+    gridRow: "2",
+    width: "100%",
+    minHeight: "8px",
+  },
+  ".texleaf-source-range-rule::before": {
+    content: '""',
+    position: "absolute",
+    insetBlock: "2px",
+    insetInlineEnd: "50%",
+    borderInlineEnd: "1px solid currentColor",
+    transform: "translateX(50%)",
+    opacity: "0.62",
+  },
+  "@media (forced-colors: active)": {
+    ".texleaf-source-range-number": {
+      outlineColor: "CanvasText",
+    },
+    ".texleaf-source-range-rule::before": {
+      borderInlineEndColor: "CanvasText",
+      opacity: "1",
+    },
+  },
   ".texleaf-measured-block-shell": {
     boxSizing: "border-box",
     display: "block",
@@ -1740,21 +2829,27 @@ const editorTheme = EditorView.theme({
     paddingBottom: "1.9em",
   },
   ".texleaf-theorem-begin-shell": {
+    paddingInlineStart: "0",
     paddingTop: "1em",
   },
   ".texleaf-frame-begin-shell": {
-    paddingTop: "1.15em",
+    paddingTop: "1em",
+    paddingInlineStart: "0",
   },
   ".texleaf-abstract-begin-shell": {
+    paddingInlineStart: "0",
     paddingTop: "1.15em",
   },
   ".texleaf-theorem-end-shell": {
+    paddingInlineStart: "0",
     paddingBottom: "1em",
   },
   ".texleaf-frame-end-shell": {
-    paddingBottom: "1.15em",
+    paddingBottom: "1em",
+    paddingInlineStart: "0",
   },
   ".texleaf-abstract-end-shell": {
+    paddingInlineStart: "0",
     paddingBottom: "1.15em",
   },
   ".texleaf-keywords-shell": {
@@ -1769,7 +2864,7 @@ const editorTheme = EditorView.theme({
     borderLeft: "1px solid var(--vscode-editorWidget-border)",
     borderRight: "1px solid var(--vscode-editorWidget-border)",
   },
-  ".texleaf-bibliography-shell": {
+  ".texleaf-bibliography-shell, .texleaf-table-of-contents-shell": {
     paddingTop: "1.15em",
     paddingBottom: "1.15em",
   },
@@ -1783,6 +2878,23 @@ const editorTheme = EditorView.theme({
     paddingTop: "1.25em",
     paddingBottom: "2.25em",
   },
+  // CodeMirror keeps one empty line carrier for the separator immediately
+  // after a block document-end widget. It belongs to the footer even when a
+  // genuine blank/tail line follows. Only an exact terminal separator creates
+  // a second, synthetic EOF carrier; the terminal class collapses that one as
+  // well while leaving every authored following line measurable and editable.
+  ".texleaf-document-end-shell-line-terminated + .cm-line, .texleaf-document-end-shell-terminal + .cm-line + .cm-line": {
+    boxSizing: "border-box",
+    height: "0 !important",
+    minHeight: "0 !important",
+    lineHeight: "0 !important",
+    paddingTop: "0 !important",
+    paddingBottom: "0 !important",
+    borderTopWidth: "0 !important",
+    borderBottomWidth: "0 !important",
+    overflow: "hidden !important",
+    pointerEvents: "none",
+  },
   ".texleaf-formula-shell": {
     minWidth: "0",
     paddingTop: "0.25em",
@@ -1794,8 +2906,8 @@ const editorTheme = EditorView.theme({
     boxSizing: "border-box",
     width: "calc(100% - 24px)",
     margin: "0 12px",
-    borderLeft: "3px solid var(--texleaf-theorem-border)",
-    borderRight: "3px solid var(--texleaf-theorem-border)",
+    borderLeft: VISUAL_THEOREM_FRAME_BORDER,
+    borderRight: VISUAL_THEOREM_FRAME_BORDER,
     backgroundColor: "color-mix(in srgb, var(--vscode-editorWidget-background) 58%, transparent)",
   },
   ".texleaf-preamble-header": {
@@ -1839,9 +2951,9 @@ const editorTheme = EditorView.theme({
     fontSize: "14px",
   },
   ".cm-line.texleaf-preamble-line": {
+    "--texleaf-line-base-padding-inline-start": "12px",
     margin: "0 10px",
-    paddingLeft: "12px",
-    paddingRight: "12px",
+    paddingInlineEnd: "12px",
     color: "var(--vscode-editor-foreground)",
     backgroundColor: "var(--vscode-textCodeBlock-background, var(--vscode-editorWidget-background))",
     borderLeft: "1px solid var(--vscode-editorWidget-border)",
@@ -1867,62 +2979,126 @@ const editorTheme = EditorView.theme({
     borderBottom: "1px solid var(--vscode-editorWidget-border)",
     cursor: "text",
   },
+  ".texleaf-front-matter-section": {
+    textAlign: "start",
+    marginTop: "1em",
+    lineHeight: "1.65",
+    whiteSpace: "pre-wrap",
+  },
+  ".texleaf-front-matter-label": {
+    fontWeight: "600",
+    marginInlineEnd: "0.65em",
+  },
+  ".texleaf-front-matter-abstract > .texleaf-front-matter-label": {
+    display: "block",
+    marginBottom: "0.35em",
+  },
+  ".texleaf-title-card [role=button]:focus-visible": {
+    outline: "1px solid var(--vscode-focusBorder)",
+    outlineOffset: "3px",
+  },
+  ".texleaf-title-definition": {
+    color: "var(--vscode-textLink-foreground)",
+    fontSize: "0.75em",
+    cursor: "pointer",
+  },
   ".texleaf-frame-begin": {
     boxSizing: "border-box",
     display: "flex",
-    alignItems: "baseline",
+    alignItems: "center",
     flexWrap: "wrap",
-    gap: "0.35em 0.75em",
-    width: "calc(100% - 32px)",
+    gap: "0.38em 0.65em",
+    width: "auto",
+    maxWidth: "calc(100% - 32px)",
+    minWidth: "0",
     margin: "0 16px",
-    padding: "0.7em 1em 0.55em",
+    padding: "0.68em 1em 0.62em",
     color: "var(--vscode-editor-foreground)",
-    backgroundColor: "color-mix(in srgb, var(--vscode-textLink-foreground) 16%, var(--vscode-editorWidget-background))",
-    border: "1px solid var(--vscode-editorWidget-border)",
-    borderBottom: "0",
-    borderTopLeftRadius: "8px",
-    borderTopRightRadius: "8px",
+    backgroundColor: VISUAL_FRAME_HEADER,
+    border: "0",
+    borderTop: VISUAL_FRAME_EDGE,
+    borderBottom: VISUAL_FRAME_DIVIDER,
+    borderLeft: VISUAL_FRAME_RAIL,
+    borderRight: VISUAL_FRAME_RAIL,
+    borderTopLeftRadius: "9px",
+    borderTopRightRadius: "9px",
     cursor: "text",
   },
   ".texleaf-frame-label": {
     flex: "0 0 auto",
     color: "var(--vscode-textLink-foreground)",
+    padding: "0.06em 0.48em",
+    backgroundColor: "color-mix(in srgb, var(--vscode-textLink-foreground) 7%, transparent)",
+    border: "1px solid color-mix(in srgb, var(--vscode-textLink-foreground) 24%, transparent)",
+    borderRadius: "999px",
     fontFamily: "var(--vscode-font-family)",
-    fontSize: "0.78em",
+    fontSize: "0.7em",
     fontWeight: "700",
-    letterSpacing: "0.04em",
+    letterSpacing: "0.07em",
     textTransform: "uppercase",
   },
   ".texleaf-frame-title": {
-    fontSize: "1.25em",
+    minWidth: "0",
+    fontSize: "1.14em",
     fontWeight: "700",
+  },
+  ".texleaf-frame-begin-untitled": {
+    minHeight: "2.5em",
+  },
+  ".texleaf-frame-begin > .texleaf-environment-edit-chip": {
+    marginInlineStart: "auto",
+    opacity: "0.52",
+  },
+  ".texleaf-frame-begin:hover > .texleaf-environment-edit-chip, .texleaf-frame-begin > .texleaf-environment-edit-chip:focus-visible": {
+    opacity: "1",
   },
   ".texleaf-frame-subtitle": {
     flexBasis: "100%",
+    paddingInlineStart: "0.15em",
     color: "var(--vscode-descriptionForeground)",
-    fontSize: "0.9em",
+    fontSize: "0.86em",
   },
   ".cm-line.texleaf-frame-line": {
+    "--texleaf-line-base-padding-inline-start": "18px",
     boxSizing: "border-box",
+    width: "auto",
+    maxWidth: "calc(100% - 32px)",
+    minWidth: "0",
     minHeight: "var(--vscode-editor-line-height, 1.5em)",
     margin: "0 16px",
-    paddingLeft: "15px",
-    paddingRight: "15px",
-    backgroundColor: "color-mix(in srgb, var(--vscode-editorWidget-background) 58%, transparent)",
-    borderLeft: "1px solid var(--vscode-editorWidget-border)",
-    borderRight: "1px solid var(--vscode-editorWidget-border)",
+    paddingInlineEnd: "18px",
+    backgroundColor: VISUAL_FRAME_SURFACE,
+    borderLeft: VISUAL_FRAME_RAIL,
+    borderRight: VISUAL_FRAME_RAIL,
+    lineHeight: "1.55",
   },
   ".texleaf-frame-end": {
     boxSizing: "border-box",
-    display: "block",
-    width: "calc(100% - 32px)",
-    minHeight: "0.65em",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    width: "auto",
+    maxWidth: "calc(100% - 32px)",
+    minWidth: "0",
+    minHeight: "0.68em",
     margin: "0 16px",
-    border: "1px solid var(--vscode-editorWidget-border)",
-    borderTop: "0",
-    borderBottomLeftRadius: "8px",
-    borderBottomRightRadius: "8px",
+    padding: "0.08em 0.8em 0.32em",
+    backgroundColor: VISUAL_FRAME_SURFACE,
+    borderRight: VISUAL_FRAME_RAIL,
+    borderBottom: VISUAL_FRAME_EDGE,
+    borderLeft: VISUAL_FRAME_RAIL,
+    borderBottomLeftRadius: "9px",
+    borderBottomRightRadius: "9px",
+    boxShadow: "0 9px 20px color-mix(in srgb, var(--vscode-widget-shadow) 14%, transparent)",
     cursor: "text",
+  },
+  ".texleaf-frame-end > .texleaf-environment-edit-chip": {
+    minHeight: "16px",
+    borderColor: "transparent",
+    opacity: "0.36",
+  },
+  ".texleaf-frame-end:hover > .texleaf-environment-edit-chip, .texleaf-frame-end > .texleaf-environment-edit-chip:focus-visible": {
+    opacity: "1",
   },
   ".texleaf-abstract-begin": {
     boxSizing: "border-box",
@@ -1948,12 +3124,12 @@ const editorTheme = EditorView.theme({
     fontWeight: "700",
     textAlign: "center",
   },
-  ".cm-line.texleaf-abstract-line": {
+  ".cm-line.texleaf-abstract-line, .texleaf-abstract-begin-shell + .cm-line:not(.texleaf-abstract-line)": {
+    "--texleaf-line-base-padding-inline-start": "1em",
     boxSizing: "border-box",
     minHeight: "var(--vscode-editor-line-height, 1.5em)",
     margin: "0 16px",
-    paddingLeft: "1em",
-    paddingRight: "1em",
+    paddingInlineEnd: "1em",
     backgroundColor: "color-mix(in srgb, var(--vscode-editorWidget-background) 52%, transparent)",
     borderLeft: "1px solid var(--vscode-editorWidget-border)",
     borderRight: "1px solid var(--vscode-editorWidget-border)",
@@ -2162,6 +3338,9 @@ const editorTheme = EditorView.theme({
   ".texleaf-heading-level-0, .texleaf-heading-level-1": {
     fontSize: "1.9em",
   },
+  ".texleaf-heading-generated": {
+    background: "transparent", border: "none", padding: "0", cursor: "text", fontFamily: "inherit",
+  },
   ".texleaf-heading-level-2": {
     fontSize: "1.55em",
   },
@@ -2186,11 +3365,11 @@ const editorTheme = EditorView.theme({
     boxSizing: "border-box",
     color: "var(--vscode-editor-foreground)",
     backgroundColor: "color-mix(in srgb, var(--vscode-editorWidget-background) 58%, transparent)",
-    borderTop: "3px solid var(--texleaf-theorem-border)",
-    borderLeft: "3px solid var(--texleaf-theorem-border)",
-    borderRight: "3px solid var(--texleaf-theorem-border)",
-    borderTopLeftRadius: "6px",
-    borderTopRightRadius: "6px",
+    borderTop: VISUAL_THEOREM_FRAME_BORDER,
+    borderLeft: VISUAL_THEOREM_FRAME_BORDER,
+    borderRight: VISUAL_THEOREM_FRAME_BORDER,
+    borderTopLeftRadius: VISUAL_THEOREM_FRAME_RADIUS,
+    borderTopRightRadius: VISUAL_THEOREM_FRAME_RADIUS,
     fontFamily: "inherit",
     cursor: "text",
   },
@@ -2211,8 +3390,8 @@ const editorTheme = EditorView.theme({
     gap: "4px",
     margin: "0 0.3em",
     padding: "2px 6px",
-    border: "3px solid var(--texleaf-theorem-border)",
-    borderRadius: "6px",
+    border: VISUAL_THEOREM_FRAME_BORDER,
+    borderRadius: VISUAL_THEOREM_FRAME_RADIUS,
   },
   ".texleaf-theorem-label": {
     flex: "0 0 auto",
@@ -2289,14 +3468,14 @@ const editorTheme = EditorView.theme({
     margin: "0 12px",
   },
   ".cm-line.texleaf-theorem-line": {
+    "--texleaf-line-base-padding-inline-start": "12px",
     boxSizing: "border-box",
     position: "relative",
     minHeight: "var(--vscode-editor-line-height, 1.5em)",
     margin: "0 12px",
-    paddingLeft: "12px",
-    paddingRight: "12px",
-    borderLeft: "3px solid var(--texleaf-theorem-border)",
-    borderRight: "3px solid var(--texleaf-theorem-border)",
+    paddingInlineEnd: "12px",
+    borderLeft: VISUAL_THEOREM_FRAME_BORDER,
+    borderRight: VISUAL_THEOREM_FRAME_BORDER,
     backgroundColor: "color-mix(in srgb, var(--vscode-editorWidget-background) 58%, transparent)",
     lineHeight: "inherit",
     overflowWrap: "anywhere",
@@ -2305,13 +3484,13 @@ const editorTheme = EditorView.theme({
     fontStyle: "italic",
   },
   ".texleaf-theorem-formula-shell:not(.texleaf-theorem-proof) + .cm-line:not(.texleaf-theorem-line), .texleaf-list-boundary.texleaf-theorem-list-boundary:not(.texleaf-theorem-proof) + .cm-line:not(.texleaf-theorem-line)": {
+    "--texleaf-line-base-padding-inline-start": "12px",
     boxSizing: "border-box",
     minHeight: "var(--vscode-editor-line-height, 1.5em)",
     margin: "0 12px",
-    paddingLeft: "12px",
-    paddingRight: "12px",
-    borderLeft: "3px solid var(--texleaf-theorem-border)",
-    borderRight: "3px solid var(--texleaf-theorem-border)",
+    paddingInlineEnd: "12px",
+    borderLeft: VISUAL_THEOREM_FRAME_BORDER,
+    borderRight: VISUAL_THEOREM_FRAME_BORDER,
     backgroundColor: "color-mix(in srgb, var(--vscode-editorWidget-background) 58%, transparent)",
     lineHeight: "inherit",
     overflowWrap: "anywhere",
@@ -2326,14 +3505,14 @@ const editorTheme = EditorView.theme({
     fontStyle: "normal",
   },
   ".cm-line.texleaf-theorem-source-begin": {
-    borderTop: "3px solid var(--texleaf-theorem-border)",
-    borderTopLeftRadius: "6px",
-    borderTopRightRadius: "6px",
+    borderTop: VISUAL_THEOREM_FRAME_BORDER,
+    borderTopLeftRadius: VISUAL_THEOREM_FRAME_RADIUS,
+    borderTopRightRadius: VISUAL_THEOREM_FRAME_RADIUS,
   },
   ".cm-line.texleaf-theorem-source-end": {
-    borderBottom: "3px solid var(--texleaf-theorem-border)",
-    borderBottomLeftRadius: "6px",
-    borderBottomRightRadius: "6px",
+    borderBottom: VISUAL_THEOREM_FRAME_BORDER,
+    borderBottomLeftRadius: VISUAL_THEOREM_FRAME_RADIUS,
+    borderBottomRightRadius: VISUAL_THEOREM_FRAME_RADIUS,
   },
   ".cm-line.texleaf-theorem-source-widget-end": {
     minHeight: "0",
@@ -2346,18 +3525,31 @@ const editorTheme = EditorView.theme({
   ".texleaf-theorem-end": {
     boxSizing: "border-box",
     display: "flex",
+    alignItems: "center",
     justifyContent: "flex-end",
+    gap: "0.45em",
     width: "calc(100% - 24px)",
     minHeight: "0.55em",
     margin: "0 12px",
     padding: "0 0.65em 0.4em",
-    borderLeft: "3px solid var(--texleaf-theorem-border)",
-    borderRight: "3px solid var(--texleaf-theorem-border)",
-    borderBottom: "3px solid var(--texleaf-theorem-border)",
+    borderLeft: VISUAL_THEOREM_FRAME_BORDER,
+    borderRight: VISUAL_THEOREM_FRAME_BORDER,
+    borderBottom: VISUAL_THEOREM_FRAME_BORDER,
     backgroundColor: "color-mix(in srgb, var(--vscode-editorWidget-background) 58%, transparent)",
-    borderBottomLeftRadius: "6px",
-    borderBottomRightRadius: "6px",
+    borderBottomLeftRadius: VISUAL_THEOREM_FRAME_RADIUS,
+    borderBottomRightRadius: VISUAL_THEOREM_FRAME_RADIUS,
     cursor: "text",
+  },
+  ".texleaf-theorem-end-inline": {
+    display: "inline-flex",
+    width: "auto",
+    minHeight: "0",
+    margin: "0 0.3em",
+    padding: "2px 6px",
+    border: VISUAL_THEOREM_FRAME_BORDER,
+    borderRadius: VISUAL_THEOREM_FRAME_RADIUS,
+    lineHeight: "inherit",
+    verticalAlign: "baseline",
   },
   ".texleaf-proof-qed": {
     fontSize: "0.9em",
@@ -2390,12 +3582,9 @@ const editorTheme = EditorView.theme({
     cursor: "text",
   },
   ".texleaf-citation-chip": {
-    display: "inline-flex",
-    alignItems: "center",
-    maxWidth: "32em",
+    display: "inline",
     margin: "0 2px",
     padding: "0 4px",
-    overflow: "hidden",
     color: "var(--vscode-textLink-foreground)",
     backgroundColor: "var(--vscode-textBlockQuote-background)",
     border: "1px solid var(--vscode-textBlockQuote-border)",
@@ -2403,9 +3592,20 @@ const editorTheme = EditorView.theme({
     fontFamily: "inherit",
     fontSize: "0.9em",
     lineHeight: "1.35",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
+    whiteSpace: "normal",
+    overflowWrap: "anywhere",
+    boxDecorationBreak: "clone",
     cursor: "text",
+  },
+  ".texleaf-citation-chip-target": {
+    display: "inline",
+  },
+  ".texleaf-citation-note": {
+    color: "var(--vscode-editor-foreground)",
+    fontFamily: "inherit",
+    fontSize: "inherit",
+    fontStyle: "normal",
+    fontWeight: "400",
   },
   ".texleaf-bibliography-card": {
     boxSizing: "border-box",
@@ -2417,6 +3617,25 @@ const editorTheme = EditorView.theme({
     backgroundColor: "color-mix(in srgb, var(--vscode-editorWidget-background) 94%, transparent)",
     border: "1px solid var(--vscode-editorWidget-border)",
     borderRadius: "7px",
+  },
+  ".texleaf-table-of-contents-card": {
+    boxSizing: "border-box",
+    width: "min(calc(100% - 24px), calc(100vw - 88px))",
+    maxWidth: "calc(100vw - 88px)",
+    minWidth: "0",
+    margin: "0 12px",
+    padding: "10px 12px 12px",
+    color: "var(--vscode-editor-foreground)",
+    backgroundColor: "color-mix(in srgb, var(--vscode-editorWidget-background) 94%, transparent)",
+    border: "1px solid var(--vscode-editorWidget-border)",
+    borderRadius: "7px",
+    fontFamily: "inherit",
+    cursor: "text",
+  },
+  ".texleaf-table-of-contents-card:focus-visible": {
+    borderColor: "var(--vscode-focusBorder)",
+    outline: "1px solid var(--vscode-focusBorder)",
+    outlineOffset: "-1px",
   },
   ".texleaf-table-card, .texleaf-image-card, .texleaf-tikzpicture-card": {
     boxSizing: "border-box",
@@ -2497,11 +3716,27 @@ const editorTheme = EditorView.theme({
     minHeight: "1.1em",
     padding: "1px 10px",
   },
+  ".texleaf-list-boundary.texleaf-frame-list-boundary": {
+    width: "auto",
+    maxWidth: "calc(100% - 32px)",
+    minWidth: "0",
+    margin: "0 16px",
+    padding: "2px 18px",
+    backgroundColor: VISUAL_FRAME_SURFACE,
+    borderLeft: VISUAL_FRAME_RAIL,
+    borderRight: VISUAL_FRAME_RAIL,
+  },
+  ".texleaf-list-boundary.texleaf-frame-list-boundary .texleaf-environment-edit-chip": {
+    opacity: "0.48",
+  },
+  ".texleaf-list-boundary.texleaf-frame-list-boundary:hover .texleaf-environment-edit-chip, .texleaf-list-boundary.texleaf-frame-list-boundary .texleaf-environment-edit-chip:focus-visible": {
+    opacity: "1",
+  },
   ".texleaf-list-boundary.texleaf-theorem-list-boundary": {
     width: "calc(100% - 24px)",
     margin: "0 12px",
-    borderLeft: "3px solid var(--texleaf-theorem-border)",
-    borderRight: "3px solid var(--texleaf-theorem-border)",
+    borderLeft: VISUAL_THEOREM_FRAME_BORDER,
+    borderRight: VISUAL_THEOREM_FRAME_BORDER,
     backgroundColor: "color-mix(in srgb, var(--vscode-editorWidget-background) 58%, transparent)",
   },
   ".texleaf-list-boundary.texleaf-theorem-list-boundary.texleaf-theorem-proof": {
@@ -2509,6 +3744,16 @@ const editorTheme = EditorView.theme({
     margin: "0",
     border: "0",
     backgroundColor: "transparent",
+  },
+  ".texleaf-list-boundary.texleaf-frame-list-boundary.texleaf-theorem-list-boundary": {
+    width: "auto",
+    maxWidth: "calc(100% - 32px)",
+    minWidth: "0",
+    margin: "0 16px",
+    padding: "2px 18px",
+    backgroundColor: VISUAL_FRAME_THEOREM_SURFACE,
+    borderLeft: VISUAL_FRAME_RAIL,
+    borderRight: VISUAL_FRAME_RAIL,
   },
   ".texleaf-visual-structure-editor": {
     position: "relative",
@@ -3221,6 +4466,131 @@ const editorTheme = EditorView.theme({
     borderRadius: "5px",
     overflowWrap: "anywhere",
   },
+  ".texleaf-table-of-contents-header": {
+    display: "flex",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+    gap: "8px",
+    minWidth: "0",
+    marginBottom: "8px",
+    flexWrap: "wrap",
+  },
+  ".texleaf-table-of-contents-heading": {
+    display: "flex",
+    alignItems: "baseline",
+    gap: "8px",
+    minWidth: "0",
+  },
+  ".texleaf-table-of-contents-title": {
+    margin: "0",
+    fontFamily: "inherit",
+    fontSize: "1.2em",
+    fontWeight: "700",
+    lineHeight: "1.25",
+  },
+  ".texleaf-table-of-contents-count": {
+    display: "inline-flex",
+    alignItems: "center",
+    padding: "1px 5px",
+    color: "var(--vscode-descriptionForeground)",
+    backgroundColor: "color-mix(in srgb, var(--vscode-badge-background) 24%, transparent)",
+    border: "1px solid color-mix(in srgb, var(--vscode-editorWidget-border) 82%, transparent)",
+    borderRadius: "4px",
+    fontFamily: "var(--vscode-editor-font-family)",
+    fontSize: "0.78em",
+    lineHeight: "1.35",
+    whiteSpace: "nowrap",
+  },
+  ".texleaf-table-of-contents-tree": {
+    display: "grid",
+    gap: "2px",
+    maxHeight: "min(55vh, 36em)",
+    margin: "0",
+    padding: "0 2px",
+    listStyle: "none",
+    overflowY: "auto",
+    overscrollBehavior: "contain",
+  },
+  ".texleaf-table-of-contents-item": {
+    position: "relative",
+    minWidth: "0",
+    margin: "0",
+    padding: "0",
+  },
+  ".texleaf-table-of-contents-entry": {
+    boxSizing: "border-box",
+    display: "grid",
+    gridTemplateColumns: "minmax(2.6em, max-content) minmax(0, 1fr)",
+    alignItems: "baseline",
+    gap: "8px",
+    width: "100%",
+    minWidth: "0",
+    paddingBlock: "5px",
+    paddingInlineStart: "calc(8px + var(--texleaf-toc-indent, 0px))",
+    paddingInlineEnd: "8px",
+    color: "var(--vscode-editor-foreground)",
+    backgroundColor: "transparent",
+    border: "1px solid transparent",
+    borderRadius: "5px",
+    fontFamily: "inherit",
+    fontSize: "inherit",
+    lineHeight: "1.35",
+    textAlign: "start",
+    cursor: "pointer",
+  },
+  ".texleaf-table-of-contents-entry::before": {
+    content: '""',
+    position: "absolute",
+    top: "0.5em",
+    bottom: "0.5em",
+    insetInlineStart: "calc(5px + var(--texleaf-toc-indent, 0px))",
+    borderInlineStart: "1px solid color-mix(in srgb, var(--vscode-editorWidget-border) 82%, transparent)",
+    pointerEvents: "none",
+  },
+  ".texleaf-table-of-contents-entry:hover": {
+    color: "var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground))",
+    backgroundColor: "var(--vscode-list-hoverBackground)",
+    borderColor: "color-mix(in srgb, var(--vscode-focusBorder) 58%, transparent)",
+  },
+  ".texleaf-table-of-contents-entry:focus-visible": {
+    color: "var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground))",
+    backgroundColor: "var(--vscode-list-focusBackground, var(--vscode-list-hoverBackground))",
+    borderColor: "var(--vscode-focusBorder)",
+    outline: "none",
+  },
+  ".texleaf-table-of-contents-number": {
+    color: "var(--vscode-descriptionForeground)",
+    fontFamily: "var(--vscode-editor-font-family)",
+    fontSize: "0.86em",
+    fontVariantNumeric: "tabular-nums",
+    whiteSpace: "nowrap",
+  },
+  ".texleaf-table-of-contents-entry:hover .texleaf-table-of-contents-number, .texleaf-table-of-contents-entry:focus-visible .texleaf-table-of-contents-number": {
+    color: "inherit",
+  },
+  ".texleaf-table-of-contents-entry-title": {
+    minWidth: "0",
+    overflowWrap: "anywhere",
+  },
+  ".texleaf-table-of-contents-empty, .texleaf-table-of-contents-incomplete, .texleaf-table-of-contents-numbering-note": {
+    padding: "7px 8px",
+    color: "var(--vscode-descriptionForeground)",
+    backgroundColor: "color-mix(in srgb, var(--vscode-editor-background) 54%, transparent)",
+    border: "1px dashed var(--vscode-editorWidget-border)",
+    borderRadius: "5px",
+    fontSize: "0.86em",
+    lineHeight: "1.4",
+  },
+  ".texleaf-table-of-contents-incomplete": {
+    marginTop: "7px",
+    color: "var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground))",
+    borderColor: "var(--vscode-editorWarning-border, var(--vscode-editorWidget-border))",
+  },
+  ".texleaf-table-of-contents-numbering-note": {
+    marginTop: "7px",
+    color: "var(--vscode-editorInfo-foreground, var(--vscode-editor-foreground))",
+    borderColor: "var(--vscode-editorInfo-border, var(--vscode-editorWidget-border))",
+  },
   ".texleaf-bibliography-header": {
     display: "block",
     marginBottom: "7px",
@@ -3438,8 +4808,10 @@ const editorTheme = EditorView.theme({
     outline: "none",
   },
   ".texleaf-formula-widget-error": {
-    borderColor: "color-mix(in srgb, var(--vscode-editorError-foreground) 70%, transparent)",
-    backgroundColor: "color-mix(in srgb, var(--vscode-editorError-foreground) 6%, transparent)",
+    borderColor:
+      "color-mix(in srgb, var(--vscode-editorError-foreground) 70%, transparent)",
+    backgroundColor:
+      "color-mix(in srgb, var(--vscode-editorError-foreground) 6%, transparent)",
   },
   ".texleaf-formula-widget-inline": {
     display: "inline-flex",
@@ -3672,8 +5044,10 @@ const editorTheme = EditorView.theme({
     color: "var(--vscode-editorSuggestWidget-foreground, var(--vscode-descriptionForeground))",
     opacity: "0.78",
   },
-  ".cm-tooltip.cm-completionInfo.texleaf-completion-info-right": {
-    minWidth: "min(22em, 36vw)",
+  ".cm-tooltip.cm-completionInfo.texleaf-completion-info-adaptive": {
+    boxSizing: "border-box",
+    width: "min(26em, calc(100vw - 16px))",
+    minWidth: "0",
     maxHeight: "min(52vh, 30em)",
     padding: "12px 14px",
     overflow: "auto",
@@ -3709,7 +5083,9 @@ const editorTheme = EditorView.theme({
     backgroundColor: "var(--vscode-editorWidget-border)",
   },
   ".texleaf-completion-reference-preview": {
-    minWidth: "min(20em, 36vw)",
+    boxSizing: "border-box",
+    width: "100%",
+    minWidth: "0",
   },
   ".texleaf-completion-reference-preview .texleaf-reference-hover-empty": {
     color: "var(--vscode-descriptionForeground)",
@@ -3785,7 +5161,7 @@ const editorTheme = EditorView.theme({
   },
   ".texleaf-completion-reference-preview .texleaf-reference-hover-theorem": {
     overflow: "hidden",
-    border: "3px solid var(--texleaf-theorem-border)",
+    border: VISUAL_THEOREM_FRAME_BORDER,
     borderRadius: "7px",
     backgroundColor: "color-mix(in srgb, var(--vscode-editorWidget-background) 76%, transparent)",
   },
@@ -3836,6 +5212,177 @@ const editorTheme = EditorView.theme({
     fontSize: "0.86em",
     fontStyle: "normal",
   },
+  ".texleaf-completion-reference-preview .texleaf-reference-hover-structure": {
+    overflow: "hidden",
+    border: "1px solid var(--vscode-editorWidget-border)",
+    borderRadius: "7px",
+    backgroundColor: "color-mix(in srgb, var(--vscode-editorWidget-background) 76%, transparent)",
+  },
+  ".texleaf-completion-reference-preview .texleaf-reference-hover-structure-header": {
+    display: "flex",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+    gap: "10px",
+    padding: "8px 10px 7px",
+    borderBottom: "1px solid var(--vscode-editorWidget-border)",
+  },
+  ".texleaf-completion-reference-preview .texleaf-reference-hover-structure-caption": {
+    padding: "7px 10px",
+    color: "var(--vscode-descriptionForeground)",
+  },
+  ".texleaf-completion-reference-preview .texleaf-reference-hover-structure-scroll": {
+    boxSizing: "border-box",
+    maxWidth: "100%",
+    maxHeight: "min(42vh, 300px)",
+    padding: "8px",
+    overflow: "auto",
+  },
+  ".texleaf-completion-reference-preview .texleaf-reference-hover-structure-note": {
+    padding: "6px 10px 8px",
+    color: "var(--vscode-descriptionForeground)",
+    fontSize: "0.84em",
+  },
+  ".texleaf-completion-reference-preview .texleaf-reference-hover-image-viewport": {
+    display: "grid",
+    maxWidth: "100%",
+    maxHeight: "min(42vh, 320px)",
+    padding: "8px",
+    overflow: "auto",
+    placeItems: "center",
+  },
+  ".texleaf-completion-reference-preview .texleaf-reference-hover-image-preview": {
+    display: "block",
+    maxWidth: "100%",
+    maxHeight: "min(40vh, 300px)",
+    objectFit: "contain",
+    borderRadius: "4px",
+  },
+  ".texleaf-completion-reference-preview .texleaf-reference-hover-diagram-canvas": {
+    maxHeight: "min(42vh, 320px)",
+    overflow: "auto",
+  },
+  // A Beamer frame is one slide canvas. Block replacements are siblings of
+  // CodeMirror lines, so they explicitly carry the same surface segment
+  // instead of becoming independent cards between broken border fragments.
+  ".texleaf-frame-content-shell": {
+    boxSizing: "border-box",
+    width: "auto",
+    maxWidth: "calc(100% - 32px)",
+    minWidth: "0",
+    margin: "0 16px",
+    padding: "0.42em 18px",
+    backgroundColor: VISUAL_FRAME_SURFACE,
+    borderLeft: VISUAL_FRAME_RAIL,
+    borderRight: VISUAL_FRAME_RAIL,
+  },
+  ".texleaf-frame-content-shell.texleaf-table-of-contents-shell": {
+    padding: "0.72em 18px 0.9em",
+  },
+  ".texleaf-frame-content-shell.texleaf-table-shell, .texleaf-frame-content-shell.texleaf-tikzcd-shell, .texleaf-frame-content-shell.texleaf-tikzpicture-shell, .texleaf-frame-content-shell.texleaf-image-shell, .texleaf-frame-content-shell.texleaf-bibliography-shell": {
+    padding: "0.72em 18px",
+  },
+  ".texleaf-frame-content-shell > .texleaf-table-of-contents-card": {
+    width: "100%",
+    maxWidth: "100%",
+    margin: "0",
+    padding: "0",
+    backgroundColor: "transparent",
+    border: "0",
+    borderRadius: "0",
+  },
+  ".texleaf-frame-content-shell > .texleaf-table-of-contents-card:focus-visible": {
+    outlineOffset: "3px",
+  },
+  ".texleaf-frame-content-shell > .texleaf-table-card, .texleaf-frame-content-shell > .texleaf-tikzcd-card, .texleaf-frame-content-shell > .texleaf-tikzpicture-card, .texleaf-frame-content-shell > .texleaf-image-card, .texleaf-frame-content-shell > .texleaf-bibliography-card": {
+    width: "100%",
+    maxWidth: "100%",
+    margin: "0",
+    padding: "0",
+    backgroundColor: "transparent",
+    border: "0",
+    borderRadius: "0",
+  },
+  ".texleaf-frame-content-shell.texleaf-formula-shell": {
+    padding: "0.3em 18px",
+  },
+  ".texleaf-frame-content-shell.texleaf-title-shell": {
+    padding: "0.72em 18px 0.9em",
+  },
+  ".texleaf-frame-content-shell > .texleaf-title-card": {
+    width: "100%",
+    margin: "0",
+    padding: "16px 18px",
+    backgroundColor: "transparent",
+    border: "0",
+  },
+  ".texleaf-frame-content-shell.texleaf-theorem-begin-shell": {
+    padding: "0.62em 0 0",
+  },
+  ".texleaf-frame-content-shell.texleaf-theorem-end-shell": {
+    padding: "0 0 0.62em",
+  },
+  ".texleaf-frame-content-shell > .texleaf-theorem-begin-block, .texleaf-frame-content-shell > .texleaf-theorem-end-block": {
+    width: "100%",
+    margin: "0",
+    border: "0",
+    borderRadius: "0",
+    backgroundColor: VISUAL_FRAME_THEOREM_SURFACE,
+    boxShadow: "none",
+  },
+  ".texleaf-frame-content-shell > .texleaf-theorem-begin-block": {
+    padding: "0.55em 18px 0.38em",
+    borderTop: "1px solid color-mix(in srgb, var(--vscode-textLink-foreground) 38%, transparent)",
+  },
+  ".texleaf-frame-content-shell > .texleaf-theorem-end-block": {
+    minHeight: "0.5em",
+    padding: "0 18px 0.38em",
+    borderBottom: "1px solid color-mix(in srgb, var(--vscode-textLink-foreground) 30%, transparent)",
+  },
+  ".cm-line.texleaf-frame-line.texleaf-theorem-line": {
+    "--texleaf-line-base-padding-inline-start": "18px",
+    margin: "0 16px",
+    paddingInlineEnd: "18px",
+    backgroundColor: VISUAL_FRAME_THEOREM_SURFACE,
+    borderLeft: VISUAL_FRAME_RAIL,
+    borderRight: VISUAL_FRAME_RAIL,
+    boxShadow: "none",
+  },
+  ".texleaf-frame-content-shell.texleaf-theorem-formula-shell": {
+    width: "auto",
+    maxWidth: "calc(100% - 32px)",
+    minWidth: "0",
+    margin: "0 16px",
+    padding: "0.3em 18px",
+    backgroundColor: VISUAL_FRAME_THEOREM_SURFACE,
+    borderLeft: VISUAL_FRAME_RAIL,
+    borderRight: VISUAL_FRAME_RAIL,
+    boxShadow: "none",
+  },
+  // A block replacement in the middle of one physical source line makes
+  // CodeMirror render the trailing source as a second `.cm-line`. Line
+  // decorations belong to the physical line and are attached only to its
+  // leading DOM fragment, so the trailing fragment cannot inherit
+  // `texleaf-frame-line`. Continue the slide canvas explicitly across that
+  // generated sibling. The repeated shell classes intentionally match the
+  // specificity of the legacy theorem-fragment rule above.
+  ".texleaf-frame-content-shell.texleaf-measured-block-shell + .cm-line:not(.texleaf-frame-line), .texleaf-list-boundary.texleaf-frame-list-boundary + .cm-line:not(.texleaf-frame-line)": {
+    "--texleaf-line-base-padding-inline-start": "18px",
+    boxSizing: "border-box",
+    width: "auto",
+    maxWidth: "calc(100% - 32px)",
+    minWidth: "0",
+    minHeight: "var(--vscode-editor-line-height, 1.5em)",
+    margin: "0 16px",
+    paddingInlineEnd: "18px",
+    backgroundColor: VISUAL_FRAME_SURFACE,
+    borderLeft: VISUAL_FRAME_RAIL,
+    borderRight: VISUAL_FRAME_RAIL,
+    lineHeight: "1.55",
+    overflowWrap: "anywhere",
+  },
+  ".texleaf-frame-content-shell.texleaf-theorem-formula-shell + .cm-line:not(.texleaf-frame-line), .texleaf-list-boundary.texleaf-frame-list-boundary.texleaf-theorem-list-boundary + .cm-line:not(.texleaf-frame-line)": {
+    backgroundColor: VISUAL_FRAME_THEOREM_SURFACE,
+  },
   ".texleaf-math-preview-tooltip svg": {
     display: "block",
     width: "100%",
@@ -3880,9 +5427,10 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   handleHostMessage(message);
 });
+window.addEventListener("keydown", handleUnifiedNavigationKeydown, { capture: true });
+window.addEventListener("keydown", handleVisualSearchNativeHistoryKeydown, { capture: true });
 window.addEventListener("keydown", handleVirtualInputHistoryKeydown, { capture: true });
 window.addEventListener("keydown", handleVisualHistoryKeydown, { capture: true });
-window.addEventListener("pagehide", cancelViewportRequestSchedule, { once: true });
 window.addEventListener("resize", () => {
   closeToolbarPopupMenu(false);
   closeEditingContextMenu(false);
@@ -3890,7 +5438,7 @@ window.addEventListener("resize", () => {
     updateIssueCard(editor.state);
   }
   if (activeReferenceHover !== undefined) {
-    positionReferenceHoverCard();
+    scheduleReferenceHoverPosition();
   }
   scheduleEditorScrollbarUpdate();
 });
@@ -3898,7 +5446,7 @@ editorHost.addEventListener("scroll", () => {
   closeToolbarPopupMenu(false);
   closeEditingContextMenu(false);
   if (activeReferenceHover !== undefined) {
-    positionReferenceHoverCard();
+    scheduleReferenceHoverPosition();
   }
 }, true);
 editorHost.addEventListener("contextmenu", openEditingContextMenu);
@@ -3962,8 +5510,14 @@ wireButton(topViewPdfButton, "viewPdf");
 wireButton(synctexButton, "synctex");
 wireButton(saveDocumentButton, "save");
 wireButton(topSaveDocumentButton, "save");
-wireButton(openNativeSourceButton, "openSource");
-wireButton(topOpenNativeSourceButton, "openSource");
+topFormatDocumentButton.addEventListener("click", () => {
+  closeToolbarPopupMenu(false);
+  closeEditingContextMenu(false);
+  closeTextColorPopover(false);
+  if (editor !== undefined) {
+    runVisualFormatDocument(editor);
+  }
+});
 wireButton(topPickSnippetButton, "pickSnippet");
 wireButton(topPickCitationButton, "pickCitation");
 wireButton(topOpenSnippetManagerButton, "openSnippetManager");
@@ -4032,12 +5586,6 @@ for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>(
 editCutButton.addEventListener("click", () => runClipboardAction("cut"));
 editCopyButton.addEventListener("click", () => runClipboardAction("copy"));
 editPasteButton.addEventListener("click", () => runClipboardAction("paste"));
-editFormatDocumentButton.addEventListener("click", () => {
-  closeEditingContextMenu(false);
-  if (editor !== undefined) {
-    runVisualFormatDocument(editor);
-  }
-});
 textColorButton.addEventListener("pointerdown", () => {
   captureTextColorSelection();
 });
@@ -4100,9 +5648,23 @@ aiSuggestionElement.addEventListener("mouseleave", () => {
     updateIssueCard(editor.state);
   }
 });
+wireButton(openNativeSourceButton, "openSource");
+wireButton(topOpenNativeSourceButton, "openSource");
 openSourceButton.addEventListener("click", toggleEditorMode);
 topOpenSourceButton.addEventListener("click", toggleEditorMode);
 updateEditorModeButton();
+
+window.addEventListener("pagehide", () => {
+  cancelViewportRequestSchedule();
+  if (editor !== undefined) {
+    persistEditorState(editor);
+  }
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && editor !== undefined) {
+    persistEditorState(editor);
+  }
+});
 
 post({ protocol: VISUAL_EDITOR_PROTOCOL, type: "ready" });
 
@@ -4134,41 +5696,55 @@ function handleHostMessage(message: VisualEditorHostMessage): void {
     case "syntaxTokenPatch":
       applySyntaxTokenPatch(message);
       return;
-    case "renderResult":
+    case "bracketTokenPatch":
+      applyBracketTokenPatch(message);
+      return;
+    case "renderBatch":
       if (editor === undefined || message.version !== documentVersion) {
         return;
       }
-      editor.dispatch({
-        effects: setFormulaRender.of({
-          formulaId: message.formulaId,
-          rendered: {
-            svg: message.svg,
-            widthEm: message.widthEm,
-            heightEm: message.heightEm,
-            source: message.formulaSource,
-          },
-        }),
-        annotations: hostSyncAnnotations,
-      });
-      scheduleCursorPreviewRequest(editor);
-      return;
-    case "renderError":
-      if (editor !== undefined && message.version === documentVersion) {
-        const rendered = currentFormulaRenderError(
-          editor.state,
-          message.formulaId,
-          message.message,
-        );
-        if (rendered !== undefined) {
+      {
+        const updates: FormulaRenderUpdate[] = message.results
+          .filter((result) => isSafeSvg(result.svg))
+          .map((result) => ({
+            formulaId: result.formulaId,
+            rendered: {
+              svg: result.svg,
+              widthEm: result.widthEm,
+              heightEm: result.heightEm,
+              source: result.formulaSource,
+            },
+          }));
+        for (const error of message.errors) {
+          if (editor === undefined) {
+            break;
+          }
+          const rendered = currentFormulaRenderError(
+            editor.state,
+            error.formulaId,
+            error.message,
+          );
+          if (rendered !== undefined) {
+            updates.push({ formulaId: error.formulaId, rendered });
+          }
+        }
+        if (updates.length > 0) {
           editor.dispatch({
-            effects: setFormulaRender.of({
-              formulaId: message.formulaId,
-              rendered,
-            }),
+            effects: setFormulaRenders.of(updates),
             annotations: hostSyncAnnotations,
           });
         }
-        setStatus("warning", `有一条公式暂时无法预览：${message.message}`, 4_000);
+        if (message.errors.length > 0) {
+          const first = message.errors[0];
+          const suffix = message.errors.length > 1
+            ? `（本批共 ${message.errors.length} 条）`
+            : "";
+          setStatus(
+            "warning",
+            `有一条公式暂时无法预览：${first?.message ?? "未知错误"}${suffix}`,
+            4_000,
+          );
+        }
       }
       return;
     case "cursorRenderResult":
@@ -4207,59 +5783,6 @@ function handleHostMessage(message: VisualEditorHostMessage): void {
         lastCursorPreviewRequestKey = undefined;
       }
       return;
-    case "renderBatch":
-      if (editor === undefined || message.version !== documentVersion) {
-        return;
-      }
-      {
-        const updates: {
-          readonly formulaId: string;
-          readonly rendered: RenderedFormula;
-        }[] = [];
-        for (const result of message.results) {
-          if (!isSafeSvg(result.svg)) {
-            continue;
-          }
-          updates.push({
-            formulaId: result.formulaId,
-            rendered: {
-              svg: result.svg,
-              widthEm: result.widthEm,
-              heightEm: result.heightEm,
-              source: result.formulaSource,
-            },
-          });
-        }
-        for (const error of message.errors) {
-          const rendered = currentFormulaRenderError(
-            editor.state,
-            error.formulaId,
-            error.message,
-          );
-          if (rendered !== undefined) {
-            updates.push({ formulaId: error.formulaId, rendered });
-          }
-        }
-        if (updates.length > 0) {
-          editor.dispatch({
-            effects: setFormulaRenders.of(updates),
-            annotations: hostSyncAnnotations,
-          });
-          scheduleCursorPreviewRequest(editor);
-        }
-        if (message.errors.length > 0) {
-          const first = message.errors[0]!;
-          const suffix = message.errors.length === 1
-            ? ""
-            : `（另有 ${message.errors.length - 1} 条）`;
-          setStatus(
-            "warning",
-            `有一条公式暂时无法预览：${first.message}${suffix}`,
-            4_000,
-          );
-        }
-      }
-      return;
     case "formulaCommitRenderResult":
       if (
         editor === undefined ||
@@ -4272,7 +5795,7 @@ function handleHostMessage(message: VisualEditorHostMessage): void {
       }
       latestFormulaCommitPreviewRequests.delete(message.formulaId);
       editor.dispatch({
-        effects: setFormulaRender.of({
+        effects: setFormulaRenders.of([{
           formulaId: message.formulaId,
           rendered: {
             svg: message.svg,
@@ -4280,14 +5803,14 @@ function handleHostMessage(message: VisualEditorHostMessage): void {
             heightEm: message.heightEm,
             source: message.formulaSource,
           },
-        }),
+        }]),
         annotations: hostSyncAnnotations,
       });
       return;
     case "formulaCommitRenderError":
       if (
         latestFormulaCommitPreviewRequests.get(message.formulaId) ===
-        message.requestId
+          message.requestId
       ) {
         latestFormulaCommitPreviewRequests.delete(message.formulaId);
         if (
@@ -4300,12 +5823,12 @@ function handleHostMessage(message: VisualEditorHostMessage): void {
             message.formulaId,
             message.message,
           );
-          if (rendered !== undefined) {
-            editor.dispatch({
-              effects: setFormulaRender.of({
-                formulaId: message.formulaId,
-                rendered,
-              }),
+            if (rendered !== undefined) {
+              editor.dispatch({
+                effects: setFormulaRenders.of([{
+                  formulaId: message.formulaId,
+                  rendered,
+                }]),
               annotations: hostSyncAnnotations,
             });
           }
@@ -4323,21 +5846,21 @@ function handleHostMessage(message: VisualEditorHostMessage): void {
       setToolbarBusy(message.busy === true);
       return;
     case "focus":
-      if (
-        message.requestId === undefined ||
-        message.requestId !== lastAppliedFocusRequestId
-      ) {
+      if (editor === undefined) {
+        // `ready` is posted before the provider finishes the potentially
+        // expensive initial snapshot. An external file:line redirect can race
+        // that snapshot; retain only its newest exact target for consumption
+        // immediately after CodeMirror is constructed.
+        pendingHostFocus = {
+          ...(message.requestId === undefined ? {} : { requestId: message.requestId }),
+          selection: message.selection,
+          ...(message.options === undefined ? {} : { options: message.options }),
+        };
+      } else {
         revealSelection(message.selection, message.options);
-        if (message.requestId !== undefined) {
-          lastAppliedFocusRequestId = message.requestId;
-        }
       }
-      if (message.requestId !== undefined) {
-        post({
-          protocol: VISUAL_EDITOR_PROTOCOL,
-          type: "focusApplied",
-          requestId: message.requestId,
-        });
+      if (editor !== undefined && message.requestId !== undefined) {
+        post({ protocol: VISUAL_EDITOR_PROTOCOL, type: "focusApplied", requestId: message.requestId });
       }
       return;
     case "applySnippet":
@@ -4445,8 +5968,15 @@ function resolveReferencePreviewResult(
   ) {
     return;
   }
-  const elements = createReferencePreviewElements(message);
+  const elements = createReferencePreviewElements(
+    message,
+    scheduleReferenceHoverPosition,
+  );
   referenceHoverContent.replaceChildren(...elements);
+  referenceHoverElement.classList.toggle(
+    "texleaf-reference-hover-wide",
+    message.structure !== undefined,
+  );
   showReferenceHoverCard();
 }
 
@@ -4454,9 +5984,13 @@ function createReferencePreviewElements(message: {
   readonly previews: readonly VisualEditorReferenceFormulaPreview[];
   readonly theorem?: VisualEditorReferenceTheoremPreview;
   readonly heading?: VisualEditorReferenceHeadingPreview;
+  readonly structure?: VisualEditorReferenceStructurePreview;
   readonly unavailableKeys: readonly string[];
-}): HTMLElement[] {
+}, onLayout: () => void): HTMLElement[] {
   const elements: HTMLElement[] = [];
+  if (message.structure !== undefined) {
+    elements.push(createStructureReferenceHover(message.structure, onLayout));
+  }
   if (message.heading !== undefined) {
     elements.push(createHeadingReferenceHover(message.heading));
   }
@@ -4501,10 +6035,250 @@ function createReferencePreviewElements(message: {
   if (elements.length === 0) {
     const empty = document.createElement("div");
     empty.className = "texleaf-reference-hover-empty";
-    empty.textContent = "这个标签尚未解析到可预览的公式、定理或章节标题。";
+    empty.textContent = "这个标签尚未解析到可预览的公式、定理、章节、表格、图片或交换图。";
     elements.push(empty);
   }
   return elements;
+}
+
+function createStructureReferenceHover(
+  preview: VisualEditorReferenceStructurePreview,
+  onLayout: () => void,
+): HTMLElement {
+  const root = document.createElement("section");
+  root.className = `texleaf-reference-hover-structure texleaf-reference-hover-${preview.kind}`;
+  const header = document.createElement("header");
+  header.className = "texleaf-reference-hover-structure-header";
+  const title = document.createElement("strong");
+  title.textContent = preview.kind === "table"
+    ? "表格"
+    : preview.kind === "image"
+      ? "图片"
+      : preview.record.kind === "tikzcd"
+        ? "交换图"
+        : "TikZ 图";
+  const key = document.createElement("code");
+  key.textContent = preview.key;
+  header.append(title, key);
+  root.append(header);
+
+  if (preview.kind === "table") {
+    appendTableReferenceHover(root, preview);
+  } else if (preview.kind === "image") {
+    appendImageReferenceHover(root, preview, onLayout);
+  } else {
+    appendDiagramReferenceHover(root, preview, onLayout);
+  }
+  return root;
+}
+
+function appendTableReferenceHover(
+  root: HTMLElement,
+  preview: Extract<VisualEditorReferenceStructurePreview, { readonly kind: "table" }>,
+): void {
+  const record = preview.record;
+  if (record.caption !== undefined && record.caption.length > 0) {
+    const caption = document.createElement("div");
+    caption.className = "texleaf-reference-hover-structure-caption";
+    caption.append(createInlineContentElement(
+      record.captionSegments,
+      record.caption,
+      "texleaf-table-inline-content",
+    ));
+    root.append(caption);
+  }
+  const scroll = document.createElement("div");
+  scroll.className = "texleaf-reference-hover-structure-scroll";
+  configureStructureHorizontalScroll(scroll, "引用目标表格预览");
+  const table = document.createElement("table");
+  table.className = "texleaf-table texleaf-reference-hover-table-grid";
+  const [headerRow, ...bodyRows] = record.rows;
+  if (headerRow !== undefined) {
+    const head = document.createElement("thead");
+    head.append(createTableRow(headerRow, record.columnCount, true));
+    table.append(head);
+  }
+  if (bodyRows.length > 0) {
+    const body = document.createElement("tbody");
+    for (const row of bodyRows) {
+      body.append(createTableRow(row, record.columnCount, false));
+    }
+    table.append(body);
+  }
+  scroll.append(table);
+  root.append(scroll);
+  if (preview.previewTruncated) {
+    const note = document.createElement("div");
+    note.className = "texleaf-reference-hover-structure-note";
+    note.textContent = "表格较大，引用预览只显示前 12 行、前 8 列。";
+    root.append(note);
+  }
+}
+
+function appendImageReferenceHover(
+  root: HTMLElement,
+  preview: Extract<VisualEditorReferenceStructurePreview, { readonly kind: "image" }>,
+  onLayout: () => void,
+): void {
+  const record = preview.record;
+  const viewport = document.createElement("div");
+  viewport.className = "texleaf-reference-hover-image-viewport";
+  configureStructureHorizontalScroll(viewport, "引用目标图片预览");
+  if (record.previewUri === undefined) {
+    viewport.append(createImagePlaceholder(record.path));
+  } else {
+    const image = document.createElement("img");
+    image.className = "texleaf-reference-hover-image-preview";
+    image.alt = record.caption ?? record.path;
+    image.loading = "eager";
+    image.draggable = false;
+    image.addEventListener("load", onLayout, { once: true });
+    image.addEventListener("error", () => {
+      image.replaceWith(createImagePlaceholder(record.path));
+      onLayout();
+    }, { once: true });
+    viewport.append(image);
+    loadVisualImagePreview(image, record.previewUri);
+  }
+  root.append(viewport);
+  const details = [record.caption, record.path]
+    .filter((value): value is string => value !== undefined && value.length > 0);
+  if (details.length > 0) {
+    const caption = document.createElement("div");
+    caption.className = "texleaf-reference-hover-structure-caption";
+    caption.textContent = details.join(" · ");
+    root.append(caption);
+  }
+}
+
+function appendDiagramReferenceHover(
+  root: HTMLElement,
+  preview: Extract<VisualEditorReferenceStructurePreview, { readonly kind: "diagram" }>,
+  onLayout: () => void,
+): void {
+  const record = preview.record;
+  if (record.asset !== undefined) {
+    const exact = createLocalLatexStructurePreview(
+      record.asset,
+      record.kind === "tikzcd" ? "引用目标交换图" : "引用目标 TikZ 图",
+    );
+    exact.classList.add("texleaf-reference-hover-diagram-exact");
+    root.append(exact);
+    return;
+  }
+  if (record.kind === "tikzpicture") {
+    root.append(createLocalLatexStructureFallback(
+      "本地 TeX 精确预览尚未生成，或该 TikZ 图使用了未启用的包、外部文件或命令。",
+    ));
+    return;
+  }
+
+  const canvas = document.createElement("div");
+  canvas.className = "texleaf-tikzcd-canvas texleaf-reference-hover-diagram-canvas";
+  configureStructureHorizontalScroll(canvas, "引用目标交换图预览");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("texleaf-tikzcd-arrows");
+  canvas.append(svg);
+  const grid = document.createElement("div");
+  grid.className = "texleaf-tikzcd-grid";
+  grid.style.gridTemplateColumns = `repeat(${Math.max(1, record.columnCount)}, minmax(7.5em, max-content))`;
+  const nodeElements = new Map<string, HTMLElement>();
+  const nodeRecords = new Map(
+    record.nodes.map((node) => [`${node.row}:${node.column}`, node]),
+  );
+  for (let row = 0; row < record.rowCount; row += 1) {
+    for (let column = 0; column < record.columnCount; column += 1) {
+      const coordinate = `${row}:${column}`;
+      const node = document.createElement("div");
+      node.className = "texleaf-tikzcd-node";
+      const nodeRecord = nodeRecords.get(coordinate);
+      if (nodeRecord === undefined) {
+        node.classList.add("texleaf-tikzcd-node-empty");
+      } else {
+        node.append(createMathFragmentElement(nodeRecord.math, nodeRecord.math.fallback));
+      }
+      nodeElements.set(coordinate, node);
+      grid.append(node);
+    }
+  }
+  canvas.append(grid);
+  const arrowLabels = record.arrows.map((arrow) => {
+    if (arrow.label === undefined) {
+      return undefined;
+    }
+    const label = document.createElement("span");
+    label.className = "texleaf-tikzcd-arrow-label";
+    label.append(createMathFragmentElement(arrow.label, arrow.label.fallback));
+    canvas.append(label);
+    return label;
+  });
+  root.append(canvas);
+  const markerId = `texleaf-reference-tikzcd-marker-${++tikzcdMarkerSequence}`;
+  installTransientReferenceDiagramLayout(canvas, grid, () => {
+    drawTikzcdArrows(canvas, svg, nodeElements, arrowLabels, record, markerId);
+  }, onLayout);
+}
+
+function installTransientReferenceDiagramLayout(
+  canvas: HTMLElement,
+  grid: HTMLElement,
+  draw: () => void,
+  onLayout: () => void,
+): void {
+  let frame = 0;
+  let disposed = false;
+  const schedule = (): void => {
+    if (disposed) {
+      return;
+    }
+    onLayout();
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      if (!canvas.isConnected) {
+        transientReferenceDiagramCleanups.get(canvas)?.();
+        return;
+      }
+      draw();
+      onLayout();
+    });
+  };
+  const resizeObserver = typeof ResizeObserver === "function"
+    ? new ResizeObserver(schedule)
+    : undefined;
+  resizeObserver?.observe(canvas);
+  resizeObserver?.observe(grid);
+  const cleanup = (): void => {
+    if (disposed) {
+      return;
+    }
+    disposed = true;
+    cancelAnimationFrame(frame);
+    resizeObserver?.disconnect();
+    transientReferenceDiagramCleanups.delete(canvas);
+    if (transientReferenceDiagramCleanups.size === 0) {
+      transientReferenceDiagramObserver?.disconnect();
+      transientReferenceDiagramObserver = undefined;
+    }
+  };
+  transientReferenceDiagramCleanups.set(canvas, cleanup);
+  if (
+    transientReferenceDiagramObserver === undefined &&
+    typeof MutationObserver === "function"
+  ) {
+    transientReferenceDiagramObserver = new MutationObserver(() => {
+      for (const [element, dispose] of transientReferenceDiagramCleanups) {
+        if (!element.isConnected) {
+          dispose();
+        }
+      }
+    });
+    transientReferenceDiagramObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+  }
+  schedule();
 }
 
 /** Highlight the exact outer aligned row which owns the hovered label. */
@@ -4867,11 +6641,8 @@ function installPersistentEditorScrollbar(view: EditorView): void {
   });
   view.scrollDOM.addEventListener("scroll", () => {
     scheduleEditorScrollbarUpdate(view);
-    // CodeMirror normally reports viewportChanged after a scroll. Keep a
-    // direct, frame-coalesced fallback as well: a fast native/custom-scrollbar
-    // gesture can finish between CodeMirror measurement passes, and the final
-    // visible source range must still supersede any old formula backlog.
     scheduleViewportRequest();
+    scheduleSettledViewportRequest();
   }, { passive: true });
   editorScrollbarResizeObserver = typeof ResizeObserver === "function"
     ? new ResizeObserver(() => scheduleEditorScrollbarUpdate(view))
@@ -4892,8 +6663,6 @@ function installPersistentEditorScrollbar(view: EditorView): void {
     ? new MutationObserver(() => scheduleEditorScrollbarUpdate(view))
     : undefined;
   editorScrollbarMutationObserver?.observe(view.contentDOM, {
-    attributes: true,
-    characterData: true,
     childList: true,
     subtree: true,
   });
@@ -4978,6 +6747,64 @@ function updateEditorScrollbar(view: EditorView): void {
   track.setAttribute("aria-valuenow", String(Math.round(view.scrollDOM.scrollTop)));
 }
 
+const MAX_VISUAL_PROTOCOL_EQUALITY_PAIRS = 250_000;
+
+/**
+ * Compare the acyclic, plain data received from the Extension Host without
+ * serialising it into another pair of full-document strings. This is used only
+ * for a same-revision acknowledgement of text that CodeMirror already owns.
+ * Exceeding the bounded work budget safely falls back to the normal rebuild.
+ */
+function visualProtocolValueEqual(left: unknown, right: unknown): boolean {
+  const pending: Array<readonly [unknown, unknown]> = [[left, right]];
+  let compared = 0;
+  while (pending.length > 0) {
+    if ((compared += 1) > MAX_VISUAL_PROTOCOL_EQUALITY_PAIRS) {
+      return false;
+    }
+    const [currentLeft, currentRight] = pending.pop()!;
+    if (Object.is(currentLeft, currentRight)) {
+      continue;
+    }
+    if (
+      currentLeft === null ||
+      currentRight === null ||
+      typeof currentLeft !== "object" ||
+      typeof currentRight !== "object"
+    ) {
+      return false;
+    }
+    const leftIsArray = Array.isArray(currentLeft);
+    if (leftIsArray !== Array.isArray(currentRight)) {
+      return false;
+    }
+    if (leftIsArray) {
+      const leftItems = currentLeft as readonly unknown[];
+      const rightItems = currentRight as readonly unknown[];
+      if (leftItems.length !== rightItems.length) {
+        return false;
+      }
+      for (let index = 0; index < leftItems.length; index += 1) {
+        pending.push([leftItems[index], rightItems[index]]);
+      }
+      continue;
+    }
+    const leftRecord = currentLeft as Readonly<Record<string, unknown>>;
+    const rightRecord = currentRight as Readonly<Record<string, unknown>>;
+    const leftKeys = Object.keys(leftRecord);
+    if (leftKeys.length !== Object.keys(rightRecord).length) {
+      return false;
+    }
+    for (const key of leftKeys) {
+      if (!Object.prototype.hasOwnProperty.call(rightRecord, key)) {
+        return false;
+      }
+      pending.push([leftRecord[key], rightRecord[key]]);
+    }
+  }
+  return true;
+}
+
 function applyDocumentMessage(message: VisualDocumentHostMessage): void {
   if (
     message.type === "document" &&
@@ -5048,17 +6875,37 @@ function applyDocumentMessage(message: VisualDocumentHostMessage): void {
   clientRevision = message.revision;
   projectContextKey = message.projectContextKey;
   mathPreviewPlacement = message.mathPreviewPlacement;
+  const activeBracketConfigurationChanged =
+    inputFeatures.highlightActiveBracketPair !==
+      message.inputFeatures.highlightActiveBracketPair;
   inputFeatures = message.inputFeatures;
+  if (editor !== undefined) {
+    if (activeBracketConfigurationChanged) {
+      editor.dispatch({
+        effects: bracketMatchingCompartment.reconfigure(
+          editorMode === "source" && inputFeatures.highlightActiveBracketPair
+            ? bracketMatching()
+            : [],
+        ),
+        annotations: hostSyncAnnotations,
+      });
+    }
+    scheduleVisualActiveBracketHighlight(editor);
+  }
   updateTemplateMenu(message.templates);
   updateEditorModeButton();
   updateCapabilities(message.capabilities);
 
   if (editor === undefined) {
-    const savedSelection = persisted.selection;
+    const explicitInitialFocus = message.initialFocus !== undefined;
     const initialSelection = adjustSelectionForCollapsedPreamble(
       clampSelection(
-      savedSelection ?? message.selection ?? { anchor: 0, head: 0 },
-      message.text.length,
+        visualInitialSelectionCandidate(
+          persisted.selection,
+          message.selection,
+          explicitInitialFocus,
+        ),
+        message.text.length,
       ),
       message.structures,
       editorMode === "source" || persisted.preambleExpanded === true,
@@ -5074,8 +6921,6 @@ function applyDocumentMessage(message: VisualDocumentHostMessage): void {
         extensions: createEditorExtensions(message.editable),
       }),
     });
-    // Seed the authoritative IME range before visual decorations can cause a
-    // transient DOM selection around the initial formula under the caret.
     rememberVisualImeStableSelection(editor, true);
     syncEditorModeClass(editor);
     installPersistentEditorScrollbar(editor);
@@ -5083,7 +6928,7 @@ function applyDocumentMessage(message: VisualDocumentHostMessage): void {
       effects: [
         setFormulaDocument.of({
           records: message.formulas,
-          enabled: true,
+          enabled: inputFeatures.mathPreviewEnabled,
           placement: mathPreviewPlacement,
         }),
         setFormulaVisualMode.of(editorMode === "visual"),
@@ -5092,40 +6937,112 @@ function applyDocumentMessage(message: VisualDocumentHostMessage): void {
         setAiIssues.of(message.aiIssues),
         setDiagnostics.of(message.diagnostics),
         setNativeSyntaxTokens.of(message.syntaxTokens ?? []),
+        setNativeBracketTokens.of({
+          enabled: message.inputFeatures.bracketPairColorizationEnabled,
+          tokens: message.bracketTokens ?? [],
+        }),
       ],
       annotations: hostSyncAnnotations,
     });
+    const queuedFocus = pendingHostFocus;
+    pendingHostFocus = undefined;
+    const initialReveal = queuedFocus ?? (
+      message.initialFocus === undefined
+        ? undefined
+        : {
+            selection: message.selection ?? initialSelection,
+            options: message.initialFocus,
+          }
+    );
+    if (initialReveal !== undefined) {
+      revealSelection(initialReveal.selection, initialReveal.options);
+      if (queuedFocus?.requestId !== undefined) {
+        post({ protocol: VISUAL_EDITOR_PROTOCOL, type: "focusApplied", requestId: queuedFocus.requestId });
+      }
+    }
     requestAnimationFrame(() => {
       // A fresh visual tab must begin with the document actions visible. The
       // compact toolbar remains horizontally scrollable on narrow windows, but
       // a previously focused category must not make Compile/PDF/Save start
       // offscreen.
       toolbarElement.scrollLeft = 0;
-      if (editor !== undefined && persisted.scrollTop !== undefined) {
+      if (
+        editor !== undefined &&
+        initialReveal === undefined &&
+        persisted.scrollTop !== undefined
+      ) {
         editor.scrollDOM.scrollTop = Math.max(0, persisted.scrollTop);
       }
-      editor?.focus();
+      // The user may have opened native source while this view initialized.
+      if (document.hasFocus()) {
+        editor?.focus();
+      }
       scheduleViewportRequest();
       scheduleCursorPreviewRequest(editor);
     });
   } else {
     const currentText = editor.state.doc.toString();
-    const effects: StateEffect<unknown>[] = [
-      setFormulaDocument.of({
+    const currentFormula = editor.state.field(formulaField);
+    const currentStructure = editor.state.field(structureField);
+    const currentAiIssues = editor.state.field(aiIssueField);
+    const currentDiagnostics = editor.state.field(diagnosticField);
+    const visualModeEnabled = editorMode === "visual";
+    // A same-revision acknowledgement follows a local CodeMirror transaction.
+    // Its records have already been mapped above, so compare the inexpensive
+    // protocol data and avoid rebuilding every formula/structure widget when
+    // the authoritative parser confirms that the metadata did not change.
+    const canReuseMappedMetadata = preservesCompletionContext;
+    const formulaRecordsEqual = canReuseMappedMetadata && visualProtocolValueEqual(
+      currentFormula.records,
+      message.formulas,
+    ) && visualFormulaAssetsHaveCurrentSource(
+      message.text,
+      message.formulas,
+      currentFormula.rendered,
+    );
+    const structureRecordsEqual = canReuseMappedMetadata && visualProtocolValueEqual(
+      currentStructure.records,
+      message.structures,
+    );
+    const effects: StateEffect<unknown>[] = [];
+    if (
+      !formulaRecordsEqual ||
+      currentFormula.enabled !== inputFeatures.mathPreviewEnabled ||
+      currentFormula.placement !== mathPreviewPlacement
+    ) {
+      effects.push(setFormulaDocument.of({
         records: message.formulas,
-        enabled: true,
+        enabled: inputFeatures.mathPreviewEnabled,
         placement: mathPreviewPlacement,
-      }),
-      setFormulaVisualMode.of(editorMode === "visual"),
-      setStructureDocument.of(message.structures),
-      setStructureEnabled.of(editorMode === "visual"),
-      editableCompartment.reconfigure([
+      }));
+    }
+    if (currentFormula.visual !== visualModeEnabled) {
+      effects.push(setFormulaVisualMode.of(visualModeEnabled));
+    }
+    if (!structureRecordsEqual) {
+      effects.push(setStructureDocument.of(message.structures));
+    }
+    if (currentStructure.enabled !== visualModeEnabled) {
+      effects.push(setStructureEnabled.of(visualModeEnabled));
+    }
+    if (editor.state.readOnly === message.editable) {
+      effects.push(editableCompartment.reconfigure([
         EditorState.readOnly.of(!message.editable),
         EditorView.editable.of(message.editable),
-      ]),
-      setAiIssues.of(message.aiIssues),
-      setDiagnostics.of(message.diagnostics),
-    ];
+      ]));
+    }
+    if (
+      !canReuseMappedMetadata ||
+      !visualProtocolValueEqual(currentAiIssues.issues, message.aiIssues)
+    ) {
+      effects.push(setAiIssues.of(message.aiIssues));
+    }
+    if (
+      !canReuseMappedMetadata ||
+      !visualProtocolValueEqual(currentDiagnostics.diagnostics, message.diagnostics)
+    ) {
+      effects.push(setDiagnostics.of(message.diagnostics));
+    }
     // A routine visual edit intentionally omits full-document TextMate tokens.
     // nativeSyntaxField has already mapped its exact theme decorations through
     // the local transaction; preserving them avoids an expensive whole-paper
@@ -5134,8 +7051,16 @@ function applyDocumentMessage(message: VisualDocumentHostMessage): void {
     if (message.syntaxTokens !== undefined) {
       effects.push(setNativeSyntaxTokens.of(message.syntaxTokens));
     }
+    effects.push(setNativeBracketTokens.of({
+      enabled: message.inputFeatures.bracketPairColorizationEnabled,
+      ...(message.bracketTokens === undefined
+        ? {}
+        : { tokens: message.bracketTokens }),
+    }));
     if (currentText === message.text) {
-      editor.dispatch({ effects, annotations: hostSyncAnnotations });
+      if (effects.length > 0) {
+        editor.dispatch({ effects, annotations: hostSyncAnnotations });
+      }
     } else {
       const change = visualSingleTextDifference(currentText, message.text);
       if (change === undefined) {
@@ -5161,6 +7086,7 @@ function applyDocumentMessage(message: VisualDocumentHostMessage): void {
   if (editor !== undefined) {
     updateIssueCard(editor.state);
   }
+  updateFormatDocumentButtonState();
   setStatus(
     "info",
     editorMode === "source"
@@ -5193,6 +7119,38 @@ function applySyntaxTokenPatch(
   }
   editor.dispatch({
     effects: patchNativeSyntaxTokens.of({
+      from: message.from,
+      to: message.to,
+      tokens: message.tokens,
+    }),
+    annotations: hostSyncAnnotations,
+  });
+}
+
+function applyBracketTokenPatch(
+  message: Extract<
+    VisualEditorHostMessage,
+    { readonly type: "bracketTokenPatch" }
+  >,
+): void {
+  if (
+    editor === undefined ||
+    visualImeCompositionActive ||
+    (editor.composing && !visualImeCompositionDomEnded) ||
+    !inputFeatures.bracketPairColorizationEnabled ||
+    message.revision !== clientRevision ||
+    !Number.isSafeInteger(message.from) ||
+    !Number.isSafeInteger(message.to) ||
+    message.from < 0 ||
+    message.to < message.from ||
+    message.to > editor.state.doc.length ||
+    editor.state.doc.sliceString(message.from, message.to) !==
+      message.expectedText
+  ) {
+    return;
+  }
+  editor.dispatch({
+    effects: patchNativeBracketTokens.of({
       from: message.from,
       to: message.to,
       tokens: message.tokens,
@@ -5325,20 +7283,44 @@ function buildNativeSyntaxDecorations(
   );
 }
 
+function buildNativeBracketDecorations(
+  tokens: readonly VisualEditorBracketToken[],
+  documentLength: number,
+): DecorationSet {
+  return Decoration.set(
+    nativeBracketDecorationRanges(tokens, documentLength),
+    true,
+  );
+}
+
+function nativeBracketDecorationRanges(
+  tokens: readonly VisualEditorBracketToken[],
+  documentLength: number,
+): readonly Range<Decoration>[] {
+  const ranges: Range<Decoration>[] = [];
+  for (const token of tokens) {
+    const from = Math.max(0, Math.min(documentLength, token.from));
+    const to = Math.max(from, Math.min(documentLength, token.to));
+    if (
+      from >= to ||
+      to - from !== 1 ||
+      !Number.isSafeInteger(token.depth) ||
+      token.depth < 0
+    ) {
+      continue;
+    }
+    ranges.push(Decoration.mark({
+      class: `texleaf-bracket-pair texleaf-bracket-depth-${token.depth % 6}`,
+    }).range(from, to));
+  }
+  return ranges;
+}
+
 /**
- * Keep the DOM of a revealed formula structurally flat while it is editable.
- *
- * Chromium's Windows IME owns and mutates the live composition DOM. Nesting
- * TextMate marks inside the full-formula source mark lets Pinyin anchor its
- * provisional text to an earlier, visually similar token. CodeMirror then
- * preserves that malformed composition DOM even though EditorState already
- * contains the correct immutable suffix. The visible result is that typing
- * `s` before `\\)` turns `x^2+y^2` into `x^2s`.
- *
- * The authoritative marks stay in `NativeSyntaxFieldValue.base`; only their
- * presentation is suppressed for formulas touched by the current selection.
- * As soon as the caret leaves, the exact native-theme marks return without a
- * host token round-trip.
+ * Keep revealed formula source structurally flat while it is editable.
+ * Chromium's Windows IME can corrupt a composition range when a full-formula
+ * mark contains nested TextMate token marks, so the native token layer is
+ * flattened into sibling marks only for formulas touched by the selection.
  */
 function nativeSyntaxDecorationsForPresentation(
   base: DecorationSet,
@@ -5371,12 +7353,6 @@ interface NativeSyntaxSegment {
   readonly decoration: Decoration;
 }
 
-/**
- * Flatten formula-source styling and native syntax styling into one sibling
- * layer. No segment receives both an outer formula mark and an inner token
- * mark, so Chromium can keep an IME composition anchored without dropping the
- * untouched sibling text to its left or right.
- */
 function activeFormulaSyntaxDecorationRanges(
   base: DecorationSet,
   record: VisualFormulaRecord,
@@ -5409,8 +7385,6 @@ function activeFormulaSyntaxDecorationRanges(
     if (from >= to) {
       continue;
     }
-    // Prefer an optimistic mark for newly inserted composition text. Otherwise
-    // use the narrowest exact token when mapped and refreshed ranges overlap.
     const candidates = segments.filter((segment) =>
       segment.from <= from && segment.to >= to
     );
@@ -5445,12 +7419,6 @@ function activeFormulaSyntaxDecorationRanges(
   return ranges;
 }
 
-/**
- * Read the source text Chromium is currently displaying for one revealed
- * formula. Each native-theme segment carries the same source bounds, so a DOM
- * Range over the first and last sibling reproduces the complete visible text
- * without depending on token boundaries.
- */
 function visualFormulaDomSource(
   view: EditorView,
   record: VisualFormulaRecord,
@@ -5492,17 +7460,6 @@ function visualImeFormulaRecord(
     )[0];
 }
 
-/**
- * Chromium may finish a Windows Pinyin composition with a correct EditorState
- * but a stale, truncated formula DOM. CodeMirror intentionally preserves that
- * DOM while composing, so a no-op selection transaction cannot repair it.
- *
- * Wait until composition ownership has ended, compare only the affected
- * revealed formula, and change a harmless mark attribute when (and only when)
- * the two sources disagree. The attribute change makes CodeMirror rebuild the
- * native-theme sibling marks without changing source, selection, history, or
- * ordinary Chinese input behavior.
- */
 function scheduleVisualImeFormulaPresentationRepair(
   view: EditorView,
   session: VisualImeCompositionSession | undefined,
@@ -5548,12 +7505,14 @@ function beginVisualImeComposition(view: EditorView): void {
     clearTimeout(visualImeCompositionFinalizeTimer);
     visualImeCompositionFinalizeTimer = undefined;
   }
+  let source: string | undefined;
   if (!visualImeCompositionActive) {
-    visualImeCompositionBeforeText = view.state.doc.toString();
+    source = view.state.doc.toString();
+    visualImeCompositionBeforeText = source;
   }
   if (!visualImeCompositionActive || visualImeCompositionDomEnded) {
     const selection = visualImeCompositionStartRange(view);
-    const source = view.state.doc.toString();
+    source ??= view.state.doc.toString();
     visualImeCompositionSession = {
       from: selection.from,
       to: selection.to,
@@ -5580,10 +7539,6 @@ function rememberVisualImeStableSelection(
     return;
   }
   const selection = view.state.selection.main;
-  // A decorated formula may briefly become a broad DOM selection immediately
-  // before compositionstart. Ordinary update/key handlers must never promote
-  // that transient range to the authoritative IME range. Genuine drag/keyboard
-  // selections opt in through `allowNonEmpty` below.
   if (!selection.empty && !allowNonEmpty) {
     return;
   }
@@ -5616,17 +7571,7 @@ function visualImeCompositionStartRange(
   ) ?? { from: current.from, to: current.to };
 }
 
-/**
- * Map Chromium's live collapsed selection back into the immutable TeX source.
- *
- * A formula widget is replaced by editable source on pointerdown. The next
- * click can already put the browser caret at (for example) the end of
- * `\\(x^2+y^2\\)` while CodeMirror's state selection still points near the
- * beginning of that formula. Microsoft Pinyin may start composition before
- * the state-selection transaction catches up. Reading the native selection at
- * compositionstart closes that one-event race without trusting a broad DOM
- * range or changing normal Chinese replacement of a genuine selection.
- */
+/** Map Chromium's live collapsed selection back to immutable TeX source. */
 function collapsedVisualImeDomCaret(view: EditorView): number | undefined {
   const selection = view.contentDOM.ownerDocument.getSelection();
   const anchorNode = selection?.anchorNode;
@@ -5641,13 +7586,6 @@ function collapsedVisualImeDomCaret(view: EditorView): number | undefined {
     return undefined;
   }
 
-  // Revealed formula source is split into nested syntax-highlight spans. In
-  // that shape EditorView.posAtDOM/posAtCoords can resolve the final `y^2`
-  // caret to the earlier, visually similar `x^2` token. Every active formula
-  // span carries the immutable source start, so reconstruct the exact offset
-  // from raw DOM text instead. Validate the complete DOM formula against
-  // EditorState first; if IME has already mutated the DOM, the pointer snapshot
-  // captured on mouseup remains authoritative and this branch does not guess.
   const formulaElement = anchorNode.nodeType === Node.ELEMENT_NODE
     ? (anchorNode as Element).closest<HTMLElement>(
         ".texleaf-formula-source-active",
@@ -5701,9 +7639,6 @@ function collapsedVisualImeDomCaret(view: EditorView): number | undefined {
     const position = view.posAtDOM(anchorNode, selection.anchorOffset);
     return Math.max(0, Math.min(view.state.doc.length, position));
   } catch {
-    // CodeMirror rejects DOM positions outside its managed content. Falling
-    // back to the stable/state selection is safer than guessing a source
-    // offset from textContent.
     return undefined;
   }
 }
@@ -5782,6 +7717,7 @@ function finishVisualImeComposition(view: EditorView): void {
     }
     scheduleVisualImeFormulaPresentationRepair(view, completedSession);
     scheduleCursorPreviewRequest(view);
+    scheduleVisualActiveBracketHighlight(view);
     if (
       view.state.selection.main.from === view.state.selection.main.head
     ) {
@@ -5992,39 +7928,1018 @@ function isSanitizedSyntaxColor(value: string | undefined): value is string {
   return typeof value === "string" && /^#[0-9a-f]{3,8}$/iu.test(value);
 }
 
+const VISUAL_SEARCH_MATCH_LIMIT = 10_000;
+const VISUAL_SEARCH_SELECT_LIMIT = 1_000;
+
+/**
+ * A compact source-aware search panel for the visual editor.
+ *
+ * Formula widgets only replace CodeMirror's presentation—the authoritative
+ * LaTeX source remains in EditorState.doc. Selecting the first source match as
+ * soon as a query is committed therefore reuses the existing formula/structure
+ * reveal logic and makes a hidden match immediately visible.
+ */
+class VisualLatexSearchPanel implements Panel {
+  public readonly dom: HTMLElement;
+  public readonly top = true;
+
+  private readonly searchInput: HTMLInputElement;
+  private readonly replaceInput: HTMLInputElement;
+  private readonly replaceRow: HTMLDivElement;
+  private readonly replaceToggle: HTMLButtonElement;
+  private readonly status: HTMLSpanElement;
+  private readonly previousButton: HTMLButtonElement;
+  private readonly nextButton: HTMLButtonElement;
+  private readonly selectAllButton: HTMLButtonElement;
+  private readonly replaceButton: HTMLButtonElement;
+  private readonly replaceAllButton: HTMLButtonElement;
+  private readonly caseButton: HTMLButtonElement;
+  private readonly wordButton: HTMLButtonElement;
+  private readonly regexpButton: HTMLButtonElement;
+  private searchOrigin: number;
+
+  private query: SearchQuery;
+  private caseSensitive = false;
+  private wholeWord = false;
+  private regexp = false;
+  private searchComposing = false;
+  private replaceComposing = false;
+  private statusFrame = 0;
+  private readOnly: boolean;
+  private matchCache: {
+    readonly doc: EditorState["doc"];
+    readonly query: SearchQuery;
+    readonly ranges: readonly { readonly from: number; readonly to: number }[];
+    readonly capped: boolean;
+  } | undefined;
+
+  public constructor(private readonly view: EditorView) {
+    this.query = getSearchQuery(view.state);
+    this.caseSensitive = this.query.caseSensitive;
+    this.wholeWord = this.query.wholeWord;
+    this.regexp = this.query.regexp;
+    this.searchOrigin = view.state.selection.main.head;
+    this.readOnly = view.state.readOnly;
+
+    this.dom = document.createElement("div");
+    this.dom.className = "texleaf-search-panel";
+    this.dom.setAttribute("role", "search");
+    this.dom.setAttribute("aria-label", "查找和替换 LaTeX 源码");
+
+    const findRow = document.createElement("div");
+    findRow.className = "texleaf-search-row texleaf-search-find-row";
+
+    this.replaceToggle = visualSearchButton(
+      "展开替换",
+      "›",
+      "texleaf-search-icon texleaf-search-expand",
+      "toggleReplace",
+    );
+    this.replaceToggle.setAttribute("aria-expanded", "false");
+
+    const searchField = document.createElement("label");
+    searchField.className = "texleaf-search-field";
+    this.searchInput = document.createElement("input");
+    this.searchInput.type = "text";
+    this.searchInput.name = "search";
+    this.searchInput.value = this.query.search;
+    this.searchInput.placeholder = "查找 LaTeX 源码";
+    this.searchInput.autocomplete = "off";
+    this.searchInput.spellcheck = false;
+    this.searchInput.setAttribute("main-field", "true");
+    this.searchInput.setAttribute("aria-label", "查找 LaTeX 源码");
+    this.searchInput.title = "普通模式按 LaTeX 源码原样匹配；开启正则后使用正则语法";
+    this.status = document.createElement("span");
+    this.status.className = "texleaf-search-status";
+    this.status.setAttribute("role", "status");
+    this.status.setAttribute("aria-live", "polite");
+    this.status.setAttribute("aria-atomic", "true");
+    searchField.append(this.searchInput, this.status);
+
+    const flags = document.createElement("div");
+    flags.className = "texleaf-search-flags";
+    this.caseButton = visualSearchButton(
+      "区分大小写（Alt+C）",
+      "Aa",
+      "texleaf-search-flag",
+      "case",
+    );
+    this.wordButton = visualSearchButton(
+      "全字匹配（Alt+W）",
+      "W",
+      "texleaf-search-flag",
+      "word",
+    );
+    this.regexpButton = visualSearchButton(
+      "使用正则表达式（Alt+R）",
+      ".*",
+      "texleaf-search-flag",
+      "regexp",
+    );
+    flags.append(this.caseButton, this.wordButton, this.regexpButton);
+
+    this.previousButton = visualSearchButton(
+      "上一个匹配（Shift+Enter）",
+      "↑",
+      "texleaf-search-icon",
+      "previous",
+    );
+    this.nextButton = visualSearchButton(
+      "下一个匹配（Enter）",
+      "↓",
+      "texleaf-search-icon",
+      "next",
+    );
+    this.selectAllButton = visualSearchButton(
+      "选择全部匹配",
+      "全选",
+      "texleaf-search-text-button",
+      "selectAll",
+    );
+    const closeButton = visualSearchButton(
+      "关闭查找（Escape）",
+      "×",
+      "texleaf-search-icon texleaf-search-close",
+      "close",
+    );
+    findRow.append(
+      this.replaceToggle,
+      searchField,
+      flags,
+      this.previousButton,
+      this.nextButton,
+      this.selectAllButton,
+      closeButton,
+    );
+
+    this.replaceRow = document.createElement("div");
+    this.replaceRow.className = "texleaf-search-row texleaf-search-replace-row";
+    this.replaceRow.hidden = true;
+    const replaceField = document.createElement("label");
+    replaceField.className = "texleaf-search-field texleaf-search-replace-field";
+    this.replaceInput = document.createElement("input");
+    this.replaceInput.type = "text";
+    this.replaceInput.name = "replace";
+    this.replaceInput.value = this.query.replace;
+    this.replaceInput.placeholder = "替换为 LaTeX 源码";
+    this.replaceInput.autocomplete = "off";
+    this.replaceInput.spellcheck = false;
+    this.replaceInput.setAttribute("aria-label", "替换为 LaTeX 源码");
+    replaceField.append(this.replaceInput);
+    this.replaceButton = visualSearchButton(
+      "替换当前匹配（Enter）",
+      "替换",
+      "texleaf-search-text-button",
+      "replace",
+    );
+    this.replaceAllButton = visualSearchButton(
+      "替换全部匹配",
+      "全部替换",
+      "texleaf-search-text-button",
+      "replaceAll",
+    );
+    this.replaceRow.append(replaceField, this.replaceButton, this.replaceAllButton);
+    this.dom.append(findRow, this.replaceRow);
+
+    if (this.readOnly) {
+      this.replaceToggle.hidden = true;
+    } else if (this.query.replace.length > 0) {
+      this.setReplaceExpanded(true);
+    }
+
+    this.syncFlagButtons();
+    this.wireEvents(closeButton);
+    this.updateControlAvailability(this.query, false);
+    this.scheduleStatusUpdate();
+  }
+
+  public mount(): void {
+    this.searchInput.select();
+  }
+
+  public update(update: ViewUpdate): void {
+    for (const transaction of update.transactions) {
+      this.searchOrigin = transaction.changes.mapPos(this.searchOrigin, 1);
+    }
+    const external = getSearchQuery(update.state);
+    const queryChanged = !sameVisualSearchQuery(external, this.query);
+    const searchSemanticsChanged = !sameVisualSearchSemantics(external, this.query);
+    if (queryChanged) {
+      this.query = external;
+      this.searchInput.value = external.search;
+      this.replaceInput.value = external.replace;
+      this.caseSensitive = external.caseSensitive;
+      this.wholeWord = external.wholeWord;
+      this.regexp = external.regexp;
+      this.syncFlagButtons();
+      this.updateControlAvailability(external, false);
+    }
+    const readOnlyChanged = this.readOnly !== update.state.readOnly;
+    if (readOnlyChanged) {
+      this.readOnly = update.state.readOnly;
+      this.replaceToggle.hidden = this.readOnly;
+      if (this.readOnly) {
+        this.setReplaceExpanded(false);
+      }
+      this.updateControlAvailability(external, false);
+    }
+    if (update.docChanged || searchSemanticsChanged) {
+      this.matchCache = undefined;
+    }
+    if (update.docChanged || update.selectionSet || queryChanged || readOnlyChanged) {
+      this.scheduleStatusUpdate();
+    }
+  }
+
+  public destroy(): void {
+    if (this.statusFrame !== 0) {
+      cancelAnimationFrame(this.statusFrame);
+      this.statusFrame = 0;
+    }
+  }
+
+  private wireEvents(closeButton: HTMLButtonElement): void {
+    this.searchInput.addEventListener("compositionstart", () => {
+      this.searchComposing = true;
+    });
+    this.searchInput.addEventListener("compositionend", () => {
+      this.searchComposing = false;
+      this.commitQuery(true);
+    });
+    this.searchInput.addEventListener("input", () => {
+      if (!this.searchComposing) {
+        this.commitQuery(true);
+      }
+    });
+    this.replaceInput.addEventListener("compositionstart", () => {
+      this.replaceComposing = true;
+    });
+    this.replaceInput.addEventListener("compositionend", () => {
+      this.replaceComposing = false;
+      this.commitQuery(false);
+    });
+    this.replaceInput.addEventListener("input", () => {
+      if (!this.replaceComposing) {
+        this.commitQuery(false);
+      }
+    });
+
+    this.replaceToggle.addEventListener("click", () => {
+      this.setReplaceExpanded(this.replaceRow.hidden);
+    });
+    this.caseButton.addEventListener("click", () => this.toggleFlag("case"));
+    this.wordButton.addEventListener("click", () => this.toggleFlag("word"));
+    this.regexpButton.addEventListener("click", () => this.toggleFlag("regexp"));
+    this.previousButton.addEventListener("click", () => {
+      findPrevious(this.view);
+      this.scheduleStatusUpdate();
+    });
+    this.nextButton.addEventListener("click", () => {
+      findNext(this.view);
+      this.scheduleStatusUpdate();
+    });
+    this.selectAllButton.addEventListener("click", () => {
+      selectMatches(this.view);
+      this.scheduleStatusUpdate();
+    });
+    this.replaceButton.addEventListener("click", () => {
+      this.commitQuery(false);
+      replaceNext(this.view);
+      this.scheduleStatusUpdate();
+    });
+    this.replaceAllButton.addEventListener("click", () => {
+      this.commitQuery(false);
+      replaceAll(this.view);
+      this.scheduleStatusUpdate();
+    });
+    closeButton.addEventListener("click", () => closeSearchPanel(this.view));
+    this.dom.addEventListener("keydown", (event) => this.handleKeydown(event));
+  }
+
+  private handleKeydown(event: KeyboardEvent): void {
+    if (
+      event.isComposing ||
+      event.key === "Process" ||
+      event.keyCode === 229 ||
+      this.searchComposing ||
+      this.replaceComposing
+    ) {
+      return;
+    }
+    if (runScopeHandlers(this.view, event, "search-panel")) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.scheduleStatusUpdate();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeSearchPanel(this.view);
+      return;
+    }
+    if (event.altKey && !event.ctrlKey && !event.metaKey) {
+      const key = event.key.toLowerCase();
+      const flag = key === "c" ? "case" : key === "w" ? "word" : key === "r" ? "regexp" : undefined;
+      if (flag !== undefined) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.toggleFlag(flag);
+        return;
+      }
+    }
+    if (event.key !== "Enter") {
+      return;
+    }
+    if (event.target === this.searchInput) {
+      event.preventDefault();
+      event.stopPropagation();
+      (event.shiftKey ? findPrevious : findNext)(this.view);
+      this.scheduleStatusUpdate();
+    } else if (event.target === this.replaceInput) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.commitQuery(false);
+      replaceNext(this.view);
+      this.scheduleStatusUpdate();
+    }
+  }
+
+  private toggleFlag(flag: "case" | "word" | "regexp"): void {
+    if (flag === "case") {
+      this.caseSensitive = !this.caseSensitive;
+    } else if (flag === "word") {
+      this.wholeWord = !this.wholeWord;
+    } else {
+      this.regexp = !this.regexp;
+    }
+    this.syncFlagButtons();
+    this.commitQuery(true);
+    this.searchInput.focus({ preventScroll: true });
+  }
+
+  private syncFlagButtons(): void {
+    setVisualSearchPressed(this.caseButton, this.caseSensitive);
+    setVisualSearchPressed(this.wordButton, this.wholeWord);
+    setVisualSearchPressed(this.regexpButton, this.regexp);
+  }
+
+  private setReplaceExpanded(expanded: boolean): void {
+    this.replaceRow.hidden = !expanded;
+    this.replaceToggle.setAttribute("aria-expanded", String(expanded));
+    this.replaceToggle.textContent = expanded ? "⌄" : "›";
+    this.replaceToggle.setAttribute("aria-label", expanded ? "收起替换" : "展开替换");
+    this.replaceToggle.title = expanded ? "收起替换" : "展开替换";
+    if (expanded) {
+      this.replaceInput.focus({ preventScroll: true });
+    }
+  }
+
+  private queryFromControls(): SearchQuery {
+    return new SearchQuery(visualLatexSearchQuerySpec({
+      search: this.searchInput.value,
+      replace: this.replaceInput.value,
+      caseSensitive: this.caseSensitive,
+      regexp: this.regexp,
+      wholeWord: this.wholeWord,
+    }));
+  }
+
+  private commitQuery(navigate: boolean): void {
+    const previous = this.query;
+    const next = this.queryFromControls();
+    const searchChanged = !sameVisualSearchSemantics(previous, next);
+    if (!sameVisualSearchQuery(previous, next)) {
+      this.query = next;
+      this.view.dispatch({ effects: setSearchQuery.of(next) });
+    }
+    this.updateControlAvailability(next, false);
+    if (navigate && searchChanged && next.search.length > 0 && next.valid) {
+      this.selectInitialMatch(next);
+    }
+    this.scheduleStatusUpdate();
+  }
+
+  private selectInitialMatch(query: SearchQuery): void {
+    if (this.summarizeMatches(query).current > 0) {
+      return;
+    }
+    const match = firstVisualSearchMatch(this.view.state, query, this.searchOrigin);
+    if (match === undefined) {
+      return;
+    }
+    const selection = EditorSelection.range(match.from, match.to);
+    this.view.dispatch({
+      selection,
+      effects: EditorView.scrollIntoView(selection, { y: "center" }),
+      userEvent: "select.search",
+    });
+  }
+
+  private scheduleStatusUpdate(): void {
+    if (this.statusFrame !== 0) {
+      return;
+    }
+    this.statusFrame = requestAnimationFrame(() => {
+      this.statusFrame = 0;
+      this.updateStatus();
+    });
+  }
+
+  private updateStatus(): void {
+    const query = getSearchQuery(this.view.state);
+    if (query.search.length === 0) {
+      this.status.textContent = "";
+      this.status.title = "";
+      this.dom.dataset.searchState = "idle";
+      this.searchInput.removeAttribute("aria-invalid");
+      this.updateControlAvailability(query, false);
+      return;
+    }
+    if (!query.valid) {
+      this.status.textContent = "正则无效";
+      this.status.title = "正则表达式无效";
+      this.dom.dataset.searchState = "invalid";
+      this.searchInput.setAttribute("aria-invalid", "true");
+      this.updateControlAvailability(query, false);
+      return;
+    }
+    this.searchInput.removeAttribute("aria-invalid");
+    const summary = this.summarizeMatches(query);
+    if (summary.total === 0) {
+      this.status.textContent = "无结果";
+      this.status.title = "没有匹配的 LaTeX 源码";
+      this.dom.dataset.searchState = "not-found";
+      this.updateControlAvailability(query, false);
+      return;
+    }
+    const total = summary.capped ? `${summary.total}+` : String(summary.total);
+    this.status.textContent = summary.current > 0
+      ? `${summary.current} / ${total}`
+      : `${total} 个结果`;
+    this.status.title = summary.capped
+      ? `至少 ${summary.total} 个匹配`
+      : summary.current > 0
+        ? `第 ${summary.current} 个，共 ${summary.total} 个匹配`
+        : `共 ${summary.total} 个匹配`;
+    this.dom.dataset.searchState = "matched";
+    this.updateControlAvailability(
+      query,
+      true,
+      !summary.capped && summary.total <= VISUAL_SEARCH_SELECT_LIMIT,
+    );
+  }
+
+  private summarizeMatches(
+    query: SearchQuery,
+  ): { readonly current: number; readonly total: number; readonly capped: boolean } {
+    const state = this.view.state;
+    let cache = this.matchCache;
+    if (
+      cache === undefined ||
+      cache.doc !== state.doc ||
+      !sameVisualSearchSemantics(cache.query, query)
+    ) {
+      const matches = collectVisualSearchMatches(
+        state,
+        query,
+        VISUAL_SEARCH_MATCH_LIMIT,
+      );
+      cache = {
+        doc: state.doc,
+        query,
+        ranges: matches.ranges,
+        capped: matches.capped,
+      };
+      this.matchCache = cache;
+    }
+    const selection = state.selection.main;
+    const currentIndex = cache.ranges.findIndex(
+      (range) => range.from === selection.from && range.to === selection.to,
+    );
+    return {
+      current: currentIndex < 0 ? 0 : currentIndex + 1,
+      total: cache.ranges.length,
+      capped: cache.capped,
+    };
+  }
+
+  private updateControlAvailability(
+    query: SearchQuery,
+    hasMatches: boolean,
+    canSelectAll = false,
+  ): void {
+    const enabled = query.search.length > 0 && query.valid && hasMatches;
+    this.previousButton.disabled = !enabled;
+    this.nextButton.disabled = !enabled;
+    this.selectAllButton.disabled = !enabled || !canSelectAll;
+    const selectLabel = enabled && !canSelectAll
+      ? `匹配超过 ${VISUAL_SEARCH_SELECT_LIMIT} 项，不能一次全部选择`
+      : "选择全部匹配";
+    this.selectAllButton.title = selectLabel;
+    this.selectAllButton.setAttribute("aria-label", selectLabel);
+    this.replaceButton.disabled = this.view.state.readOnly || !enabled;
+    this.replaceAllButton.disabled = this.view.state.readOnly || !enabled;
+  }
+}
+
+function visualSearchButton(
+  label: string,
+  content: string,
+  className: string,
+  name: string,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.name = name;
+  button.className = className;
+  button.textContent = content;
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  return button;
+}
+
+function setVisualSearchPressed(button: HTMLButtonElement, pressed: boolean): void {
+  button.setAttribute("aria-pressed", String(pressed));
+  button.classList.toggle("active", pressed);
+}
+
+function sameVisualSearchSemantics(left: SearchQuery, right: SearchQuery): boolean {
+  return left.search === right.search &&
+    left.caseSensitive === right.caseSensitive &&
+    left.literal === right.literal &&
+    left.regexp === right.regexp &&
+    left.wholeWord === right.wholeWord &&
+    left.test === right.test;
+}
+
+function sameVisualSearchQuery(left: SearchQuery, right: SearchQuery): boolean {
+  return sameVisualSearchSemantics(left, right) && left.replace === right.replace;
+}
+
+function firstVisualSearchMatch(
+  state: EditorState,
+  query: SearchQuery,
+  requestedOrigin: number,
+): { readonly from: number; readonly to: number } | undefined {
+  if (!query.valid || query.search.length === 0) {
+    return undefined;
+  }
+  const origin = clampInteger(requestedOrigin, 0, state.doc.length);
+  const after = query.getCursor(state, origin).next();
+  if (!after.done) {
+    return after.value;
+  }
+  if (origin === 0) {
+    return undefined;
+  }
+  const wrapped = query.getCursor(state, 0, origin).next();
+  return wrapped.done ? undefined : wrapped.value;
+}
+
+function collectVisualSearchMatches(
+  state: EditorState,
+  query: SearchQuery,
+  maximum: number,
+): {
+  readonly ranges: readonly { readonly from: number; readonly to: number }[];
+  readonly capped: boolean;
+} {
+  const cursor = query.getCursor(state);
+  const ranges: { from: number; to: number }[] = [];
+  while (ranges.length < maximum) {
+    const result = cursor.next();
+    if (result.done) {
+      return { ranges, capped: false };
+    }
+    ranges.push({ from: result.value.from, to: result.value.to });
+  }
+  return { ranges, capped: !cursor.next().done };
+}
+
+function adaptiveCompletionInfoPosition(
+  list: { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number },
+  option: { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number },
+  info: { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number },
+  space: { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number },
+  tooltip?: HTMLElement,
+): { readonly style: string; readonly class: string } {
+  const gap = 6;
+  const scaleX = Math.max(
+    0.01,
+    (list.right - list.left) / Math.max(1, tooltip?.offsetWidth ?? list.right - list.left),
+  );
+  const scaleY = Math.max(
+    0.01,
+    (list.bottom - list.top) / Math.max(1, tooltip?.offsetHeight ?? list.bottom - list.top),
+  );
+  const naturalWidth = Math.min(420, Math.max(1, info.right - info.left));
+  const naturalHeight = Math.max(1, info.bottom - info.top);
+  const available = {
+    right: Math.max(0, space.right - list.right - gap),
+    left: Math.max(0, list.left - space.left - gap),
+    below: Math.max(0, space.bottom - list.bottom - gap),
+    above: Math.max(0, list.top - space.top - gap),
+  };
+  const placement = visualFloatingPreviewPlacement(available, {
+    width: naturalWidth,
+    height: naturalHeight,
+  });
+  const viewportHeight = Math.max(1, space.bottom - space.top);
+  const viewportWidth = Math.max(1, space.right - space.left);
+  if (placement === "overlay") {
+    const maximumWidth = Math.min(420, viewportWidth);
+    const maximumHeight = viewportHeight;
+    const renderedWidth = Math.min(naturalWidth, maximumWidth);
+    const renderedHeight = Math.min(naturalHeight, maximumHeight);
+    const viewportLeft = Math.max(
+      space.left,
+      Math.min(list.left, space.right - renderedWidth),
+    );
+    const viewportTop = available.below >= available.above
+      ? Math.max(space.top, Math.min(list.bottom + gap, space.bottom - renderedHeight))
+      : Math.max(space.top, Math.min(list.top - gap - renderedHeight, space.bottom - renderedHeight));
+    return {
+      style: [
+        `left: ${(viewportLeft - list.left) / scaleX}px`,
+        `top: ${(viewportTop - list.top) / scaleY}px`,
+        `max-width: ${maximumWidth / scaleX}px`,
+        `max-height: ${maximumHeight / scaleY}px`,
+      ].join("; "),
+      class: "texleaf-completion-info-adaptive texleaf-completion-info-overlay",
+    };
+  }
+  const side = placement;
+  const className = `texleaf-completion-info-adaptive texleaf-completion-info-${side}`;
+  if (side === "right" || side === "left") {
+    const sideWidth = side === "right" ? available.right : available.left;
+    const maximumWidth = Math.max(1, Math.min(420, sideWidth));
+    const renderedHeight = Math.min(naturalHeight, viewportHeight);
+    const viewportTop = Math.max(
+      space.top,
+      Math.min(option.top, space.bottom - renderedHeight),
+    );
+    return {
+      style: [
+        `top: ${(viewportTop - list.top) / scaleY}px`,
+        `max-width: ${maximumWidth / scaleX}px`,
+        `max-height: ${viewportHeight / scaleY}px`,
+      ].join("; "),
+      class: `${side === "right" ? "cm-completionInfo-right" : "cm-completionInfo-left"} ${className}`,
+    };
+  }
+
+  const maximumWidth = Math.min(420, viewportWidth);
+  const renderedWidth = Math.min(naturalWidth, maximumWidth);
+  const viewportLeft = Math.max(
+    space.left,
+    Math.min(list.left, space.right - renderedWidth),
+  );
+  const sideHeight = side === "below" ? available.below : available.above;
+  const maximumHeight = Math.max(1, Math.min(viewportHeight, sideHeight));
+  const renderedHeight = Math.min(naturalHeight, maximumHeight);
+  const viewportTop = side === "below"
+    ? Math.min(space.bottom - renderedHeight, list.bottom + gap)
+    : Math.max(space.top, list.top - gap - renderedHeight);
+  return {
+    style: [
+      `left: ${(viewportLeft - list.left) / scaleX}px`,
+      `top: ${(viewportTop - list.top) / scaleY}px`,
+      `max-width: ${maximumWidth / scaleX}px`,
+      `max-height: ${maximumHeight / scaleY}px`,
+    ].join("; "),
+    class: className,
+  };
+}
+
+/** Line-number marker shown alongside a source range collapsed into one block. */
+class VisualSourceRangeLineNumberMarker extends GutterMarker {
+  public override readonly elementClass = "texleaf-source-range-gutter";
+
+  public constructor(
+    private readonly fromLine: number,
+    private readonly toLine: number,
+    private readonly layout: VisualSourceRangeLineNumberLayout,
+    private readonly semanticAnchorFrom: number | undefined,
+  ) {
+    super();
+  }
+
+  public override eq(other: VisualSourceRangeLineNumberMarker): boolean {
+    return this.fromLine === other.fromLine
+      && this.toLine === other.toLine
+      && this.layout === other.layout
+      && this.semanticAnchorFrom === other.semanticAnchorFrom;
+  }
+
+  public override toDOM(): Node {
+    const root = document.createElement("span");
+    root.className = "texleaf-source-range-number";
+    root.dataset.fromLine = String(this.fromLine);
+    root.dataset.toLine = String(this.toLine);
+    root.setAttribute(
+      "aria-label",
+      this.fromLine === this.toLine
+        ? `源代码第 ${this.fromLine} 行`
+        : `源代码第 ${this.fromLine} 至 ${this.toLine} 行`,
+    );
+    root.title = root.getAttribute("aria-label") ?? "";
+
+    if (this.fromLine === this.toLine) {
+      root.classList.add("texleaf-source-range-number-single");
+      if (this.semanticAnchorFrom === undefined) {
+        root.textContent = String(this.fromLine);
+      } else {
+        root.classList.add("texleaf-line-number-anchor-target");
+        root.dataset.texleafLineNumberAnchorId = String(
+          this.semanticAnchorFrom,
+        );
+        const value = document.createElement("span");
+        value.className = "texleaf-line-number-anchor-value";
+        value.textContent = String(this.fromLine);
+        root.append(value);
+      }
+      return root;
+    }
+
+    root.dataset.layout = this.layout;
+    root.classList.add(`texleaf-source-range-number-${this.layout}`);
+
+    const start = document.createElement("span");
+    start.className = "texleaf-source-range-start";
+    start.textContent = String(this.fromLine);
+    const rule = document.createElement("span");
+    rule.className = "texleaf-source-range-rule";
+    rule.setAttribute("aria-hidden", "true");
+    const end = document.createElement("span");
+    end.className = "texleaf-source-range-end";
+    end.textContent = String(this.toLine);
+    root.append(start, rule, end);
+    return root;
+  }
+}
+
+/** Empty marker that replaces a native number already owned by a block widget. */
+class VisualNativeLineNumberSuppressionMarker extends GutterMarker {
+  public override readonly elementClass =
+    "texleaf-native-line-number-suppression";
+
+  public override toDOM(): Node {
+    const root = document.createElement("span");
+    root.setAttribute("aria-hidden", "true");
+    root.hidden = true;
+    return root;
+  }
+}
+
+const visualNativeLineNumberSuppressionMarker =
+  new VisualNativeLineNumberSuppressionMarker();
+
+/** Exact physical line number whose inner value follows a visual text anchor. */
+class VisualHeadingLineNumberMarker extends GutterMarker {
+  public constructor(
+    private readonly lineNumber: number,
+    private readonly semanticAnchorFrom: number,
+  ) {
+    super();
+  }
+
+  public override eq(other: VisualHeadingLineNumberMarker): boolean {
+    return this.lineNumber === other.lineNumber &&
+      this.semanticAnchorFrom === other.semanticAnchorFrom;
+  }
+
+  public override toDOM(): Node {
+    const root = document.createElement("span");
+    root.className = "texleaf-line-number-anchor-target";
+    root.dataset.texleafLineNumberAnchorId = String(this.semanticAnchorFrom);
+    const value = document.createElement("span");
+    value.className = "texleaf-line-number-anchor-value";
+    value.textContent = String(this.lineNumber);
+    root.append(value);
+    return root;
+  }
+}
+
+const visualHeadingLineNumbers = lineNumberMarkers.compute(
+  [structureField, "doc"],
+  (state) => {
+    const structure = state.field(structureField);
+    if (!structure.enabled) {
+      return RangeSet.empty;
+    }
+    const markers = new Map<number, VisualHeadingLineNumberMarker>();
+    for (const record of structure.records) {
+      if (
+        record.kind !== "heading" ||
+        !validRange(record.from, record.to, state.doc.length) ||
+        sourceRevealTouchesRange(
+          structure.sourceReveal,
+          record.from,
+          record.to,
+        )
+      ) {
+        continue;
+      }
+      const line = state.doc.lineAt(record.from);
+      markers.set(
+        line.from,
+        new VisualHeadingLineNumberMarker(line.number, record.from),
+      );
+    }
+    return RangeSet.of(
+      [...markers].map(([position, marker]) => marker.range(position)),
+      true,
+    );
+  },
+);
+
+const visualTerminalNativeLineNumberSuppressions = lineNumberMarkers.compute(
+  [structureField, "doc", "selection"],
+  (state) => {
+    const structure = state.field(structureField);
+    if (!structure.enabled) {
+      return RangeSet.empty;
+    }
+    const positions = new Set<number>();
+    for (const record of structure.records) {
+      if (
+        record.kind !== "documentEnd" ||
+        !record.replacement.block ||
+        !validRange(
+          record.replacement.from,
+          record.replacement.to,
+          state.doc.length,
+        ) ||
+        record.replacement.from === record.replacement.to ||
+        selectionTouchesRange(
+          state,
+          record.replacement.sourceFrom,
+          record.replacement.sourceTo,
+        ) ||
+        sourceRevealTouchesRange(
+          structure.sourceReveal,
+          record.replacement.sourceFrom,
+          record.replacement.sourceTo,
+        )
+      ) {
+        continue;
+      }
+      const range = visualSourceLineNumberRange(
+        state.doc,
+        record.replacement.from,
+        record.replacement.to,
+      );
+      if (range === undefined) {
+        continue;
+      }
+      // CodeMirror can anchor a terminal native text block to either boundary
+      // of the source line (not only line.from). Suppress both exact anchors.
+      const sourceLine = state.doc.line(range.toLine);
+      positions.add(sourceLine.from);
+      positions.add(sourceLine.to);
+      const syntheticEof = visualTerminalSyntheticEofLinePosition(
+        state.doc,
+        record.replacement.sourceTo,
+      );
+      if (syntheticEof !== undefined) {
+        // A single final LF/CRLF is the terminator owned by the footer, not an
+        // authored blank line after it. Two line separators make replacement
+        // `to` non-terminal, so a genuine blank tail remains numbered.
+        positions.add(syntheticEof);
+      }
+    }
+    return RangeSet.of(
+      [...positions].map((position) =>
+        visualNativeLineNumberSuppressionMarker.range(position)
+      ),
+      true,
+    );
+  },
+);
+
+const visualSourceRangeLineNumbers = lineNumberWidgetMarker.of(
+  (view, widget, block) => {
+    // `block.from/to` belongs to the current decoration tree, so unlike a DOM
+    // widget closure it cannot retain stale offsets after edits or formatting.
+    const range = visualSourceLineNumberRange(
+      view.state.doc,
+      block.from,
+      block.to,
+    );
+    return range === undefined
+      ? null
+      : new VisualSourceRangeLineNumberMarker(
+          range.fromLine,
+          range.toLine,
+          visualSourceRangeLineNumberLayout(
+            block.height,
+            view.defaultLineHeight,
+          ),
+          widget instanceof AbstractBeginWidget ||
+              widget instanceof TheoremBeginWidget ||
+              widget instanceof TableOfContentsWidget
+            ? block.from
+            : undefined,
+        );
+  },
+);
+
+/**
+ * Hide only the synthetic logical line which CodeMirror exposes after a
+ * terminal line separator consumed by the collapsed document-end footer.
+ * The formatter is deliberately used in addition to line-number markers:
+ * CodeMirror may anchor that terminal gutter element to a height-map boundary
+ * that has no stable document position for a marker, while its logical line
+ * number is deterministic. Source mode and authored blank/tail lines continue
+ * through the normal formatter unchanged.
+ */
+function visualEditorLineNumberText(
+  lineNumber: number,
+  state: EditorState,
+): string {
+  const structure = state.field(structureField, false);
+  if (!structure?.enabled) {
+    return String(lineNumber);
+  }
+  const terminalLineNumber = state.doc.lineAt(state.doc.length).number;
+  if (lineNumber !== terminalLineNumber) {
+    return String(lineNumber);
+  }
+  const hidesSyntheticTerminalLine = structure.records.some((record) =>
+    record.kind === "documentEnd" &&
+    record.replacement.block &&
+    record.replacement.from < record.replacement.to &&
+    validRange(
+      record.replacement.from,
+      record.replacement.to,
+      state.doc.length,
+    ) &&
+    !selectionTouchesRange(
+      state,
+      record.replacement.sourceFrom,
+      record.replacement.sourceTo,
+    ) &&
+    !sourceRevealTouchesRange(
+      structure.sourceReveal,
+      record.replacement.sourceFrom,
+      record.replacement.sourceTo,
+    ) &&
+    visualTerminalSyntheticEofLinePosition(
+        state.doc,
+        record.replacement.sourceTo,
+      ) !== undefined
+  );
+  return hidesSyntheticTerminalLine ? "" : String(lineNumber);
+}
+
 function createEditorExtensions(editable: boolean) {
   return [
     cspNonce.length > 0 ? EditorView.cspNonce.of(cspNonce) : [],
     visualEditorChinesePhrases,
-    lineNumbers(),
+    lineNumbers({ formatNumber: visualEditorLineNumberText }),
+    visualHeadingLineNumbers,
+    visualTerminalNativeLineNumberSuppressions,
+    visualSourceRangeLineNumbers,
     highlightActiveLineGutter(),
     highlightSpecialChars(),
     foldGutter(),
     drawSelection(),
     dropCursor(),
     EditorState.allowMultipleSelections.of(true),
+    indentUnit.of(VISUAL_LATEX_INDENT_UNIT),
     visualLatexEnvironmentIndentationExtension(),
     indentOnInput(),
-    // Chromium's Windows IME anchors provisional Pinyin text inside the
-    // `cm-matchingBracket` mark when a visual formula is revealed. On the
-    // first composition frame that browser-owned DOM can drop the matching
-    // opening brace even though EditorState still contains the correct TeX.
-    // Keep bracket matching in source mode, but do not create that unstable
-    // nested mark in visual mode. Pair insertion and structural Tab handling
-    // remain provided independently by closeBrackets/the visual keymap.
+    // The nested cm-matchingBracket mark can corrupt Chromium's live Windows
+    // IME composition DOM inside revealed formulas. Keep it in source mode,
+    // while visual mode retains closeBrackets and structural key handling.
     bracketMatchingCompartment.of(
-      editorMode === "source" ? bracketMatching() : [],
+      editorMode === "source" && inputFeatures.highlightActiveBracketPair
+        ? bracketMatching()
+        : [],
     ),
     closeBrackets(),
     rectangularSelection(),
     crosshairCursor(),
     highlightActiveLine(),
+    search({
+      top: true,
+      literal: true,
+      createPanel: (view) => new VisualLatexSearchPanel(view),
+      scrollToMatch: (range) => EditorView.scrollIntoView(range, { y: "center" }),
+    }),
     highlightSelectionMatches(),
     StreamLanguage.define(stex),
-    // Exact native TextMate marks are supplied by nativeSyntaxField. A second
-    // StreamLanguage highlighter would split an active formula into nested
-    // `tok-*` spans, which is unsafe for Windows IME composition. The language
-    // mode remains enabled for parsing, indentation, and bracket behavior.
+    // The host TextMate layer supplies active-theme or fixed-Primer colors.
+    // Keep a real stex fallback in full source mode for the interval before host
+    // tokens arrive or if the tokenizer cannot start. Visual mode omits nested
+    // tok-* spans because Chromium IME composition inside revealed formulas
+    // must remain structurally flat.
+    syntaxHighlightingCompartment.of(
+      editorMode === "source"
+        ? syntaxHighlighting(classHighlighter, { fallback: true })
+        : [],
+    ),
     history(),
     autocompletion({
       override: [visualProviderCompletionSource],
@@ -6036,24 +8951,18 @@ function createEditorExtensions(editable: boolean) {
       // Enter, which looked like every completion required two presses.
       interactionDelay: 0,
       maxRenderedOptions: 100,
-      // Citation metadata must remain beside the candidate list, matching the
-      // native editor's suggest-details layout instead of dropping below and
-      // covering later candidates in the custom editor.
-      positionInfo: (_view, list, option, info, space) => {
-        const availableWidth = Math.max(180, space.right - list.right);
-        const maximumTop = Math.max(
-          space.top - list.top,
-          space.bottom - list.top - (info.bottom - info.top),
-        );
-        const top = Math.max(
-          space.top - list.top,
-          Math.min(option.top - list.top, maximumTop),
-        );
-        return {
-          style: `top: ${top}px; max-width: ${Math.min(420, availableWidth)}px`,
-          class: "cm-completionInfo-right texleaf-completion-info-right",
-        };
-      },
+      // Keep citation/reference details visible in split editors. A right-only
+      // pane disappears behind the neighbouring PDF when the list is already
+      // near the edge, so choose among right, left, below, and above from the
+      // actual tooltip space and clamp the card to that space.
+      positionInfo: (view, list, option, info, space) =>
+        adaptiveCompletionInfoPosition(
+          list,
+          option,
+          info,
+          space,
+          view.dom.querySelector<HTMLElement>(".cm-tooltip-autocomplete") ?? undefined,
+        ),
     }),
     tooltips({
       tooltipSpace: (view) => {
@@ -6100,43 +9009,76 @@ function createEditorExtensions(editable: boolean) {
         if (event.button !== 0 || gesture === undefined) {
           return false;
         }
-        if (!gesture.moved) {
-          // `posAtCoords` from mousedown is not reliable inside the nested
-          // syntax-highlight spans of revealed formula source. By mouseup the
-          // browser has installed its exact collapsed caret, so prefer the
-          // source offset reconstructed from that live DOM selection.
+        const simplePrimaryClick =
+          event.detail < 2 &&
+          !event.shiftKey &&
+          !event.altKey &&
+          !event.ctrlKey &&
+          !event.metaKey;
+        if (!gesture.moved && simplePrimaryClick) {
           const domPosition = collapsedVisualImeDomCaret(view);
           const coordinatePosition = gesture.position === undefined
             ? undefined
             : Math.max(0, Math.min(view.state.doc.length, gesture.position));
-          const position = domPosition ?? coordinatePosition;
+          const position = resolveVisualPointerPosition(
+            view.state.doc.length,
+            domPosition,
+            coordinatePosition,
+            gesture.logicalLine,
+          );
           if (position !== undefined) {
-            // A collapsed theorem/list/proof card leaves its physical
-            // `\\begin{...}` and `\\end{...}` lines in the logical document,
-            // but there is no painted source glyph for CodeMirror's normal
-            // pointer selection to enter.  Up/Down already exposes both lines
-            // through `planVisualLogicalLineNavigation`; make a direct click on
-            // either hidden boundary use the same rule.  This runs on mouseup,
-            // after Chromium has resolved the click, so the subsequent native
-            // pointer-selection transaction cannot immediately collapse the
-            // pair again.
+            // Collapsed structures and display formulas leave physical source
+            // lines in the logical document without a painted source glyph.
+            // Use the same reveal rule as logical Up/Down navigation before
+            // remembering the IME caret.
             const boundaryRevealed = revealVisualCollapsedSourceAtPointer(
               view,
               position,
               gesture.logicalLine,
             );
-            const stablePosition = boundaryRevealed
-              ? view.state.selection.main.head
-              : position;
-            visualImePointerCaret = {
-              doc: view.state.doc,
-              position: stablePosition,
-            };
-            visualImeStableSelection = {
-              doc: view.state.doc,
-              from: stablePosition,
-              to: stablePosition,
-            };
+            const nativeSelection = view.state.selection.main;
+            const nativeCaretLeftClickedLine =
+              !boundaryRevealed &&
+              nativeSelection.empty &&
+              gesture.logicalLine !== undefined &&
+              (
+                nativeSelection.head < gesture.logicalLine.from ||
+                nativeSelection.head > gesture.logicalLine.to
+              );
+            if (nativeCaretLeftClickedLine) {
+              // A block replacement may have installed a native selection in
+              // the adjacent formula during mousedown. Put it back on the
+              // physical source line captured before that selection existed.
+              view.dispatch({
+                selection: EditorSelection.cursor(position),
+                scrollIntoView: false,
+                annotations: [
+                  Transaction.addToHistory.of(false),
+                  Transaction.userEvent.of("select.pointer"),
+                ],
+              });
+            }
+            const liveSelection = view.state.selection.main;
+            if (liveSelection.empty) {
+              const stablePosition = boundaryRevealed
+                ? liveSelection.head
+                : position;
+              visualImePointerCaret = {
+                doc: view.state.doc,
+                position: stablePosition,
+              };
+              visualImeStableSelection = {
+                doc: view.state.doc,
+                from: stablePosition,
+                to: stablePosition,
+              };
+            } else {
+              // A tiny drag can stay below the movement threshold, and the
+              // first click of a multi-click sequence can already yield a
+              // native range. Preserve that range for the next IME edit.
+              visualImePointerCaret = undefined;
+              rememberVisualImeStableSelection(view, true);
+            }
           } else {
             visualImePointerCaret = undefined;
             rememberVisualImeStableSelection(view, true);
@@ -6151,16 +9093,7 @@ function createEditorExtensions(editable: boolean) {
         if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
           visualLogicalLineGoalColumn = undefined;
         }
-        // Capture the real source selection before Windows IME composition can
-        // broaden Chromium's DOM selection around a decorated formula.
         rememberVisualImeStableSelection(view);
-        // Microsoft Pinyin is not consistent across Chromium/Windows builds:
-        // the first phonetic key can be reported as `Process`,
-        // `Unidentified`, keyCode 229, or the literal printable letter. Keep
-        // the exact pre-composition pointer for all of those forms. Genuine
-        // navigation/editing shortcuts invalidate it; ordinary non-IME typing
-        // changes the immutable document moments later and is invalidated by
-        // the document identity check automatically.
         const mayStartImeComposition =
           event.isComposing ||
           event.key === "Process" ||
@@ -6176,20 +9109,9 @@ function createEditorExtensions(editable: boolean) {
           mayStartImeComposition &&
           (!visualImeCompositionActive || visualImeCompositionDomEnded)
         ) {
-          // Keyboard navigation inside revealed formula source can move the
-          // native caret before CodeMirror publishes the matching selection
-          // transaction.  A pointer snapshot from the preceding click is then
-          // still attached to the same immutable document but no longer names
-          // the visible caret.  Sample the collapsed DOM caret synchronously
-          // on the IME-starting keydown, before Chromium owns or rewrites the
-          // composition DOM, and promote that newer position over the stale
-          // pointer/state snapshots.
           const domCaret = collapsedVisualImeDomCaret(view);
           if (domCaret !== undefined) {
-            visualImePointerCaret = {
-              doc: view.state.doc,
-              position: domCaret,
-            };
+            visualImePointerCaret = { doc: view.state.doc, position: domCaret };
             visualImeStableSelection = {
               doc: view.state.doc,
               from: domCaret,
@@ -6202,6 +9124,7 @@ function createEditorExtensions(editable: boolean) {
         return false;
       },
       compositionstart: (_event, view) => {
+        clearVisualActiveBracketHighlight(view);
         beginVisualImeComposition(view);
         visualImePointerCaret = undefined;
         return false;
@@ -6211,7 +9134,6 @@ function createEditorExtensions(editable: boolean) {
         return false;
       },
       beforeinput: (event) => {
-        const input = event as InputEvent;
         if (visualImeCompositionActive) {
           updateVisualImeCompositionText(event);
         }
@@ -6233,6 +9155,9 @@ function createEditorExtensions(editable: boolean) {
       // Environment exit must win over completion, snippets, default Enter,
       // and any host/extension keybinding while this TeX webview has focus.
       { key: "Shift-Enter", run: handleVisualShiftEnter },
+      // Keep formatting inside this document Webview instead of leaking the
+      // conventional shortcut to VS Code's native editor command.
+      { key: "Shift-Alt-f", run: runVisualFormatDocument },
     ])),
     keymap.of([
       { key: "Mod-s", run: () => runCommand("save") },
@@ -6242,8 +9167,6 @@ function createEditorExtensions(editable: boolean) {
       { key: "Ctrl-Alt-b", mac: "Cmd-Alt-b", run: () => runCommand("build") },
       { key: "Ctrl-Alt-l", mac: "Cmd-Alt-l", run: () => runCommand("pickSnippet") },
       { key: "Ctrl-Alt-c", mac: "Cmd-Alt-c", run: () => runCommand("pickCitation") },
-      { key: "Ctrl-[", mac: "Cmd-[", run: () => runCommand("navigateBack") },
-      { key: "Shift-Alt-f", run: runVisualFormatDocument },
       { key: "Ctrl-Space", run: startCompletion },
       { key: "ArrowUp", run: (view) => handleVisualLogicalLineArrow(view, -1) },
       { key: "ArrowDown", run: (view) => handleVisualLogicalLineArrow(view, 1) },
@@ -6268,15 +9191,20 @@ function createEditorExtensions(editable: boolean) {
       ...searchKeymap,
     ]),
     structureField,
+    visualTerminalDocumentEndSelectionBarrier,
     formulaField,
     editorPresentationModeField,
     EditorView.lineWrapping,
+    visualSoftWrapIndentPlugin,
     aiIssueField,
     diagnosticField,
     nativeSyntaxField,
+    nativeBracketField,
+    visualActiveBracketHighlightPlugin,
     visualSnippetFramesField,
     reverseSyncFlashField,
     viewportPlugin,
+    visualLineNumberAnchorPlugin,
     measuredBlockPlugin,
     mappedWidgetRangePlugin,
     editorTheme,
@@ -6387,7 +9315,6 @@ function openEditingContextMenu(event: MouseEvent): void {
   editCutButton.disabled = view.state.readOnly || !hasSelection;
   editCopyButton.disabled = !hasSelection;
   editPasteButton.disabled = view.state.readOnly;
-  editFormatDocumentButton.disabled = view.state.readOnly;
   for (const button of Array.from(
     editingContextMenu.querySelectorAll<HTMLButtonElement>("[data-texleaf-insert]"),
   )) {
@@ -6466,6 +9393,58 @@ function runClipboardAction(action: "cut" | "copy" | "paste"): void {
     selection,
   });
   view.focus();
+}
+
+function handleUnifiedNavigationKeydown(event: KeyboardEvent): void {
+  if (
+    editor === undefined ||
+    event.isComposing ||
+    event.keyCode === 229 ||
+    event.altKey ||
+    (!event.ctrlKey && !event.metaKey)
+  ) {
+    return;
+  }
+  const key = event.key.toLowerCase();
+  const direction = event.code === "BracketLeft" || key === "["
+    ? "back"
+    : event.code === "BracketRight" || key === "]"
+      ? "forward"
+      : undefined;
+  if (direction === undefined) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation();
+  post({
+    protocol: VISUAL_EDITOR_PROTOCOL,
+    type: "navigationCommand",
+    direction,
+    revision: clientRevision,
+    selection: currentSelection(editor.state),
+  });
+}
+
+/**
+ * Preserve Chromium's own undo stack for the two search-panel text controls.
+ * VS Code's Webview preload otherwise cancels these keys and forwards them to
+ * the document-wide command service. Stopping propagation without calling
+ * preventDefault keeps the native input history (and its normal input event)
+ * intact while protecting the LaTeX document's history.
+ */
+function handleVisualSearchNativeHistoryKeydown(event: KeyboardEvent): void {
+  const eventTarget = event.composedPath()[0];
+  if (
+    !(eventTarget instanceof HTMLInputElement) ||
+    (eventTarget.name !== "search" && eventTarget.name !== "replace") ||
+    eventTarget.closest(".texleaf-search-panel") === null ||
+    !visualSearchInputUsesNativeHistory(event)
+  ) {
+    return;
+  }
+  event.stopPropagation();
+  event.stopImmediatePropagation();
 }
 
 function handleVisualHistoryKeydown(event: KeyboardEvent): void {
@@ -6657,6 +9636,27 @@ function atomicDecorationCoversRange(
   return covered;
 }
 
+function atomicDecorationTouchesInput(
+  atomic: DecorationSet,
+  from: number,
+  to: number,
+): boolean {
+  let touched = false;
+  atomic.between(Math.max(0, from - 1), Math.max(to, from) + 1, (
+    atomicFrom,
+    atomicTo,
+  ) => {
+    if (
+      from === to
+        ? from >= atomicFrom && from <= atomicTo
+        : from < atomicTo && to > atomicFrom
+    ) {
+      touched = true;
+    }
+  });
+  return touched;
+}
+
 function handleVisualInputBeforeCollapsedBlock(
   view: EditorView,
   from: number,
@@ -6700,11 +9700,6 @@ function handleVisualInputBeforeCollapsedBlock(
     );
     session.pendingInputIntent = undefined;
     const source = view.state.doc.toString();
-    // The composition owns exactly the candidate between an immutable prefix
-    // and suffix. Host acknowledgements and malformed Chromium DOM diffs are
-    // not allowed to move either boundary. This is the final guard that keeps
-    // Backspace on the last Pinyin letter from consuming `+y^2`, braces, or an
-    // environment delimiter to its left/right.
     if (
       !source.startsWith(session.prefix) ||
       !source.endsWith(session.suffix) ||
@@ -6736,15 +9731,9 @@ function handleVisualInputBeforeCollapsedBlock(
 
     session.to = plan.cursor;
     session.eventText = plan.insert;
-    // Do not dispatch CodeMirror's native composition transaction here even
-    // when its ChangeSet produces the expected EditorState. In a replaced,
-    // syntax-decorated formula Chromium can leave its independently mutated
-    // composition DOM anchored at an earlier token (`x^2`) while that state is
-    // already correct (`x^2+y^2s`). CodeMirror then deliberately preserves the
-    // active composition DOM, so the user sees `+y^2` disappear and the next
-    // IME update is diffed against that corrupted presentation. Re-dispatch the
-    // protected immutable-prefix/suffix plan instead; it is the one source of
-    // truth for both the state and the rendered composition range.
+    // Always replay the immutable-prefix/suffix plan. Even when the native
+    // transaction produces the right EditorState, Chromium can retain a stale
+    // composition DOM anchored to an earlier decorated formula token.
     view.dispatch({
       changes: {
         from: plan.from,
@@ -6762,14 +9751,25 @@ function handleVisualInputBeforeCollapsedBlock(
   }
   if (editorMode === "visual") {
     const selection = view.state.selection.main;
-    const protectedInsertion = planProtectedFullwidthImeInsertion(
-      view.state.doc.toString(),
-      selection.from,
-      selection.to,
-      from,
-      to,
-      text,
-    );
+    // The protected full-width path only applies to a native broad
+    // replacement around a collapsed caret. Ordinary character insertion has
+    // from === to, so do not materialise the whole document just to have the
+    // planner reject it immediately.
+    const protectedInsertion = selection.empty &&
+        to > from &&
+        text.length > 0 &&
+        !/[\r\n]/u.test(text) &&
+        selection.head >= from &&
+        selection.head <= to
+      ? planProtectedFullwidthImeInsertion(
+          view.state.doc.toString(),
+          selection.from,
+          selection.to,
+          from,
+          to,
+          text,
+        )
+      : undefined;
     if (protectedInsertion !== undefined) {
       view.dispatch({
         changes: protectedInsertion,
@@ -6785,12 +9785,16 @@ function handleVisualInputBeforeCollapsedBlock(
     !/[\r\n]/u.test(text)
   ) {
     const structure = view.state.field(structureField, false);
-    const hiddenBoundary = hiddenPairedEnvironmentBoundaries(structure).find(
-      ({ range }) =>
-        from === to
-          ? from >= range.from && from <= range.to
-          : from < range.to && to > range.from,
-    );
+    const touchesAtomicBoundary = structure?.enabled === true &&
+      atomicDecorationTouchesInput(structure.atomic, from, to);
+    const hiddenBoundary = touchesAtomicBoundary
+      ? hiddenPairedEnvironmentBoundaries(structure).find(
+          ({ range }) =>
+            from === to
+              ? from >= range.from && from <= range.to
+              : from < range.to && to > range.from,
+        )
+      : undefined;
     if (hiddenBoundary !== undefined) {
       const boundary = hiddenBoundary.range;
       const pointAtTrailingEdge = from === to && from === boundary.to;
@@ -6843,8 +9847,10 @@ function handleVisualInputBeforeCollapsedBlock(
       case "tikzcd":
       case "tikzpicture":
       case "image":
+      case "tableOfContents":
       case "bibliography":
       case "documentEnd":
+      case "comment":
         boundary = record.replacement;
         break;
       default:
@@ -6902,18 +9908,12 @@ function handleVisualInputBeforeCollapsedBlock(
 }
 
 function handleEditorUpdate(update: ViewUpdate): void {
-  // Formula widgets/source reveals can emit a normal-looking `select`
-  // transaction while Chromium temporarily selects a broad decorated range.
-  // Do not promote that range to an IME replacement range. Genuine pointer
-  // drags are recorded explicitly by the mouseup handler above; ordinary
-  // updates may refresh only a collapsed caret.
+  // Do not promote Chromium's transient broad decorated selection to an IME
+  // replacement range. Genuine drags are recorded by the mouseup handler.
   rememberVisualImeStableSelection(update.view);
   scheduleEditorScrollbarUpdate(update.view);
   if (update.docChanged || update.selectionSet) {
     reconcileReferenceHoverOwner();
-  }
-  if (update.selectionSet) {
-    hideCitationHoverAfterSelectionLeave(update.state);
   }
   const fromLogicalLineNavigation = update.transactions.some(
     (transaction) => transaction.annotation(visualLogicalLineNavigation) === true,
@@ -6965,7 +9965,12 @@ function handleEditorUpdate(update: ViewUpdate): void {
     // character or pressing Ctrl+Space first.
     scheduleCompletionAfterMirroredEdit(update, false);
   }
-  if (update.selectionSet && !fromHost && !suppressHostEditMessages) {
+  if (
+    update.selectionSet &&
+    !update.docChanged &&
+    !fromHost &&
+    !suppressHostEditMessages
+  ) {
     post({
       protocol: VISUAL_EDITOR_PROTOCOL,
       type: "selection",
@@ -6982,7 +9987,7 @@ function handleEditorUpdate(update: ViewUpdate): void {
     update.viewportChanged ||
     preambleStateChanged
   ) {
-    persistEditorState(update.view);
+    schedulePersistEditorState(update.view);
   }
   if (
     update.docChanged ||
@@ -7153,24 +10158,43 @@ function applyInputFallback(
   runInputFallback(editor, message.action);
 }
 
+const VISUAL_COMPLETION_SCAN_LENGTH = 65_536;
+
+/** Classify completion context from CodeMirror's bounded rope slice. */
+function visualCompletionContextAtState(
+  state: EditorState,
+  requestedPosition: number,
+): ReturnType<typeof visualLatexCompletionContextAt> {
+  const position = Math.max(0, Math.min(state.doc.length, requestedPosition));
+  const sliceFrom = Math.max(0, position - VISUAL_COMPLETION_SCAN_LENGTH);
+  const local = visualLatexCompletionContextAt(
+    state.sliceDoc(sliceFrom, position),
+    position - sliceFrom,
+    inputFeatures.citationCommands,
+  );
+  return {
+    ...local,
+    from: sliceFrom + local.from,
+    to: position,
+  };
+}
+
 function visualProviderCompletionSource(
   context: CompletionContext,
 ): Promise<CompletionResult | null> | null {
   if (
     editor === undefined ||
     !inputFeatures.enabled ||
-    !inputFeatures.providerCompletions ||
+    !inputFeatures.internalCompletions ||
     context.state.readOnly ||
     context.state.selection.main.from !== context.pos ||
     context.state.selection.main.to !== context.pos
   ) {
     return null;
   }
-  const source = context.state.doc.toString();
-  const latexCompletion = visualLatexCompletionContextAt(
-    source,
+  const latexCompletion = visualCompletionContextAtState(
+    context.state,
     context.pos,
-    inputFeatures.citationCommands,
   );
   const from = latexCompletion.from;
   const query = latexCompletion.query;
@@ -7258,11 +10282,10 @@ function resolveCompletionResult(
       item.from > pending.from &&
       source.slice(pending.from, item.from) === "\\";
     if (providerSkippedLeadingBackslash) {
-      // VS Code completion providers are allowed to replace a narrower range
-      // than the range which activated completion. LaTeX Workshop deliberately
-      // replaces only the command name after `\\` (for example `usepackage`),
-      // while the visual editor's shared completion context starts at the
-      // backslash (`\\usepa`). CodeMirror filters all options against the one
+      // A catalog item may replace a narrower range than the range which
+      // activated completion, such as only the command name after `\\`, while
+      // the visual editor's shared context starts at the backslash (`\\usepa`).
+      // CodeMirror filters all options against the one
       // common `from`, so normalise only the filter label here; the item's own
       // range is still used by applyVisualProviderCompletion below.
       label = `\\${label}`;
@@ -7378,7 +10401,9 @@ function resolveCompletionReferencePreviewResult(
   }
   const root = document.createElement("div");
   root.className = "texleaf-completion-info texleaf-completion-reference-preview";
-  root.append(...createReferencePreviewElements(message));
+  root.append(...createReferencePreviewElements(message, () => {
+    editor?.requestMeasure();
+  }));
   pending.resolve(root);
 }
 
@@ -7403,7 +10428,7 @@ function attachVirtualLatexInput(
   input.classList.add("texleaf-virtual-latex-input");
   input.title = [
     input.title,
-    "支持 TeXLeaf 自动片段、Tab/空格触发与占位符；Ctrl+Space 显示 TeXLeaf/LaTeX Workshop 补全",
+    "支持 TeXLeaf 自动片段、Tab/空格触发与占位符；Ctrl+Space 显示内置 LaTeX 补全",
   ].filter(Boolean).join("\n");
   const binding: VirtualLatexInputBinding = {
     input,
@@ -8161,7 +11186,7 @@ function scheduleVirtualCompletion(binding: VirtualLatexInputBinding): void {
   if (binding.completionTimer !== undefined) {
     clearTimeout(binding.completionTimer);
   }
-  if (!inputFeatures.providerCompletions) {
+  if (!inputFeatures.internalCompletions) {
     return;
   }
   binding.completionTimer = setTimeout(() => {
@@ -8646,11 +11671,7 @@ function cancelPendingCompletionReferencePreviewRequests(): void {
   }
 }
 
-/**
- * Move by LaTeX source lines instead of browser visual rows. A wrapped source
- * line is therefore one stop, while a multiline formula remains wholly
- * exposed as the caret traverses its individual source lines.
- */
+/** Move by physical LaTeX source lines rather than browser soft-wrapped rows. */
 function handleVisualLogicalLineArrow(
   view: EditorView,
   direction: -1 | 1,
@@ -8734,11 +11755,10 @@ function revealVisualCollapsedSourceAtPointer(
   const formula = view.state.field(formulaField, false);
 
   // Display formulas use their own replacement layer instead of the structure
-  // field.  A standalone `\\begin{align...}` line can therefore be painted as
-  // an empty logical line immediately above the formula card.  Clicking that
-  // line must enter the complete formula source just like Up/Down navigation;
-  // otherwise the caret appears on an editable-looking blank line while the
-  // hidden begin/end commands remain inaccessible.
+  // field. When a browser coordinate lands inside a collapsed card, use the
+  // same reveal rule as logical Up/Down navigation. A physical source line is
+  // accepted as a begin/end boundary only when the formula owns that complete
+  // line; prose beside an inline display delimiter must keep the click.
   if (formula?.enabled === true && formula.visual) {
     const formulaPlans = formula.records
       .filter((record) =>
@@ -8750,12 +11770,17 @@ function revealVisualCollapsedSourceAtPointer(
         const replacement = visualFormulaReplacementRange(view.state, record);
         const beginLine = document.lineAt(record.from);
         const endLine = document.lineAt(Math.max(record.from, record.to - 1));
-        const onBoundaryLine = pointerLine.number === beginLine.number ||
-          pointerLine.number === endLine.number;
-        const insideReplacement = clickedLine === undefined &&
-          safePosition >= replacement.from &&
-          safePosition < replacement.to;
-        if (!onBoundaryLine && !insideReplacement) {
+        const ownsCompleteBoundaryLines =
+          replacement.from === beginLine.from &&
+          replacement.to >= endLine.to;
+        if (!visualPointerTargetsCollapsedSource(
+          safePosition,
+          clickedLine === undefined ? undefined : pointerLine.number,
+          ownsCompleteBoundaryLines
+            ? [beginLine.number, endLine.number]
+            : [],
+          replacement,
+        )) {
           return [];
         }
         const targetLine = pointerLine.number === endLine.number
@@ -8794,18 +11819,23 @@ function revealVisualCollapsedSourceAtPointer(
     return false;
   }
 
-  const candidateLines = new Map<number, { readonly from: number; readonly to: number }>();
+  const candidateLines = new Map<
+    number,
+    { readonly from: number; readonly to: number }
+  >();
 
   for (const { range } of hiddenBoundaries) {
     const sourceOffset = clampInteger(range.sourceFrom, 0, document.length);
     const boundaryLine = document.lineAt(sourceOffset);
-    const pointerTouchesReplacement = clickedLine === undefined &&
-      safePosition >= Math.min(range.from, range.sourceFrom) &&
-      safePosition < Math.max(range.to, range.sourceTo);
-    if (
-      pointerLine.number !== boundaryLine.number &&
-      !pointerTouchesReplacement
-    ) {
+    if (!visualPointerTargetsCollapsedSource(
+      safePosition,
+      clickedLine === undefined ? undefined : pointerLine.number,
+      range.block ? [boundaryLine.number] : [],
+      {
+        from: Math.min(range.from, range.sourceFrom),
+        to: Math.max(range.to, range.sourceTo),
+      },
+    )) {
       continue;
     }
     candidateLines.set(boundaryLine.number, {
@@ -8875,27 +11905,15 @@ function visualPointerLogicalLine(
   view: EditorView,
   event: MouseEvent,
 ): { readonly from: number; readonly to: number } | undefined {
-  // A collapsed block can leave a real, numbered source line whose `.cm-line`
-  // DOM node is empty.  CodeMirror is then free to map that node to the nearest
-  // editable replacement (often the preceding display formula or the theorem
-  // body), even though the gutter still paints the exact physical source line
-  // the user clicked.  Prefer that visible line number whenever available.
-  // This is especially important in large documents where `\begin{lemma}` and
-  // a nested formula can share one collapsed visual block.
-  const gutterLine = visualPointerGutterLogicalLine(view, event.clientY);
-  if (gutterLine !== undefined) {
-    return gutterLine;
-  }
   const lineElement = event.composedPath().find(
     (value): value is HTMLElement =>
       value instanceof HTMLElement && value.classList.contains("cm-line"),
   );
+  if (lineElement === undefined || !view.contentDOM.contains(lineElement)) {
+    return undefined;
+  }
   try {
-    const position = lineElement !== undefined && view.contentDOM.contains(lineElement)
-      ? view.posAtDOM(lineElement, 0)
-      : view.lineBlockAtHeight(
-          (event.clientY - view.documentTop) / Math.max(0.0001, view.scaleY),
-        ).from;
+    const position = view.posAtDOM(lineElement, 0);
     const line = view.state.doc.lineAt(
       clampInteger(position, 0, view.state.doc.length),
     );
@@ -8903,39 +11921,6 @@ function visualPointerLogicalLine(
   } catch {
     return undefined;
   }
-}
-
-function visualPointerGutterLogicalLine(
-  view: EditorView,
-  clientY: number,
-): { readonly from: number; readonly to: number } | undefined {
-  const candidates = Array.from(
-    view.dom.querySelectorAll<HTMLElement>(".cm-lineNumbers .cm-gutterElement"),
-  )
-    .map((element) => {
-      const text = element.textContent?.trim() ?? "";
-      const lineNumber = /^\d+$/u.test(text) ? Number(text) : Number.NaN;
-      return { element, lineNumber, box: element.getBoundingClientRect() };
-    })
-    .filter((candidate) =>
-      Number.isSafeInteger(candidate.lineNumber) &&
-      candidate.lineNumber >= 1 &&
-      candidate.lineNumber <= view.state.doc.lines &&
-      candidate.box.height > 0 &&
-      clientY >= candidate.box.top - 0.5 &&
-      clientY <= candidate.box.bottom + 0.5
-    )
-    .sort((left, right) => {
-      const leftMiddle = (left.box.top + left.box.bottom) / 2;
-      const rightMiddle = (right.box.top + right.box.bottom) / 2;
-      return Math.abs(leftMiddle - clientY) - Math.abs(rightMiddle - clientY);
-    });
-  const lineNumber = candidates[0]?.lineNumber;
-  if (lineNumber === undefined) {
-    return undefined;
-  }
-  const line = view.state.doc.line(lineNumber);
-  return { from: line.from, to: line.to };
 }
 
 function handleVisualTab(view: EditorView): boolean {
@@ -8966,10 +11951,10 @@ function handleVisualTab(view: EditorView): boolean {
   }
   if (snippetExitBlocked) {
     // A generated environment may still have a final snippet cursor after
-    // \end{...}.  Do not let that hidden field bypass the unified
-    // Shift+Enter exit rule.  Alignment environments have already consumed
-    // this Tab above by inserting `&`; ordinary environments simply retain
-    // the caret at their last editable field.
+    // \end{...}. Do not let that hidden field bypass the unified Shift+Enter
+    // exit rule. Alignment environments have already consumed this Tab above
+    // by inserting `&`; ordinary environments simply retain the caret at their
+    // last editable field.
     return true;
   }
   return inputFeatures.enabled
@@ -9073,6 +12058,10 @@ function scheduleCompletionAfterMirroredEdit(
   update: ViewUpdate,
   allowTypedTokenRetry: boolean,
 ): void {
+  for (const timer of mirroredCompletionRetryTimers) {
+    clearTimeout(timer);
+  }
+  mirroredCompletionRetryTimers = [];
   if (
     editor === undefined ||
     update.view.composing ||
@@ -9082,12 +12071,7 @@ function scheduleCompletionAfterMirroredEdit(
     return;
   }
   const head = update.state.selection.main.head;
-  const source = update.state.doc.toString();
-  const completionContext = visualLatexCompletionContextAt(
-    source,
-    head,
-    inputFeatures.citationCommands,
-  );
+  const completionContext = visualCompletionContextAtState(update.state, head);
   const emptyStructuredArgument = (
     completionContext.kind === "citation" ||
     completionContext.kind === "reference" ||
@@ -9096,13 +12080,17 @@ function scheduleCompletionAfterMirroredEdit(
     completionContext.kind === "argument"
   ) && completionContext.query.trim().length === 0;
   const line = update.state.doc.lineAt(head);
-  const linePrefixBeforeToken = source.slice(line.from, completionContext.from);
+  const linePrefixBeforeToken = update.state.sliceDoc(
+    line.from,
+    completionContext.from,
+  );
+  const characterBefore = update.state.sliceDoc(Math.max(0, head - 1), head);
   const typedCommand = allowTypedTokenRetry &&
     completionContext.kind === "command" &&
     shouldActivateVisualProviderCompletion({
       contextKind: completionContext.kind,
       query: completionContext.query,
-      characterBefore: source.slice(Math.max(0, head - 1), head),
+      characterBefore,
       explicit: false,
     });
   const lineStartSnippet = allowTypedTokenRetry &&
@@ -9111,13 +12099,14 @@ function scheduleCompletionAfterMirroredEdit(
     shouldActivateVisualProviderCompletion({
       contextKind: completionContext.kind,
       query: completionContext.query,
-      characterBefore: source.slice(Math.max(0, head - 1), head),
+      characterBefore,
       explicit: false,
     });
   if (!emptyStructuredArgument && !typedCommand && !lineStartSnippet) {
     return;
   }
   const revision = clientRevision;
+  const documentLength = update.state.doc.length;
   // Let the mirrored TextDocument accept an edit before asking the host for
   // candidates. A selection move has no pending edit, but using the same short
   // delay prevents visible open/close churn while clicking into `\\cite{}`.
@@ -9126,7 +12115,7 @@ function scheduleCompletionAfterMirroredEdit(
     if (
       view === undefined ||
       clientRevision !== revision ||
-      view.state.doc.toString() !== source ||
+      view.state.doc.length !== documentLength ||
       view.state.selection.main.from !== head ||
       view.state.selection.main.head !== head
     ) {
@@ -9140,8 +12129,10 @@ function scheduleCompletionAfterMirroredEdit(
   // second guarded attempt covers a slow project-index acknowledgement: it is
   // a no-op while a valid picker is open and only retries when the first
   // asynchronous provider request closed without candidates.
-  setTimeout(attempt, 220);
-  setTimeout(attempt, 700);
+  mirroredCompletionRetryTimers = [
+    setTimeout(attempt, 220),
+    setTimeout(attempt, 700),
+  ];
 }
 
 function registerVisualSnippetFields(
@@ -9403,17 +12394,17 @@ const VISUAL_FORMAT_MAX_SOURCE_LENGTH = 5_000_000;
 const VISUAL_FORMAT_MAX_LINE_COUNT = 200_000;
 
 /**
- * Normalize only leading LaTeX indentation in one local transaction. The
- * fine-grained plan maps selections exactly; the coalesced plan keeps the
- * Webview-to-host edit payload bounded for long documents.
+ * Normalize only LaTeX leading indentation in one local transaction. The fine
+ * plan maps every selection accurately; the coalesced plan stays within the
+ * bounded Webview-to-host edit protocol used by long documents.
  */
 function runVisualFormatDocument(view: EditorView): boolean {
   if (toolbarBusy) {
-    setStatus("warning", "当前任务结束后才能整理源码缩进。", 3_500);
+    setStatus("warning", "当前任务结束后才能排版源码缩进。", 3_500);
     return true;
   }
   if (view.state.readOnly) {
-    setStatus("warning", "当前文档为只读，不能整理源码缩进。", 3_500);
+    setStatus("warning", "当前文档为只读，不能排版源码缩进。", 3_500);
     return true;
   }
   if (
@@ -9421,7 +12412,7 @@ function runVisualFormatDocument(view: EditorView): boolean {
     view.composing ||
     visualImeOwnsKeyboardInput(view)
   ) {
-    setStatus("warning", "请先完成当前中文输入，再整理源码缩进。", 3_500);
+    setStatus("warning", "请先完成当前中文输入，再执行一键排版。", 3_500);
     return true;
   }
 
@@ -9432,7 +12423,7 @@ function runVisualFormatDocument(view: EditorView): boolean {
   ) {
     setStatus(
       "warning",
-      "文档过大，为避免可视化编辑器卡顿，本次没有整理源码缩进。",
+      "文档过大，为避免可视化编辑器卡顿，本次没有执行一键排版。",
       5_000,
     );
     return true;
@@ -9443,7 +12434,7 @@ function runVisualFormatDocument(view: EditorView): boolean {
   if (plan.exceededChangeLimit) {
     setStatus(
       "warning",
-      "需要调整的行数超过安全上限，本次没有执行部分整理。",
+      "需要调整的行数超过安全上限，本次没有执行部分排版。",
       5_000,
     );
     return true;
@@ -9454,9 +12445,12 @@ function runVisualFormatDocument(view: EditorView): boolean {
     return true;
   }
 
-  const fineChangeSet = view.state.changes(
-    plan.changes.map(({ from, to, insert }) => ({ from, to, insert })),
-  );
+  const fineChanges = plan.changes.map(({ from, to, insert }) => ({
+    from,
+    to,
+    insert,
+  }));
+  const fineChangeSet = view.state.changes(fineChanges);
   const mappedSelection = view.state.selection.map(fineChangeSet);
   const transport = coalesceVisualLatexIndentationChanges(
     sourceBefore,
@@ -9465,7 +12459,7 @@ function runVisualFormatDocument(view: EditorView): boolean {
   if (transport.exceededLimit || transport.changes.length === 0) {
     setStatus(
       "warning",
-      "整理结果超过安全同步上限，本次没有修改文档。",
+      "排版结果超过安全同步上限，本次没有修改文档。",
       5_000,
     );
     return true;
@@ -9533,7 +12527,7 @@ function applyVisualEnvironmentExit(
   if (plan === undefined) {
     return false;
   }
-  // Shift+Enter owns the structural exit.  Retire both CodeMirror's native
+  // Shift+Enter owns the structural exit. Retire both CodeMirror's native
   // snippet state and TeXLeaf's nested frame stack so a later Tab cannot jump
   // back into, or beyond, the environment that has just been left.
   clearSnippet(view);
@@ -9659,40 +12653,47 @@ function insertVisualMathPairTrigger(
 
 function movePastVisualLatexCloser(
   view: EditorView,
-  deferAtActiveSnippetFieldEnd: boolean,
+  deferToActiveSnippet: boolean,
 ): boolean {
   const range = view.state.selection.main;
   if (!range.empty) {
     return false;
   }
   const closer = view.state.sliceDoc(range.head, range.head + 1);
-  if (closer !== ")" && closer !== "]" && closer !== "}") {
-    return false;
+  const isSingleCharacterCloser = closer === ")" || closer === "]" || closer === "}";
+  if (isSingleCharacterCloser) {
+    const transaction = insertBracket(view.state, closer);
+    if (transaction !== null) {
+      view.dispatch(transaction);
+      return true;
+    }
   }
-  const transaction = insertBracket(view.state, closer);
-  if (transaction !== null) {
-    view.dispatch(transaction);
-    return true;
-  }
+
   if (
-    deferAtActiveSnippetFieldEnd &&
-    closer === "}" &&
-    visualSnippetFieldEndsAt(view.state, range.head)
+    deferToActiveSnippet &&
+    view.state.field(visualSnippetFramesField).length > 0
   ) {
-    // A CodeMirror-tracked inner pair was handled above. If this closer is not
-    // tracked and exactly terminates the active placeholder, it belongs to the
-    // snippet itself (for example the numerator in `\frac{...}{...}`), so the
-    // snippet must select its next field rather than leave the caret between
-    // the two arguments.
+    // A CodeMirror-tracked pair typed *inside* the current field was handled
+    // above. Every untracked closer supplied by the snippet itself must wait
+    // until moveVisualSnippetField has had its turn, including `)`, `]`, `}`
+    // and command-shaped closers separated by whitespace. Otherwise a plan
+    // such as `\lim_{ @0 \to @1 } @2` can jump over @1 from @0. The late
+    // invocation of this function still handles `\right)` / `\]` when the
+    // environment guard intentionally prevents the snippet from leaving.
     return false;
   }
 
-  // A closer supplied by a VS Code/LaTeX Workshop snippet is not registered
+  // A closer supplied by a built-in or user snippet is not registered
   // in CodeMirror's close-bracket state. Structural Tabout still knows that
-  // `}` closes the local `_ { ... }` group (and that `\\)` closes inline
-  // math), so it must run before advancing or exiting the enclosing snippet.
+  // `}` closes the local `_ { ... }` group and also recognizes command-shaped
+  // closers such as `\\right)`, `\\)` and `\\]`. Run it even when the next
+  // character is a backslash or whitespace, before a display-math snippet's
+  // environment guard can consume Tab without moving the caret.
   const plan = planTabout(view.state.doc.toString(), range.head);
   if (plan === undefined || plan.from !== range.head || plan.to <= range.head) {
+    if (!isSingleCharacterCloser) {
+      return false;
+    }
     // `planTabout` intentionally requires a math region. Reference, citation,
     // label and ordinary command arguments also need a local Tab target when
     // their `}` was inserted by a provider rather than CodeMirror's bracket
@@ -9712,13 +12713,6 @@ function movePastVisualLatexCloser(
     annotations: Transaction.addToHistory.of(false),
   });
   return true;
-}
-
-function visualSnippetFieldEndsAt(state: EditorState, position: number): boolean {
-  const frame = state.field(visualSnippetFramesField).at(-1);
-  return frame?.ranges.some(
-    (range) => range.field === frame.active && range.to === position,
-  ) ?? false;
 }
 
 function requestInput(view: EditorView, action: VisualEditorInputAction): boolean {
@@ -10055,7 +13049,7 @@ function updateIssueCard(state: EditorState): void {
         diagnostic.message,
       );
     } else {
-      aiSuggestionTitle.textContent = `本行有 ${lineDiagnostics.length} 个文档问题`;
+      aiSuggestionTitle.textContent = `本行有 ${lineDiagnostics.length} 个 AI 写作问题`;
       renderDiagnosticCardItems(lineDiagnostics);
     }
     const insight = diagnosticInsights.get(diagnostic.id);
@@ -10238,6 +13232,15 @@ function runAiIssueAction(action: "apply" | "ignore"): void {
 interface StructurePresentation {
   readonly decorations: DecorationSet;
   readonly atomic: DecorationSet;
+  readonly selectionRanges: VisualSelectionPresentationRangeSet;
+}
+
+function emptyStructurePresentation(): StructurePresentation {
+  return {
+    decorations: Decoration.none,
+    atomic: Decoration.none,
+    selectionRanges: buildVisualSelectionPresentationRangeSet([]),
+  };
 }
 
 function buildStructurePresentation(
@@ -10249,17 +13252,32 @@ function buildStructurePresentation(
 ): StructurePresentation {
   const decorations: Range<Decoration>[] = [];
   const atomic: Range<Decoration>[] = [];
+  const selectionRanges: VisualSelectionPresentationRange[] = [];
+  const addSelectionRange = (from: number, to: number): void => {
+    if (from < to && validRange(from, to, state.doc.length)) {
+      selectionRanges.push({ from, to });
+    }
+  };
+  // Materialise the CodeMirror rope once for the presentation passes that
+  // genuinely need source text. Reference chips must never rescan every label
+  // from inside their per-record loop.
+  const sourceText = state.doc.toString();
+  const hasReferenceChips = records.some((record) => record.kind === "reference");
+  const structureReferenceIndex = hasReferenceChips
+    ? indexVisualStructureReferences(sourceText, records)
+    : new Map<string, VisualStructureReferencePresentation>();
+  const formulaReferenceCounts = new Map<string, number>();
+  for (const formula of hasReferenceChips ? formulaRecords : []) {
+    for (const label of formula.labels) {
+      formulaReferenceCounts.set(
+        label.key,
+        (formulaReferenceCounts.get(label.key) ?? 0) + 1,
+      );
+    }
+  }
   const manualBibliographies = records.filter(
     (record): record is VisualBibliographyRecord =>
       record.kind === "bibliography" && record.manual,
-  );
-
-  addVisualLeadingIndentDecorations(
-    decorations,
-    records,
-    preambleExpanded,
-    sourceReveal,
-    state,
   );
 
   const addReplacement = (
@@ -10269,24 +13287,67 @@ function buildStructurePresentation(
   ): boolean => {
     if (
       !validRange(range.from, range.to, state.doc.length) ||
-      range.from === range.to ||
-      (!force && (
-        selectionTouchesRange(state, range.sourceFrom, range.sourceTo) ||
-        sourceRevealTouchesRange(sourceReveal, range.sourceFrom, range.sourceTo)
-      ))
+      range.from === range.to
     ) {
       return false;
     }
+    const revealedBySource = sourceRevealTouchesRange(
+      sourceReveal,
+      range.sourceFrom,
+      range.sourceTo,
+    );
+    if (!force && !revealedBySource) {
+      addSelectionRange(range.sourceFrom, range.sourceTo);
+    }
+    if (
+      !force && (
+        selectionTouchesRange(state, range.sourceFrom, range.sourceTo) ||
+        revealedBySource
+      )
+    ) {
+      return false;
+    }
+    const replacementSpec = {
+      block: range.block,
+      inclusiveStart: range.block,
+      // A terminal block must absorb CodeMirror's zero-length EOF text block;
+      // otherwise both that native block and this widget render the last line
+      // number. Every non-terminal/inline replacement stays end-exclusive.
+      inclusiveEnd: visualBlockReplacementInclusiveEnd(
+        range.block,
+        range.to,
+        state.doc.length,
+      ),
+    } as const;
     const decoration = widget === undefined
-      ? Decoration.replace({ block: range.block, inclusive: false })
-      : Decoration.replace({ widget, block: range.block, inclusive: false });
+      ? Decoration.replace(replacementSpec)
+      : Decoration.replace({ widget, ...replacementSpec });
     decorations.push(decoration.range(range.from, range.to));
     atomic.push(decoration.range(range.from, range.to));
     return true;
   };
 
+  const groupedFrontMatter: VisualReplacementRange[] = [];
+  for (const record of records) {
+    const range = record.kind === "maketitle" ? record.frontMatter?.replacement : undefined;
+    if (record.kind === "maketitle" && range !== undefined &&
+      addReplacement(range, new MakeTitleWidget(record, false, true))) {
+      groupedFrontMatter.push(range);
+    }
+  }
+
+  for (const record of records) {
+    if (record.kind !== "maketitle") continue;
+    for (const range of record.metadataReplacements ?? []) {
+      if (!groupedFrontMatter.some(group => range.from >= group.from && range.to <= group.to) && addReplacement(range, undefined)) groupedFrontMatter.push(range);
+    }
+  }
+
   for (const record of records) {
     const start = visualStructureStart(record);
+    if (record.kind !== "preamble" && groupedFrontMatter.some(range => start >= range.from && start < range.to)) {
+      continue;
+    }
     if (
       record.kind !== "bibliography" &&
       manualBibliographies.some((bibliography) =>
@@ -10327,14 +13388,29 @@ function buildStructurePresentation(
         addPreambleLineDecorations(decorations, record, state);
         break;
       }
-      case "maketitle":
+      case "maketitle": {
+        const insideFrame = frameContainsSourceRange(
+          records,
+          record.replacement.sourceFrom,
+          record.replacement.sourceTo,
+        );
         addReplacement(
-          record.replacement,
-          new MakeTitleWidget(record),
+          insideFrame
+            ? { ...record.replacement, block: true }
+            : record.replacement,
+          new MakeTitleWidget(record, insideFrame),
         );
         break;
+      }
       case "heading":
-        addHeadingDecorations(decorations, atomic, record, sourceReveal, state);
+        addHeadingDecorations(
+          decorations,
+          atomic,
+          record,
+          sourceReveal,
+          state,
+          addSelectionRange,
+        );
         break;
       case "frame":
         addFrameDecorations(decorations, record, state, addReplacement);
@@ -10364,36 +13440,54 @@ function buildStructurePresentation(
           record,
           state,
           addReplacement,
+          frameContainsSourceRange(
+            records,
+            record.begin.sourceFrom,
+            record.end.sourceTo,
+          ),
         );
         break;
-      case "list":
+      case "list": {
+        const containingTheorem = innermostContainingTheorem(records, record);
         addListDecorations(
           decorations,
           atomic,
           record,
           state,
           addReplacement,
-          innermostContainingTheorem(records, record)?.style,
+          containingTheorem?.style,
+          innermostContainingFrame(records, record) !== undefined,
+          addSelectionRange,
         );
         break;
+      }
       case "label":
         addReplacement(record.replacement, new LabelWidget(record));
         break;
       case "reference": {
+        const valid = validRange(record.from, record.to, state.doc.length) &&
+          record.from < record.to;
+        const revealedBySource = sourceRevealTouchesRange(
+          sourceReveal,
+          record.from,
+          record.to,
+        );
+        if (valid && !revealedBySource) {
+          addSelectionRange(record.from, record.to);
+        }
         if (
-          validRange(record.from, record.to, state.doc.length) &&
+          valid &&
           !selectionTouchesRange(state, record.from, record.to) &&
-          !sourceRevealTouchesRange(sourceReveal, record.from, record.to)
+          !revealedBySource
         ) {
           const decoration = Decoration.replace({
             widget: new ReferenceWidget(
-               record,
-               referenceChipPresentations(
-                 state,
-                 records,
-                 formulaRecords,
-                 record.keys,
-               ),
+              record,
+              referenceChipPresentations(
+                structureReferenceIndex,
+                formulaReferenceCounts,
+                record.keys,
+              ),
             ),
             inclusive: false,
           });
@@ -10403,22 +13497,72 @@ function buildStructurePresentation(
         break;
       }
       case "table":
-        addReplacement(record.replacement, new TableWidget(record));
+        addReplacement(
+          record.replacement,
+          new TableWidget(
+            record,
+            frameContainsSourceRange(
+              records,
+              record.replacement.sourceFrom,
+              record.replacement.sourceTo,
+            ),
+          ),
+        );
         break;
       case "tikzcd":
-        addReplacement(record.replacement, new TikzcdWidget(record));
+        addReplacement(
+          record.replacement,
+          new TikzcdWidget(
+            record,
+            frameContainsSourceRange(
+              records,
+              record.replacement.sourceFrom,
+              record.replacement.sourceTo,
+            ),
+          ),
+        );
         break;
       case "tikzpicture":
-        addReplacement(record.replacement, new TikzpictureWidget(record));
+        addReplacement(
+          record.replacement,
+          new TikzpictureWidget(
+            record,
+            frameContainsSourceRange(
+              records,
+              record.replacement.sourceFrom,
+              record.replacement.sourceTo,
+            ),
+          ),
+        );
         break;
       case "image":
-        addReplacement(record.replacement, new ImageWidget(record));
+        addReplacement(
+          record.replacement,
+          new ImageWidget(
+            record,
+            frameContainsSourceRange(
+              records,
+              record.replacement.sourceFrom,
+              record.replacement.sourceTo,
+            ),
+          ),
+        );
         break;
       case "citation": {
+        const valid = validRange(record.from, record.to, state.doc.length) &&
+          record.from < record.to;
+        const revealedBySource = sourceRevealTouchesRange(
+          sourceReveal,
+          record.from,
+          record.to,
+        );
+        if (valid && !revealedBySource) {
+          addSelectionRange(record.from, record.to);
+        }
         if (
-          validRange(record.from, record.to, state.doc.length) &&
+          valid &&
           !selectionTouchesRange(state, record.from, record.to) &&
-          !sourceRevealTouchesRange(sourceReveal, record.from, record.to)
+          !revealedBySource
         ) {
           const decoration = Decoration.replace({
             widget: new CitationWidget(record),
@@ -10436,12 +13580,17 @@ function buildStructurePresentation(
           record,
           sourceReveal,
           state,
+          addSelectionRange,
         );
         break;
       case "accent": {
+        const valid = validRange(record.from, record.to, state.doc.length) &&
+          record.from < record.to;
+        if (valid) {
+          addSelectionRange(record.from, record.to);
+        }
         if (
-          validRange(record.from, record.to, state.doc.length) &&
-          record.from < record.to &&
+          valid &&
           !selectionTouchesRange(state, record.from, record.to)
         ) {
           const decoration = Decoration.replace({
@@ -10456,13 +13605,46 @@ function buildStructurePresentation(
       case "bibliography":
         addReplacement(
           record.replacement,
-          new BibliographyWidget(record),
+          new BibliographyWidget(
+            record,
+            frameContainsSourceRange(
+              records,
+              record.replacement.sourceFrom,
+              record.replacement.sourceTo,
+            ),
+          ),
         );
+        break;
+      case "tableOfContents":
+        addReplacement(
+          record.replacement,
+          new TableOfContentsWidget(
+            record,
+            frameContainsSourceRange(
+              records,
+              record.replacement.sourceFrom,
+              record.replacement.sourceTo,
+            ),
+          ),
+        );
+        break;
+      case "comment":
+        addReplacement(record.replacement, new CommentWidget(record.replacement));
         break;
       case "documentEnd":
         addReplacement(
           record.replacement,
-          new DocumentEndWidget(record),
+          new DocumentEndWidget(
+            record,
+            visualDocumentEndFollowingLinePosition(
+                state.doc,
+                record.replacement.sourceTo,
+              ) !== undefined,
+            visualTerminalSyntheticEofLinePosition(
+                state.doc,
+                record.replacement.sourceTo,
+              ) !== undefined,
+          ),
         );
         break;
     }
@@ -10470,39 +13652,8 @@ function buildStructurePresentation(
   return {
     decorations: Decoration.set(decorations, true),
     atomic: Decoration.set(atomic, true),
+    selectionRanges: buildVisualSelectionPresentationRangeSet(selectionRanges),
   };
-}
-
-function addVisualLeadingIndentDecorations(
-  decorations: Range<Decoration>[],
-  records: readonly VisualStructureRecord[],
-  preambleExpanded: boolean,
-  sourceReveal: StructureSourceReveal | undefined,
-  state: EditorState,
-): void {
-  const expandedPreamble = preambleExpanded
-    ? records.find(
-        (record): record is VisualPreambleRecord => record.kind === "preamble",
-      )
-    : undefined;
-  for (const plan of planVisualLeadingIndentation(state.doc.toString())) {
-    if (plan.hideLength === 0) {
-      continue;
-    }
-    const from = plan.lineFrom;
-    const to = from + plan.hideLength;
-    if (
-      (expandedPreamble !== undefined &&
-        from >= expandedPreamble.from && from < expandedPreamble.to) ||
-      sourceRevealTouchesRange(sourceReveal, from, to) ||
-      selectionTouchesRange(state, from, to)
-    ) {
-      continue;
-    }
-    decorations.push(
-      Decoration.mark({ class: "texleaf-visual-leading-indent" }).range(from, to),
-    );
-  }
 }
 
 function addTextStyleDecorations(
@@ -10511,19 +13662,33 @@ function addTextStyleDecorations(
   record: VisualTextStyleRecord,
   sourceReveal: StructureSourceReveal | undefined,
   state: EditorState,
+  addSelectionRange: (from: number, to: number) => void,
 ): void {
   const transparent = record.transparent === true;
+  if (
+    !validRange(record.from, record.to, state.doc.length) ||
+    !validRange(record.contentFrom, record.contentTo, state.doc.length)
+  ) {
+    return;
+  }
+  const revealedBySource = transparent && (
+    sourceRevealTouchesRange(sourceReveal, record.prefixFrom, record.prefixTo) ||
+    sourceRevealTouchesRange(sourceReveal, record.suffixFrom, record.suffixTo)
+  );
+  if (transparent) {
+    if (!revealedBySource) {
+      addSelectionRange(record.prefixFrom, record.prefixTo);
+      addSelectionRange(record.suffixFrom, record.suffixTo);
+    }
+  } else {
+    addSelectionRange(record.from, record.to);
+  }
   const wrapperExposed = transparent
     ? selectionTouchesRange(state, record.prefixFrom, record.prefixTo) ||
       selectionTouchesRange(state, record.suffixFrom, record.suffixTo) ||
-      sourceRevealTouchesRange(sourceReveal, record.prefixFrom, record.prefixTo) ||
-      sourceRevealTouchesRange(sourceReveal, record.suffixFrom, record.suffixTo)
+      revealedBySource
     : selectionTouchesRange(state, record.from, record.to);
-  if (
-    !validRange(record.from, record.to, state.doc.length) ||
-    !validRange(record.contentFrom, record.contentTo, state.doc.length) ||
-    wrapperExposed
-  ) {
+  if (wrapperExposed) {
     return;
   }
   for (const [from, to, edge] of [
@@ -10534,6 +13699,7 @@ function addTextStyleDecorations(
       continue;
     }
     const hidden = Decoration.replace({
+      ...(record.command === "footnote" ? { widget: new AccentWidget({ kind: "accent", from, to, text: edge === "prefix" ? "〔脚注：" : "〕" }) } : {}),
       ...(transparent && edge === "prefix"
         ? { widget: new TransparentWrapperEditWidget(record) }
         : {}),
@@ -10603,6 +13769,19 @@ class TransparentWrapperEditWidget extends WidgetType {
   }
 }
 
+class CommentWidget extends WidgetType {
+  public constructor(private readonly range: VisualReplacementRange) { super(); }
+  public override eq(other: CommentWidget): boolean {
+    return this.range.sourceFrom === other.range.sourceFrom && this.range.sourceTo === other.range.sourceTo;
+  }
+  public override toDOM(view: EditorView): HTMLElement {
+    const chip = createInlineEnvironmentEditChip(view, this.range.sourceFrom, this.range.sourceTo, "注释 · 点击展开");
+    chip.classList.add("texleaf-comment-preview");
+    return this.range.block ? createMeasuredBlockShell(chip, "texleaf-comment-shell") : chip;
+  }
+  public override ignoreEvent(): boolean { return true; }
+}
+
 class AccentWidget extends WidgetType {
   public constructor(private readonly record: VisualAccentRecord) {
     super();
@@ -10662,6 +13841,7 @@ function addHeadingDecorations(
   record: VisualHeadingRecord,
   sourceReveal: StructureSourceReveal | undefined,
   state: EditorState,
+  addSelectionRange: (from: number, to: number) => void,
 ): void {
   if (!validRange(record.from, record.to, state.doc.length)) {
     return;
@@ -10678,11 +13858,19 @@ function addHeadingDecorations(
     [record.prefixFrom, record.prefixTo],
     [record.suffixFrom, record.suffixTo],
   ] as const) {
+    if (from < to) {
+      addSelectionRange(from, to);
+    }
     if (from < to && !selectionTouchesRange(state, from, to)) {
       const decoration = Decoration.replace({ inclusive: false });
       decorations.push(decoration.range(from, to));
       atomic.push(decoration.range(from, to));
     }
+  }
+  if (record.generatedTitle && !selectionTouchesRange(state, record.from, record.to)) {
+    decorations.push(Decoration.widget({
+      widget: new HeadingEditWidget(record, true), side: -1,
+    }).range(record.to));
   }
   if (record.contentFrom < record.contentTo) {
     if (record.number !== undefined) {
@@ -10698,6 +13886,7 @@ function addHeadingDecorations(
         class: `texleaf-heading texleaf-heading-level-${record.level}`,
         attributes: {
           title: `${record.command} 标题；直接编辑文字，或点击“编辑标题”展开完整命令`,
+          "data-texleaf-line-number-anchor-id": String(record.from),
         },
       }).range(record.contentFrom, record.contentTo),
     );
@@ -10737,20 +13926,22 @@ class HeadingNumberWidget extends WidgetType {
 }
 
 class HeadingEditWidget extends WidgetType {
-  public constructor(private readonly record: VisualHeadingRecord) {
+  public constructor(private readonly record: VisualHeadingRecord, private readonly showTitle = false) {
     super();
   }
 
   public override eq(other: HeadingEditWidget): boolean {
     return this.record.command === other.record.command &&
-      this.record.title === other.record.title;
+      this.record.title === other.record.title && this.showTitle === other.showTitle;
   }
 
   public override toDOM(view: EditorView): HTMLElement {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "texleaf-environment-edit-chip texleaf-heading-edit-chip";
-    button.textContent = "编辑标题";
+    button.className = this.showTitle
+      ? `texleaf-heading texleaf-heading-generated texleaf-heading-level-${this.record.level}`
+      : "texleaf-environment-edit-chip texleaf-heading-edit-chip";
+    button.textContent = this.showTitle ? this.record.title : "编辑标题";
     button.title = `原位展开并编辑完整 \\${this.record.command} 命令`;
     button.setAttribute("aria-label", `编辑完整 \\${this.record.command} 命令`);
     wireSourcePointer(button, view, this.record.from, this.record.to);
@@ -10772,10 +13963,11 @@ function addTheoremDecorations(
     widget: WidgetType | undefined,
     force?: boolean,
   ) => boolean,
+  insideFrame: boolean,
 ): void {
   const beginReplaced = addReplacement(
     record.begin,
-    new TheoremBeginWidget(record),
+    new TheoremBeginWidget(record, insideFrame),
   );
   for (const label of record.labels) {
     const alreadyCoveredByHeader = label.replacement.from >= record.begin.from &&
@@ -10786,7 +13978,7 @@ function addTheoremDecorations(
   }
   const endReplaced = addReplacement(
     record.end,
-    record.end.block ? new TheoremEndWidget(record) : undefined,
+    new TheoremEndWidget(record, insideFrame),
   );
   if (!validRange(record.bodyFrom, record.bodyTo, state.doc.length)) {
     return;
@@ -10976,21 +14168,26 @@ function addListDecorations(
     force?: boolean,
   ) => boolean,
   theoremStyle: VisualTheoremRecord["style"] | undefined,
+  insideFrame: boolean,
+  addSelectionRange: (from: number, to: number) => void,
 ): void {
   addReplacement(
     record.begin,
-    new ListBoundaryWidget(record, "begin", theoremStyle),
+    new ListBoundaryWidget(record, "begin", theoremStyle, insideFrame),
   );
   addReplacement(
     record.end,
-    new ListBoundaryWidget(record, "end", theoremStyle),
+    new ListBoundaryWidget(record, "end", theoremStyle, insideFrame),
   );
   for (const item of record.items) {
     if (
       !validRange(item.from, item.to, state.doc.length) ||
-      item.from === item.to ||
-      selectionTouchesRange(state, item.sourceFrom, item.sourceTo)
+      item.from === item.to
     ) {
+      continue;
+    }
+    addSelectionRange(item.sourceFrom, item.sourceTo);
+    if (selectionTouchesRange(state, item.sourceFrom, item.sourceTo)) {
       continue;
     }
     const decoration = Decoration.replace({
@@ -11017,6 +14214,33 @@ function innermostContainingTheorem(
     )[0];
 }
 
+function innermostContainingFrame(
+  records: readonly VisualStructureRecord[],
+  nested: VisualListRecord,
+): VisualFrameRecord | undefined {
+  return records
+    .filter((record): record is VisualFrameRecord =>
+      record.kind === "frame" &&
+      nested.begin.sourceFrom >= record.bodyFrom &&
+      nested.end.sourceTo <= record.bodyTo
+    )
+    .sort((left, right) =>
+      (left.bodyTo - left.bodyFrom) - (right.bodyTo - right.bodyFrom)
+    )[0];
+}
+
+function frameContainsSourceRange(
+  records: readonly VisualStructureRecord[],
+  sourceFrom: number,
+  sourceTo: number,
+): boolean {
+  return records.some((record) =>
+    record.kind === "frame" &&
+    sourceFrom >= record.bodyFrom &&
+    sourceTo <= record.bodyTo
+  );
+}
+
 function containingAbstractForKeywords(
   records: readonly VisualStructureRecord[],
   nested: VisualKeywordsRecord,
@@ -11035,11 +14259,44 @@ function containingAbstractForKeywords(
 function createMeasuredBlockShell(
   content: HTMLElement,
   className: string,
+  view?: EditorView,
+  sourceFrom?: number,
 ): HTMLDivElement {
   const shell = document.createElement("div");
   shell.className = `texleaf-measured-block-shell ${className}`;
   shell.append(content);
+  if (view !== undefined && sourceFrom !== undefined) {
+    installVisualSourceIndentation(shell, view, sourceFrom);
+  }
   return shell;
+}
+
+function installVisualSourceIndentation(
+  element: HTMLElement,
+  view: EditorView,
+  sourceFrom: number,
+): void {
+  const bounded = clampInteger(sourceFrom, 0, view.state.doc.length);
+  element.classList.add("texleaf-source-indented-block");
+  element.dataset.texleafIndentFrom = String(bounded);
+  refreshVisualSourceIndentation(element, view.state, bounded);
+}
+
+function refreshVisualSourceIndentation(
+  element: HTMLElement,
+  state: EditorState,
+  sourceFrom: number,
+): void {
+  const bounded = clampInteger(sourceFrom, 0, state.doc.length);
+  const line = state.doc.lineAt(bounded);
+  const prefix = state.sliceDoc(line.from, bounded);
+  const columns = visualSourceIndentationColumns(prefix, state.tabSize);
+  const columnText = String(columns);
+  if (element.dataset.texleafIndentColumns === columnText) {
+    return;
+  }
+  element.dataset.texleafIndentColumns = columnText;
+  element.style.setProperty("--texleaf-source-indent", `${columns}ch`);
 }
 
 class PreambleHeaderWidget extends WidgetType {
@@ -11080,7 +14337,12 @@ class PreambleHeaderWidget extends WidgetType {
       event.stopPropagation();
       togglePreamble(view, this.record, !this.expanded);
     });
-    return createMeasuredBlockShell(button, "texleaf-preamble-shell");
+    return createMeasuredBlockShell(
+      button,
+      "texleaf-preamble-shell",
+      view,
+      this.record.from,
+    );
   }
 
   public override ignoreEvent(): boolean {
@@ -11089,19 +14351,25 @@ class PreambleHeaderWidget extends WidgetType {
 }
 
 class MakeTitleWidget extends WidgetType {
-  public constructor(private readonly record: VisualMakeTitleRecord) {
+  public constructor(
+    private readonly record: VisualMakeTitleRecord,
+    private readonly insideFrame = false,
+    private readonly grouped = false,
+  ) {
     super();
   }
 
   public override eq(other: MakeTitleWidget): boolean {
-    return visualPresentationKey(this.record) === visualPresentationKey(other.record);
+    return visualPresentationKey(this.record) === visualPresentationKey(other.record) &&
+      visualMakeTitlePositionKey(this.record) === visualMakeTitlePositionKey(other.record) &&
+      this.insideFrame === other.insideFrame && this.grouped === other.grouped;
   }
 
   public override toDOM(view: EditorView): HTMLElement {
     const root = document.createElement("section");
     root.className = "texleaf-title-card";
     root.tabIndex = 0;
-    root.setAttribute("aria-label", "文章标题、作者、单位与邮箱预览");
+    root.setAttribute("aria-label", this.grouped ? "文章文首预览" : "文章标题、作者、单位与邮箱预览");
     wireSourcePointer(
       root,
       view,
@@ -11111,11 +14379,18 @@ class MakeTitleWidget extends WidgetType {
 
     const heading = document.createElement("h1");
     heading.className = "texleaf-document-title";
-    heading.textContent = this.record.title?.text || "未设置标题";
+    heading.append(createInlineContentElement(this.record.title?.segments ?? [], this.record.title?.text || "未设置标题", "texleaf-title-content", view));
     if (this.record.title !== undefined) {
-      wireSourcePointer(heading, view, this.record.title.from, this.record.title.to);
+      wireMetadataSourcePointer(heading, view, this.record.title);
     }
     root.append(heading);
+    if (this.record.title?.definition !== undefined) {
+      const definition = document.createElement("span");
+      definition.className = "texleaf-title-definition";
+      definition.textContent = "查看标题定义";
+      wireMetadataSourcePointer(definition, view, this.record.title.definition);
+      root.append(definition);
+    }
 
     if (this.record.authors.length > 0) {
       const authors = document.createElement("div");
@@ -11123,8 +14398,9 @@ class MakeTitleWidget extends WidgetType {
       for (const author of this.record.authors) {
         const element = document.createElement("span");
         element.className = "texleaf-document-author";
-        element.textContent = author.text;
-        wireSourcePointer(element, view, author.from, author.to);
+        element.append(createInlineContentElement(author.segments ?? [], author.text, "texleaf-author-content", view));
+        appendTitleMarkers(element, author);
+        wireMetadataSourcePointer(element, view, author);
         authors.append(element);
       }
       root.append(authors);
@@ -11136,8 +14412,9 @@ class MakeTitleWidget extends WidgetType {
       for (const affiliation of affiliations) {
         const element = document.createElement("span");
         element.className = "texleaf-document-affiliation";
-        element.textContent = affiliation.text;
-        wireSourcePointer(element, view, affiliation.from, affiliation.to);
+        element.append(createInlineContentElement(affiliation.segments ?? [], affiliation.text, "texleaf-affiliation-content", view));
+        appendTitleMarkers(element, affiliation);
+        wireMetadataSourcePointer(element, view, affiliation);
         list.append(element);
       }
       root.append(list);
@@ -11150,7 +14427,7 @@ class MakeTitleWidget extends WidgetType {
         const element = document.createElement("span");
         element.className = "texleaf-document-email";
         element.textContent = email.text;
-        wireSourcePointer(element, view, email.from, email.to);
+        wireMetadataSourcePointer(element, view, email);
         list.append(element);
       }
       root.append(list);
@@ -11159,15 +14436,40 @@ class MakeTitleWidget extends WidgetType {
       const date = document.createElement("span");
       date.className = "texleaf-document-date";
       date.textContent = this.record.date.text;
-      wireSourcePointer(date, view, this.record.date.from, this.record.date.to);
+      wireMetadataSourcePointer(date, view, this.record.date);
       root.append(date);
     }
-    return createMeasuredBlockShell(root, "texleaf-title-shell");
+    for (const section of this.grouped ? this.record.frontMatter?.sections ?? [] : []) {
+      const element = document.createElement("div");
+      element.className = `texleaf-front-matter-section texleaf-front-matter-${section.role}`;
+      const label = document.createElement("span");
+      label.className = "texleaf-front-matter-label";
+      label.textContent = section.label;
+      element.append(label, createInlineContentElement(section.source.segments ?? [], section.source.text, "texleaf-front-matter-content", view));
+      wireMetadataSourcePointer(element, view, section.source);
+      root.append(element);
+    }
+    return createMeasuredBlockShell(
+      root,
+      [
+        "texleaf-title-shell",
+        this.insideFrame ? "texleaf-frame-content-shell" : "",
+      ].filter(Boolean).join(" "),
+      view,
+      this.record.replacement.sourceFrom,
+    );
   }
 
   public override ignoreEvent(): boolean {
     return true;
   }
+}
+
+function appendTitleMarkers(element: HTMLElement, source: VisualSourceText): void {
+  if (!source.markers?.length) return;
+  const marker = document.createElement("sup");
+  marker.textContent = source.markers.join(", ");
+  element.append(marker);
 }
 
 class AbstractBeginWidget extends WidgetType {
@@ -11189,6 +14491,7 @@ class AbstractBeginWidget extends WidgetType {
     root.title = `点击编辑 \\begin{${this.record.environment}}`;
     const label = document.createElement("span");
     label.className = "texleaf-abstract-label";
+    label.dataset.texleafLineNumberAnchorId = String(this.record.begin.from);
     label.textContent = this.record.label;
     root.append(label);
     const edit = createInlineEnvironmentEditChip(
@@ -11207,7 +14510,12 @@ class AbstractBeginWidget extends WidgetType {
       this.record.begin.sourceFrom,
       this.record.begin.sourceTo,
     );
-    return createMeasuredBlockShell(root, "texleaf-abstract-begin-shell");
+    return createMeasuredBlockShell(
+      root,
+      "texleaf-abstract-begin-shell",
+      view,
+      this.record.begin.sourceFrom,
+    );
   }
 
   public override ignoreEvent(): boolean {
@@ -11236,7 +14544,12 @@ class AbstractEndWidget extends WidgetType {
       this.record.end.sourceFrom,
       this.record.end.sourceTo,
     );
-    return createMeasuredBlockShell(root, "texleaf-abstract-end-shell");
+    return createMeasuredBlockShell(
+      root,
+      "texleaf-abstract-end-shell",
+      view,
+      this.record.end.sourceFrom,
+    );
   }
 
   public override ignoreEvent(): boolean {
@@ -11296,6 +14609,8 @@ class KeywordsWidget extends WidgetType {
           this.embeddedInAbstract
             ? "texleaf-keywords-shell texleaf-keywords-shell-embedded"
             : "texleaf-keywords-shell",
+          view,
+          this.record.replacement.sourceFrom,
         )
       : root;
   }
@@ -11313,6 +14628,7 @@ class FrameBeginWidget extends WidgetType {
   public override eq(other: FrameBeginWidget): boolean {
     return this.record.title === other.record.title &&
       this.record.subtitle === other.record.subtitle &&
+      this.record.syntax === other.record.syntax &&
       this.record.language === other.record.language;
   }
 
@@ -11320,16 +14636,22 @@ class FrameBeginWidget extends WidgetType {
     const root = document.createElement("section");
     root.className = "texleaf-frame-begin";
     root.tabIndex = 0;
-    root.title = "点击编辑 \\begin{frame}";
+    root.title = this.record.syntax === "command"
+      ? "点击编辑 \\frame{...} 开始命令"
+      : "点击编辑 \\begin{frame}";
     const label = document.createElement("span");
     label.className = "texleaf-frame-label";
     label.textContent = this.record.language === "zh" ? "幻灯片" : "Slide";
     root.append(label);
-    const title = document.createElement("span");
-    title.className = "texleaf-frame-title";
-    title.textContent = this.record.title ??
-      (this.record.language === "zh" ? "未命名页面" : "Untitled frame");
-    root.append(title);
+    const titleText = this.record.title?.trim();
+    if (titleText !== undefined && titleText.length > 0) {
+      const title = document.createElement("span");
+      title.className = "texleaf-frame-title";
+      title.textContent = titleText;
+      root.append(title);
+    } else {
+      root.classList.add("texleaf-frame-begin-untitled");
+    }
     if (this.record.subtitle !== undefined && this.record.subtitle.length > 0) {
       const subtitle = document.createElement("span");
       subtitle.className = "texleaf-frame-subtitle";
@@ -11347,7 +14669,12 @@ class FrameBeginWidget extends WidgetType {
       this.record.begin.sourceFrom,
       this.record.begin.sourceTo,
     );
-    return createMeasuredBlockShell(root, "texleaf-frame-begin-shell");
+    return createMeasuredBlockShell(
+      root,
+      "texleaf-frame-begin-shell",
+      view,
+      this.record.begin.sourceFrom,
+    );
   }
 
   public override ignoreEvent(): boolean {
@@ -11361,21 +14688,37 @@ class FrameEndWidget extends WidgetType {
   }
 
   public override eq(other: FrameEndWidget): boolean {
-    return this.record.language === other.record.language;
+    return this.record.language === other.record.language &&
+      this.record.syntax === other.record.syntax;
   }
 
   public override toDOM(view: EditorView): HTMLElement {
     const root = document.createElement("span");
     root.className = "texleaf-frame-end";
     root.tabIndex = 0;
-    root.title = "点击编辑 \\end{frame}";
+    root.title = this.record.syntax === "command"
+      ? "点击编辑 \\frame{...} 结束花括号"
+      : "点击编辑 \\end{frame}";
+    root.append(createInlineEnvironmentEditChip(
+      view,
+      this.record.end.sourceFrom,
+      this.record.end.sourceTo,
+      this.record.language === "zh"
+        ? this.record.syntax === "command" ? "编辑结束花括号" : "编辑结束命令"
+        : this.record.syntax === "command" ? "Edit closing brace" : "Edit frame end",
+    ));
     wireSourcePointer(
       root,
       view,
       this.record.end.sourceFrom,
       this.record.end.sourceTo,
     );
-    return createMeasuredBlockShell(root, "texleaf-frame-end-shell");
+    return createMeasuredBlockShell(
+      root,
+      "texleaf-frame-end-shell",
+      view,
+      this.record.end.sourceFrom,
+    );
   }
 
   public override ignoreEvent(): boolean {
@@ -11400,7 +14743,10 @@ function visualTheoremHeadingText(
 }
 
 class TheoremBeginWidget extends WidgetType {
-  public constructor(private readonly record: VisualTheoremRecord) {
+  public constructor(
+    private readonly record: VisualTheoremRecord,
+    private readonly insideFrame: boolean,
+  ) {
     super();
   }
 
@@ -11409,6 +14755,9 @@ class TheoremBeginWidget extends WidgetType {
       this.record.number === other.record.number &&
       this.record.optionalTitle === other.record.optionalTitle &&
       this.record.environment === other.record.environment &&
+      this.record.style === other.record.style &&
+      this.record.begin.block === other.record.begin.block &&
+      this.insideFrame === other.insideFrame &&
       visualPresentationKey(this.record.labels) === visualPresentationKey(other.record.labels);
   }
 
@@ -11425,6 +14774,7 @@ class TheoremBeginWidget extends WidgetType {
     root.title = `点击编辑 \\begin{${this.record.environment}}`;
     const label = document.createElement("span");
     label.className = "texleaf-theorem-label";
+    label.dataset.texleafLineNumberAnchorId = String(this.record.begin.from);
     label.textContent = visualTheoremHeadingText(
       this.record.label,
       this.record.number,
@@ -11439,7 +14789,7 @@ class TheoremBeginWidget extends WidgetType {
     ) {
       const optional = document.createElement("span");
       optional.className = "texleaf-theorem-optional-title";
-      optional.textContent = `(${this.record.optionalTitle})`;
+      optional.append("(", createInlineContentElement(this.record.optionalTitleSegments ?? [], this.record.optionalTitle, "texleaf-theorem-inline-content", view), ")");
       root.append(optional);
     }
     for (const sourceLabel of this.record.labels) {
@@ -11457,7 +14807,15 @@ class TheoremBeginWidget extends WidgetType {
       this.record.begin.sourceTo,
     );
     return this.record.begin.block
-      ? createMeasuredBlockShell(root, "texleaf-theorem-begin-shell")
+      ? createMeasuredBlockShell(
+          root,
+          [
+            "texleaf-theorem-begin-shell",
+            this.insideFrame ? "texleaf-frame-content-shell" : "",
+          ].filter(Boolean).join(" "),
+          view,
+          this.record.begin.sourceFrom,
+        )
       : root;
   }
 
@@ -11467,20 +14825,36 @@ class TheoremBeginWidget extends WidgetType {
 }
 
 class TheoremEndWidget extends WidgetType {
-  public constructor(private readonly record: VisualTheoremRecord) {
+  public constructor(
+    private readonly record: VisualTheoremRecord,
+    private readonly insideFrame: boolean,
+  ) {
     super();
   }
 
   public override eq(other: TheoremEndWidget): boolean {
     return this.record.style === other.record.style &&
-      this.record.environment === other.record.environment;
+      this.record.environment === other.record.environment &&
+      this.record.end.block === other.record.end.block &&
+      this.insideFrame === other.insideFrame;
   }
 
   public override toDOM(view: EditorView): HTMLElement {
-    const root = document.createElement("div");
-    root.className = `texleaf-theorem-end texleaf-theorem-${this.record.style}`;
+    const block = this.record.end.block;
+    const root = document.createElement(block ? "div" : "span");
+    root.className = [
+      "texleaf-theorem-end",
+      block ? "texleaf-theorem-end-block" : "texleaf-theorem-end-inline",
+      `texleaf-theorem-${this.record.style}`,
+    ].join(" ");
     root.tabIndex = 0;
     root.title = `点击编辑 \\end{${this.record.environment}}`;
+    root.append(createInlineEnvironmentEditChip(
+      view,
+      this.record.end.sourceFrom,
+      this.record.end.sourceTo,
+      "编辑结束环境",
+    ));
     if (this.record.style === "proof") {
       const qed = document.createElement("span");
       qed.className = "texleaf-proof-qed";
@@ -11493,7 +14867,17 @@ class TheoremEndWidget extends WidgetType {
       this.record.end.sourceFrom,
       this.record.end.sourceTo,
     );
-    return createMeasuredBlockShell(root, "texleaf-theorem-end-shell");
+    return block
+      ? createMeasuredBlockShell(
+          root,
+          [
+            "texleaf-theorem-end-shell",
+            this.insideFrame ? "texleaf-frame-content-shell" : "",
+          ].filter(Boolean).join(" "),
+          view,
+          this.record.end.sourceFrom,
+        )
+      : root;
   }
 
   public override ignoreEvent(): boolean {
@@ -11541,6 +14925,7 @@ class ListBoundaryWidget extends WidgetType {
     private readonly record: VisualListRecord,
     private readonly edge: "begin" | "end",
     private readonly theoremStyle: VisualTheoremRecord["style"] | undefined,
+    private readonly insideFrame: boolean,
   ) {
     super();
   }
@@ -11549,13 +14934,15 @@ class ListBoundaryWidget extends WidgetType {
     return this.record.environment === other.record.environment &&
       this.record.labelTemplate === other.record.labelTemplate &&
       this.edge === other.edge &&
-      this.theoremStyle === other.theoremStyle;
+      this.theoremStyle === other.theoremStyle &&
+      this.insideFrame === other.insideFrame;
   }
 
   public override toDOM(view: EditorView): HTMLElement {
     const root = document.createElement("div");
     root.className = [
       "texleaf-list-boundary",
+      this.insideFrame ? "texleaf-frame-list-boundary" : "",
       this.theoremStyle === undefined ? "" : "texleaf-theorem-list-boundary",
       this.theoremStyle === undefined ? "" : `texleaf-theorem-${this.theoremStyle}`,
     ].filter(Boolean).join(" ");
@@ -11566,6 +14953,7 @@ class ListBoundaryWidget extends WidgetType {
       range.sourceTo,
       this.edge === "begin" ? `编辑 ${this.record.environment}` : `编辑结束命令`,
     ));
+    installVisualSourceIndentation(root, view, range.sourceFrom);
     return root;
   }
 
@@ -11592,6 +14980,11 @@ class LabelWidget extends WidgetType {
     const root = document.createElement("div");
     root.className = "texleaf-label-block";
     root.append(chip);
+    installVisualSourceIndentation(
+      root,
+      view,
+      this.record.replacement.sourceFrom,
+    );
     return root;
   }
 
@@ -11674,6 +15067,8 @@ class CitationWidget extends WidgetType {
   public override eq(other: CitationWidget): boolean {
     return this.record.label === other.record.label &&
       this.record.keys.join("\u0000") === other.record.keys.join("\u0000") &&
+      this.record.optionalArguments.join("\u0000") ===
+        other.record.optionalArguments.join("\u0000") &&
       citationPreviewIdentity(this.record.previews) ===
         citationPreviewIdentity(other.record.previews);
   }
@@ -11681,9 +15076,14 @@ class CitationWidget extends WidgetType {
   public override toDOM(view: EditorView): HTMLElement {
     const chip = document.createElement("span");
     chip.className = "texleaf-citation-chip";
+    const visibleNotes = this.record.optionalArguments.filter(
+      (value) => value.length > 0,
+    );
     chip.setAttribute(
       "aria-label",
-      "悬停预览文献信息；点击编辑引用命令；Ctrl/Cmd+单击跳转到文献条目",
+      `引用 ${this.record.label}${
+        visibleNotes.length === 0 ? "" : `；说明 ${visibleNotes.join("；")}`
+      }。悬停预览文献信息；点击编辑引用命令；Ctrl/Cmd+单击跳转到文献条目`,
     );
     appendCitationChipTargets(chip, view, this.record);
     wireSourcePointer(chip, view, this.record.from, this.record.to, (from, to) => {
@@ -11731,6 +15131,12 @@ function appendReferenceChipTargets(
           ? `标签 ${key}；悬停预览对应定理，Ctrl/Cmd+单击直接跳转`
           : previewKind === "heading"
             ? `标签 ${key}；悬停预览章节标题，Ctrl/Cmd+单击直接跳转`
+            : previewKind === "table"
+              ? `标签 ${key}；悬停预览对应表格，Ctrl/Cmd+单击直接跳转`
+              : previewKind === "image"
+                ? `标签 ${key}；悬停预览对应图片，Ctrl/Cmd+单击直接跳转`
+                : previewKind === "diagram"
+                  ? `标签 ${key}；悬停预览对应交换图，Ctrl/Cmd+单击直接跳转`
             : `标签 ${key}；悬停从项目中查找预览，Ctrl/Cmd+单击直接跳转`,
     );
     target.dataset.referenceKey = key;
@@ -11744,73 +15150,21 @@ function appendReferenceChipTargets(
   }
 }
 
-function referenceHoverPreviewKind(
-  view: EditorView,
-  key: string,
-): VisualReferenceTargetKind {
-  return referenceHoverPreviewKindForState(
-    view.state,
-    view.state.field(structureField, false)?.records ?? [],
-    key,
-  );
-}
-
-function referenceHoverPreviewKindForState(
-  state: EditorState,
-  structures: readonly VisualStructureRecord[],
-  key: string,
-): VisualReferenceTargetKind {
-  return referenceTargetKindForRecords(
-    state,
-    structures,
-    state.field(formulaField, false)?.records ?? [],
-    key,
-  );
-}
-
-function referenceTargetKindForRecords(
-  state: EditorState,
-  structures: readonly VisualStructureRecord[],
-  formulaRecords: readonly VisualFormulaRecord[],
-  key: string,
-): VisualReferenceTargetKind {
-  const formulas = formulaRecords.filter((record) =>
-    record.labels.some((label) => label.key === key)
-  );
-  if (formulas.length === 1) {
-    return "formula";
-  }
-  const theorems = structures.filter(
-    (record): record is VisualTheoremRecord =>
-      record.kind === "theorem" &&
-      record.labels.some((label) => label.key === key),
-  );
-  if (theorems.length === 1) {
-    return "theorem";
-  }
-  return findVisualHeadingForLabel(state.doc.toString(), structures, key) === undefined
-    ? "unknown"
-    : "heading";
-}
-
 function referenceChipPresentations(
-  state: EditorState,
-  structures: readonly VisualStructureRecord[],
-  formulaRecords: readonly VisualFormulaRecord[],
+  structureReferences: ReadonlyMap<string, VisualStructureReferencePresentation>,
+  formulaReferenceCounts: ReadonlyMap<string, number>,
   keys: readonly string[],
 ): readonly ReferenceChipPresentation[] {
-  const text = state.doc.toString();
   return keys.map((key) => {
-    const previewKind = referenceTargetKindForRecords(
-      state,
-      structures,
-      formulaRecords,
-      key,
-    );
+    const formulaTarget = formulaReferenceCounts.get(key) === 1;
+    const structureTarget = structureReferences.get(key);
+    const previewKind: VisualReferenceTargetKind = formulaTarget
+      ? "formula"
+      : structureTarget?.targetKind ?? "unknown";
     return {
       key,
       previewKind,
-      label: visualReferenceDisplayLabel(text, structures, key, previewKind),
+      label: formulaTarget ? key : structureTarget?.label ?? key,
     };
   });
 }
@@ -11819,7 +15173,9 @@ function referenceChipPresentationIdentity(
   targets: readonly ReferenceChipPresentation[],
 ): string {
   return targets
-    .map(({ key, label, previewKind }) => `${key}\u0001${label}\u0001${previewKind}`)
+    .map(({ key, label, previewKind }) =>
+      key + "\u0001" + label + "\u0001" + previewKind
+    )
     .join("\u0000");
 }
 
@@ -11831,8 +15187,13 @@ function appendCitationChipTargets(
   const byKey = new Map(record.previews.map((entry) => [entry.key, entry]));
   const textualSingle = record.keys.length === 1 &&
     /^(?:[Cc]itet|[Tt]extcite)$/u.test(record.command);
+  const notes = visualCitationNotes(record.optionalArguments);
   if (!textualSingle) {
-    chip.append(document.createTextNode("("));
+    chip.append(document.createTextNode("["));
+  }
+  if (notes.prenote.length > 0) {
+    appendCitationNote(chip, notes.prenote);
+    chip.append(document.createTextNode(" "));
   }
   record.keys.forEach((key, index) => {
     if (index > 0) {
@@ -11849,9 +15210,37 @@ function appendCitationChipTargets(
     wirePreciseReferenceNavigation(target, chip, view, "citation", key);
     chip.append(target);
   });
-  if (!textualSingle) {
-    chip.append(document.createTextNode(")"));
+  if (notes.postnote.length > 0) {
+    chip.append(document.createTextNode(", "));
+    appendCitationNote(chip, notes.postnote);
   }
+  if (!textualSingle) {
+    chip.append(document.createTextNode("]"));
+  }
+}
+
+function visualCitationNotes(
+  optionalArguments: readonly string[],
+): { readonly prenote: string; readonly postnote: string } {
+  if (optionalArguments.length >= 2) {
+    return {
+      prenote: optionalArguments[0] ?? "",
+      postnote: optionalArguments[1] ?? "",
+    };
+  }
+  return {
+    prenote: "",
+    postnote: optionalArguments[0] ?? "",
+  };
+}
+
+function appendCitationNote(chip: HTMLElement, text: string): void {
+  const note = document.createElement("span");
+  note.className = "texleaf-citation-note";
+  // Citation notes originate in user-authored LaTeX. Keep them text-only so a
+  // note such as `[<img onerror=...>]` can never create Webview markup.
+  note.textContent = text;
+  chip.append(note);
 }
 
 function createReferenceChipTarget(
@@ -11917,6 +15306,14 @@ function wireCitationHover(
   entry: VisualCitationPreview | undefined,
 ): void {
   const show = (): void => {
+    if (
+      activeReferenceHover?.kind === "citation" &&
+      activeReferenceHover.anchor === anchor &&
+      activeReferenceHover.key === key
+    ) {
+      cancelReferenceHoverHide();
+      return;
+    }
     const range = readMappedDatasetRange(
       rangeElement,
       "texleafSourceFrom",
@@ -11931,13 +15328,11 @@ function wireCitationHover(
       to: range.to,
       key,
     };
+    referenceHoverElement.classList.remove("texleaf-reference-hover-wide");
     referenceHoverContent.replaceChildren(createCitationHoverEntry(key, entry));
     showReferenceHoverCard();
   };
-  anchor.addEventListener("pointerenter", show);
-  anchor.addEventListener("focus", show);
-  anchor.addEventListener("pointerleave", scheduleReferenceHoverHide);
-  anchor.addEventListener("blur", scheduleReferenceHoverHide);
+  wireReferenceHoverActivation(anchor, show);
 }
 
 function wireReferenceHover(
@@ -11946,9 +15341,17 @@ function wireReferenceHover(
   view: EditorView,
   record: VisualReferenceRecord,
   key: string,
-  previewKind: "formula" | "theorem" | "heading" | "unknown",
+  previewKind: VisualReferenceTargetKind,
 ): void {
   const show = (): void => {
+    if (
+      activeReferenceHover?.kind === "reference" &&
+      activeReferenceHover.anchor === anchor &&
+      activeReferenceHover.key === key
+    ) {
+      cancelReferenceHoverHide();
+      return;
+    }
     const range = readMappedDatasetRange(
       rangeElement,
       "texleafSourceFrom",
@@ -11966,6 +15369,10 @@ function wireReferenceHover(
       requestId,
       previewKind,
     };
+    referenceHoverElement.classList.toggle(
+      "texleaf-reference-hover-wide",
+      previewKind === "table" || previewKind === "image" || previewKind === "diagram",
+    );
     const loading = document.createElement("div");
     loading.className = "texleaf-reference-hover-loading";
     loading.textContent = previewKind === "formula"
@@ -11974,6 +15381,12 @@ function wireReferenceHover(
         ? "正在生成对应定理的可视化预览…"
         : previewKind === "heading"
           ? "正在读取章节标题…"
+          : previewKind === "table"
+            ? "正在准备对应表格的可视化预览…"
+            : previewKind === "image"
+              ? "正在读取对应图片…"
+              : previewKind === "diagram"
+                ? "正在生成对应交换图的可视化预览…"
           : "正在从项目中查找引用目标…";
     referenceHoverContent.replaceChildren(loading);
     showReferenceHoverCard();
@@ -11988,7 +15401,28 @@ function wireReferenceHover(
       key,
     });
   };
-  anchor.addEventListener("pointerenter", show);
+  wireReferenceHoverActivation(anchor, show);
+}
+
+/**
+ * Open a new reference card only after deliberate pointer motion or keyboard
+ * focus. Chromium also dispatches `pointerenter` when CodeMirror inserts a
+ * replacement widget underneath a stationary pointer. Treating that event as
+ * fresh hover intent can reopen a citation card immediately after its source
+ * collapses back to a chip. An enter may still keep the already-active anchor
+ * alive while the pointer travels back from the card; the existing 140 ms hide
+ * bridge therefore retains its interactive-card behavior.
+ */
+function wireReferenceHoverActivation(
+  anchor: HTMLElement,
+  show: () => void,
+): void {
+  anchor.addEventListener("pointerenter", () => {
+    if (activeReferenceHover?.anchor === anchor) {
+      cancelReferenceHoverHide();
+    }
+  });
+  anchor.addEventListener("pointermove", show);
   anchor.addEventListener("focus", show);
   anchor.addEventListener("pointerleave", scheduleReferenceHoverHide);
   anchor.addEventListener("blur", scheduleReferenceHoverHide);
@@ -12050,24 +15484,31 @@ function createCitationHoverEntry(
   const root = document.createElement("div");
   root.className = "texleaf-completion-info";
   const heading = document.createElement("h3");
-  heading.textContent = compactReferenceHoverText(entry?.title ?? "", 220) ||
-    `[未找到 ${key}]`;
+  heading.textContent = entry?.entryType === "bibitem"
+    ? `文献 ${key}`
+    : compactReferenceHoverText(entry?.title ?? "", 220) || `[未找到 ${key}]`;
   root.append(heading);
-  appendCitationHoverField(
-    root,
-    "作者：",
-    entry === undefined ? "未知作者" : fullVisualCitationAuthors(entry.authors),
-  );
-  appendCitationHoverField(
-    root,
-    "期刊 / 出版物：",
-    compactReferenceHoverText(entry?.container ?? "", 240) || "未知出版物",
-  );
-  appendCitationHoverField(
-    root,
-    "年份：",
-    compactReferenceHoverText(entry?.year ?? "", 20) || "无年份",
-  );
+  if (entry?.entryType === "bibitem") {
+    const citation = document.createElement("p");
+    citation.textContent = entry.title;
+    root.append(citation);
+  } else {
+    appendCitationHoverField(
+      root,
+      "作者：",
+      entry === undefined ? "未知作者" : fullVisualCitationAuthors(entry.authors),
+    );
+    appendCitationHoverField(
+      root,
+      "期刊 / 出版物：",
+      compactReferenceHoverText(entry?.container ?? "", 240) || "未知出版物",
+    );
+    appendCitationHoverField(
+      root,
+      "年份：",
+      compactReferenceHoverText(entry?.year ?? "", 20) || "无年份",
+    );
+  }
   const keyParagraph = document.createElement("p");
   const keyLabel = document.createElement("strong");
   keyLabel.textContent = "Citation key：";
@@ -12117,7 +15558,17 @@ function compactReferenceHoverText(value: string, maximum: number): string {
 function showReferenceHoverCard(): void {
   referenceHoverElement.classList.add("visible");
   referenceHoverElement.setAttribute("aria-hidden", "false");
-  requestAnimationFrame(positionReferenceHoverCard);
+  scheduleReferenceHoverPosition();
+}
+
+function scheduleReferenceHoverPosition(): void {
+  if (referenceHoverPositionFrame !== 0) {
+    return;
+  }
+  referenceHoverPositionFrame = requestAnimationFrame(() => {
+    referenceHoverPositionFrame = 0;
+    positionReferenceHoverCard();
+  });
 }
 
 function positionReferenceHoverCard(): void {
@@ -12127,21 +15578,81 @@ function positionReferenceHoverCard(): void {
     return;
   }
   const anchor = active.anchor.getBoundingClientRect();
-  const card = referenceHoverElement.getBoundingClientRect();
   const editorRect = editor.scrollDOM.getBoundingClientRect();
   const margin = 8;
   const gap = 6;
   const leftBoundary = Math.max(margin, editorRect.left + 2);
   const rightBoundary = Math.min(window.innerWidth - margin, editorRect.right - 2);
-  const maximumLeft = Math.max(leftBoundary, rightBoundary - card.width);
-  const left = Math.max(leftBoundary, Math.min(anchor.left, maximumLeft));
   const topBoundary = Math.max(margin, editorRect.top + 2);
   const bottomBoundary = Math.min(window.innerHeight - margin, editorRect.bottom - 2);
-  let top = anchor.bottom + gap;
-  if (top + card.height > bottomBoundary) {
-    top = anchor.top - gap - card.height;
+  const availableWidth = Math.max(1, rightBoundary - leftBoundary);
+  const availableHeight = Math.max(1, bottomBoundary - topBoundary);
+  // Size against CodeMirror's real viewport, not the entire Webview. This
+  // matters when a PDF occupies the neighbouring editor group.
+  const preferredWidth = referenceHoverElement.classList.contains(
+      "texleaf-reference-hover-wide",
+    )
+    ? 720
+    : 460;
+  referenceHoverElement.style.width = `${Math.min(preferredWidth, availableWidth)}px`;
+  referenceHoverElement.style.maxHeight = `${availableHeight}px`;
+  referenceHoverContent.style.maxHeight = `${availableHeight}px`;
+  let card = referenceHoverElement.getBoundingClientRect();
+  const spaces = {
+    right: Math.max(0, rightBoundary - anchor.right - gap),
+    left: Math.max(0, anchor.left - leftBoundary - gap),
+    below: Math.max(0, bottomBoundary - anchor.bottom - gap),
+    above: Math.max(0, anchor.top - topBoundary - gap),
+  };
+  const placement = visualFloatingPreviewPlacement(spaces, {
+    width: card.width,
+    height: card.height,
+  });
+  if (placement === "right" || placement === "left") {
+    const sideWidth = placement === "right" ? spaces.right : spaces.left;
+    if (sideWidth > 0 && sideWidth < card.width) {
+      referenceHoverElement.style.width = `${Math.max(1, sideWidth)}px`;
+      card = referenceHoverElement.getBoundingClientRect();
+    }
+  } else if (placement === "below" || placement === "above") {
+    const sideHeight = placement === "below" ? spaces.below : spaces.above;
+    if (sideHeight > 0 && sideHeight < card.height) {
+      referenceHoverElement.style.maxHeight = `${Math.max(1, sideHeight)}px`;
+      referenceHoverContent.style.maxHeight = `${Math.max(1, sideHeight)}px`;
+      card = referenceHoverElement.getBoundingClientRect();
+    }
   }
-  top = Math.max(topBoundary, Math.min(top, bottomBoundary - card.height));
+  const maximumLeft = Math.max(leftBoundary, rightBoundary - card.width);
+  const maximumTop = Math.max(topBoundary, bottomBoundary - card.height);
+  let left: number;
+  let top: number;
+  switch (placement) {
+    case "right":
+      left = anchor.right + gap;
+      top = anchor.top;
+      break;
+    case "left":
+      left = anchor.left - gap - card.width;
+      top = anchor.top;
+      break;
+    case "above":
+      left = anchor.left;
+      top = anchor.top - gap - card.height;
+      break;
+    case "below":
+      left = anchor.left;
+      top = anchor.bottom + gap;
+      break;
+    case "overlay":
+      left = anchor.left;
+      top = spaces.below >= spaces.above
+        ? anchor.bottom + gap
+        : anchor.top - gap - card.height;
+      break;
+  }
+  left = Math.max(leftBoundary, Math.min(left, maximumLeft));
+  top = Math.max(topBoundary, Math.min(top, maximumTop));
+  referenceHoverElement.dataset.side = placement;
   referenceHoverElement.style.left = `${Math.round(left)}px`;
   referenceHoverElement.style.top = `${Math.round(top)}px`;
 }
@@ -12165,10 +15676,16 @@ function scheduleReferenceHoverHide(): void {
 
 function hideReferenceHover(): void {
   cancelReferenceHoverHide();
+  if (referenceHoverPositionFrame !== 0) {
+    cancelAnimationFrame(referenceHoverPositionFrame);
+    referenceHoverPositionFrame = 0;
+  }
   activeReferenceHover = undefined;
   referenceHoverPointerInside = false;
   referenceHoverElement.classList.remove("visible");
+  referenceHoverElement.classList.remove("texleaf-reference-hover-wide");
   referenceHoverElement.setAttribute("aria-hidden", "true");
+  delete referenceHoverElement.dataset.side;
   referenceHoverContent.replaceChildren();
 }
 
@@ -12244,12 +15761,16 @@ function createPlainStructureButton(
 }
 
 class TableWidget extends WidgetType {
-  public constructor(private readonly record: VisualTableRecord) {
+  public constructor(
+    private readonly record: VisualTableRecord,
+    private readonly insideFrame: boolean,
+  ) {
     super();
   }
 
   public override eq(other: TableWidget): boolean {
-    return visualPresentationKey(this.record) === visualPresentationKey(other.record);
+    return this.insideFrame === other.insideFrame &&
+      visualPresentationKey(this.record) === visualPresentationKey(other.record);
   }
 
   public override toDOM(view: EditorView): HTMLElement {
@@ -12302,6 +15823,7 @@ class TableWidget extends WidgetType {
           this.record.captionSegments,
           this.record.caption,
           "texleaf-table-inline-content",
+          view,
         ));
       }
       if (this.record.label !== undefined) {
@@ -12321,13 +15843,13 @@ class TableWidget extends WidgetType {
     const [headerRow, ...bodyRows] = this.record.rows;
     if (headerRow !== undefined) {
       const head = document.createElement("thead");
-      head.append(createTableRow(headerRow, this.record.columnCount, true));
+      head.append(createTableRow(headerRow, this.record.columnCount, true, view));
       table.append(head);
     }
     if (bodyRows.length > 0) {
       const body = document.createElement("tbody");
       for (const row of bodyRows) {
-        body.append(createTableRow(row, this.record.columnCount, false));
+        body.append(createTableRow(row, this.record.columnCount, false, view));
       }
       table.append(body);
     }
@@ -12344,7 +15866,15 @@ class TableWidget extends WidgetType {
       note.textContent = `${this.record.visualEditReason} 源码保持完整。`;
       card.append(note);
     }
-    return createMeasuredBlockShell(card, "texleaf-table-shell");
+    return createMeasuredBlockShell(
+      card,
+      [
+        "texleaf-table-shell",
+        this.insideFrame ? "texleaf-frame-content-shell" : "",
+      ].filter(Boolean).join(" "),
+      view,
+      this.record.replacement.sourceFrom,
+    );
   }
 
   public override ignoreEvent(): boolean {
@@ -13199,12 +16729,16 @@ let tikzcdMarkerSequence = 0;
 class TikzcdWidget extends WidgetType {
   private cleanup: (() => void) | undefined;
 
-  public constructor(private readonly record: VisualTikzcdRecord) {
+  public constructor(
+    private readonly record: VisualTikzcdRecord,
+    private readonly insideFrame: boolean,
+  ) {
     super();
   }
 
   public override eq(other: TikzcdWidget): boolean {
-    return visualPresentationKey(this.record) === visualPresentationKey(other.record);
+    return this.insideFrame === other.insideFrame &&
+      visualPresentationKey(this.record) === visualPresentationKey(other.record);
   }
 
   public override toDOM(view: EditorView): HTMLElement {
@@ -13255,7 +16789,15 @@ class TikzcdWidget extends WidgetType {
         this.record.asset,
         "tikz-cd 交换图的本地 TeX 精确预览",
       ));
-      return createMeasuredBlockShell(card, "texleaf-tikzcd-shell");
+      return createMeasuredBlockShell(
+        card,
+        [
+          "texleaf-tikzcd-shell",
+          this.insideFrame ? "texleaf-frame-content-shell" : "",
+        ].filter(Boolean).join(" "),
+        view,
+        this.record.replacement.sourceFrom,
+      );
     }
 
     const canvas = document.createElement("div");
@@ -13335,7 +16877,15 @@ class TikzcdWidget extends WidgetType {
       cancelAnimationFrame(frame);
       observer?.disconnect();
     };
-    return createMeasuredBlockShell(card, "texleaf-tikzcd-shell");
+    return createMeasuredBlockShell(
+      card,
+      [
+        "texleaf-tikzcd-shell",
+        this.insideFrame ? "texleaf-frame-content-shell" : "",
+      ].filter(Boolean).join(" "),
+      view,
+      this.record.replacement.sourceFrom,
+    );
   }
 
   public override ignoreEvent(): boolean {
@@ -13349,12 +16899,16 @@ class TikzcdWidget extends WidgetType {
 }
 
 class TikzpictureWidget extends WidgetType {
-  public constructor(private readonly record: VisualTikzpictureRecord) {
+  public constructor(
+    private readonly record: VisualTikzpictureRecord,
+    private readonly insideFrame: boolean,
+  ) {
     super();
   }
 
   public override eq(other: TikzpictureWidget): boolean {
-    return visualPresentationKey(this.record) === visualPresentationKey(other.record);
+    return this.insideFrame === other.insideFrame &&
+      visualPresentationKey(this.record) === visualPresentationKey(other.record);
   }
 
   public override toDOM(view: EditorView): HTMLElement {
@@ -13383,7 +16937,15 @@ class TikzpictureWidget extends WidgetType {
           this.record.asset,
           "tikzpicture 的本地 TeX 精确预览",
         ));
-    return createMeasuredBlockShell(card, "texleaf-tikzpicture-shell");
+    return createMeasuredBlockShell(
+      card,
+      [
+        "texleaf-tikzpicture-shell",
+        this.insideFrame ? "texleaf-frame-content-shell" : "",
+      ].filter(Boolean).join(" "),
+      view,
+      this.record.replacement.sourceFrom,
+    );
   }
 
   public override ignoreEvent(): boolean {
@@ -15512,13 +19074,170 @@ function serializeTikzcdArrowOptions(arrow: MutableTikzcdArrow): string {
   return options.join(", ");
 }
 
+const visualPdfImageCache = new Map<string, string>();
+let visualPdfImageQueue = Promise.resolve();
+let visualPdfWorkerUrl: string | undefined;
+
+function loadVisualImagePreview(image: HTMLImageElement, uri: string): void {
+  if (!new URL(uri, document.baseURI).pathname.toLowerCase().endsWith(".pdf")) {
+    image.src = uri;
+    return;
+  }
+  image.dataset.pdfPreview = "loading";
+  image.setAttribute("aria-busy", "true");
+  image.title = "PDF 插图预览（第 1 页）";
+  // CodeMirror mounts nearby image widgets only. Serialize their work so a
+  // document with many PDF figures never starts many parsers at once.
+  visualPdfImageQueue = visualPdfImageQueue.then(async () => {
+    if (!image.isConnected) return;
+    try {
+      const preview = visualPdfImageCache.get(uri) ?? await renderVisualPdfImage(uri);
+      if (!visualPdfImageCache.has(uri) && preview.length <= 8 * 1024 * 1024) {
+        let bytes = preview.length;
+        for (const value of visualPdfImageCache.values()) bytes += value.length;
+        for (const [key, value] of visualPdfImageCache) {
+          if (bytes <= 8 * 1024 * 1024) break;
+          visualPdfImageCache.delete(key);
+          bytes -= value.length;
+        }
+        visualPdfImageCache.set(uri, preview);
+      }
+      if (image.isConnected) {
+        image.dataset.pdfPreview = "ready";
+        image.removeAttribute("aria-busy");
+        image.src = preview;
+      }
+    } catch {
+      if (image.isConnected) image.dispatchEvent(new Event("error"));
+    }
+  });
+}
+
+async function readVisualPdfResource(uri: string, signal: AbortSignal, limit: number): Promise<Uint8Array> {
+  const response = await fetch(uri, { signal });
+  if (!response.ok || response.body === null || Number(response.headers.get("content-length")) > limit) {
+    await response.body?.cancel();
+    throw new Error("PDF preview resource is unavailable or too large.");
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) throw new Error("PDF preview resource exceeds its byte limit.");
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return bytes;
+}
+
+async function renderVisualPdfImage(uri: string): Promise<string> {
+  const assets = document.getElementById("editor")?.dataset.pdfAssets;
+  if (assets === undefined) throw new Error("PDF preview assets are unavailable.");
+  const abort = new AbortController();
+  let worker: PDFWorker | undefined;
+  let loading: PDFDocumentLoadingTask | undefined;
+  let rendering: RenderTask | undefined;
+  const canvas = document.createElement("canvas");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      abort.abort();
+      reject(new Error("PDF image preview timed out."));
+    }, 20_000);
+  });
+  try {
+    return await Promise.race([timeout, (async () => {
+      if (visualPdfWorkerUrl === undefined) {
+        const source = await readVisualPdfResource(`${assets}pdf.worker.bundle.mjs`, abort.signal, 8 * 1024 * 1024);
+        abort.signal.throwIfAborted();
+        visualPdfWorkerUrl = URL.createObjectURL(new Blob([source as Uint8Array<ArrayBuffer>], { type: "text/javascript" }));
+      }
+      const data = await readVisualPdfResource(uri, abort.signal, 16 * 1024 * 1024);
+      abort.signal.throwIfAborted();
+      // Match the PDF viewer's supported LoopbackPort setup: Electron Webview
+      // dedicated workers can defer Promise continuations beyond our deadline.
+      GlobalWorkerOptions.workerSrc = visualPdfWorkerUrl;
+      await import(/* @vite-ignore */ visualPdfWorkerUrl);
+      abort.signal.throwIfAborted();
+      worker = PDFWorker.create({});
+      loading = getDocument({
+        data, worker, enableXfa: false, useSystemFonts: false,
+        cMapPacked: true, cMapUrl: `${assets}cmaps/`, standardFontDataUrl: `${assets}standard_fonts/`,
+        wasmUrl: `${assets}wasm/`, iccUrl: `${assets}iccs/`,
+        // Scientific figures often embed 300-dpi bitmaps larger than 16 MP.
+        // Reject the whole preview above the ceiling; never silently omit a panel.
+        stopAtErrors: true, maxImageSize: 64 * 1024 * 1024, canvasMaxAreaInBytes: 16 * 1024 * 1024,
+      });
+      // Password-protected figures are a placeholder, never an editor prompt.
+      loading.onPassword = () => { void loading?.destroy().catch(() => undefined); };
+      const pdf = await loading.promise;
+      abort.signal.throwIfAborted();
+      const page = await pdf.getPage(1);
+      abort.signal.throwIfAborted();
+      const base = page.getViewport({ scale: 1 });
+      if (![base.width, base.height].every(value => Number.isFinite(value) && value > 0)) {
+        throw new Error("PDF image has invalid page dimensions.");
+      }
+      const scale = Math.min(2, 1600 / base.width, 1600 / base.height, Math.sqrt(2_000_000 / base.width / base.height));
+      const viewport = page.getViewport({ scale });
+      canvas.width = Math.max(1, Math.floor(viewport.width));
+      canvas.height = Math.max(1, Math.floor(viewport.height));
+      const context = canvas.getContext("2d", { alpha: false });
+      if (context === null) throw new Error("PDF image needs Canvas 2D.");
+      rendering = page.render({ canvas, canvasContext: context, viewport, background: "#ffffff" });
+      // Pinned PDF.js 6.2 resolves a partial render before rejecting an operator
+      // stream. Observe that rejection too, so oversized panels cannot disappear
+      // silently even with stopAtErrors enabled.
+      let complete = true;
+      const intents = (page as unknown as {
+        _intentStates: Map<string, { displayReadyCapability?: { reject: (reason: unknown) => void } }>;
+      })._intentStates;
+      const capability = intents.values().next().value?.displayReadyCapability;
+      if (capability === undefined) throw new Error("PDF image runtime is incompatible.");
+      const reject = capability.reject;
+      capability.reject = reason => { complete = false; reject(reason); };
+      await rendering.promise;
+      if (!complete) throw new Error("PDF image could not be fully decoded.");
+      abort.signal.throwIfAborted();
+      return canvas.toDataURL("image/png");
+    })()]);
+  } finally {
+    clearTimeout(timer);
+    const timedOut = abort.signal.aborted;
+    abort.abort();
+    rendering?.cancel();
+    const cleanup = loading?.destroy().catch(() => undefined);
+    if (!timedOut && cleanup !== undefined) {
+      // Let PDF.js receive Terminate and release fonts before killing its port.
+      await Promise.race([cleanup, new Promise<void>(resolve => { timer = setTimeout(resolve, 1000); })]);
+      clearTimeout(timer);
+    }
+    worker?.destroy();
+    canvas.width = canvas.height = 0;
+  }
+}
+
 class ImageWidget extends WidgetType {
-  public constructor(private readonly record: VisualImageRecord) {
+  public constructor(
+    private readonly record: VisualImageRecord,
+    private readonly insideFrame: boolean,
+  ) {
     super();
   }
 
   public override eq(other: ImageWidget): boolean {
-    return visualPresentationKey(this.record) === visualPresentationKey(other.record);
+    return this.insideFrame === other.insideFrame &&
+      visualPresentationKey(this.record) === visualPresentationKey(other.record);
   }
 
   public override toDOM(view: EditorView): HTMLElement {
@@ -15556,7 +19275,6 @@ class ImageWidget extends WidgetType {
     } else {
       const image = document.createElement("img");
       image.className = "texleaf-image-preview";
-      image.src = this.record.previewUri;
       image.alt = this.record.caption ?? this.record.path;
       image.loading = "lazy";
       image.draggable = false;
@@ -15565,6 +19283,7 @@ class ImageWidget extends WidgetType {
         view.requestMeasure();
       }, { once: true });
       canvas.append(image);
+      loadVisualImagePreview(image, this.record.previewUri);
     }
     scroll.append(canvas);
     card.append(scroll);
@@ -15572,16 +19291,22 @@ class ImageWidget extends WidgetType {
       const caption = document.createElement("figcaption");
       caption.className = "texleaf-image-caption";
       if (this.record.caption !== undefined) {
-        const text = document.createElement("span");
-        text.textContent = this.record.caption;
-        caption.append(text);
+        caption.append(createInlineContentElement(this.record.captionSegments ?? [], this.record.caption, "texleaf-image-inline-content", view));
       }
       if (this.record.label !== undefined) {
         caption.append(createLabelChip(view, this.record.label));
       }
       card.append(caption);
     }
-    return createMeasuredBlockShell(card, "texleaf-image-shell");
+    return createMeasuredBlockShell(
+      card,
+      [
+        "texleaf-image-shell",
+        this.insideFrame ? "texleaf-frame-content-shell" : "",
+      ].filter(Boolean).join(" "),
+      view,
+      this.record.replacement.sourceFrom,
+    );
   }
 
   public override ignoreEvent(): boolean {
@@ -15593,6 +19318,7 @@ function createTableRow(
   cells: readonly VisualTableCell[],
   columnCount: number,
   header: boolean,
+  view?: EditorView,
 ): HTMLTableRowElement {
   const row = document.createElement("tr");
   for (let index = 0; index < columnCount; index += 1) {
@@ -15603,6 +19329,7 @@ function createTableRow(
         value.segments,
         value.text,
         "texleaf-table-inline-content",
+        view,
       ));
     }
     row.append(cell);
@@ -15641,6 +19368,7 @@ function createInlineContentElement(
   segments: readonly VisualInlineContentSegment[],
   fallback: string,
   className: string,
+  view?: EditorView,
 ): HTMLElement {
   const root = document.createElement("span");
   root.className = className;
@@ -15651,8 +19379,13 @@ function createInlineContentElement(
   for (const segment of segments) {
     if (segment.kind === "text") {
       root.append(document.createTextNode(segment.text));
-    } else {
+    } else if (segment.kind === "math") {
       root.append(createMathFragmentElement(segment.math, segment.math.fallback));
+    } else if (segment.kind === "citation") {
+      root.append(view === undefined ? document.createTextNode(segment.citation.label) : new CitationWidget(segment.citation).toDOM(view));
+    } else {
+      root.append(view === undefined ? document.createTextNode(segment.reference.label) : new ReferenceWidget(segment.reference,
+        segment.reference.keys.map(key => ({ key, label: key, previewKind: "unknown" }))).toDOM(view));
     }
   }
   return root;
@@ -15699,13 +19432,290 @@ function createImagePlaceholder(path: string): HTMLDivElement {
   return placeholder;
 }
 
+class TableOfContentsWidget extends WidgetType {
+  public constructor(
+    private readonly record: VisualTableOfContentsRecord,
+    private readonly insideFrame: boolean,
+  ) {
+    super();
+  }
+
+  public override eq(other: TableOfContentsWidget): boolean {
+    return this.insideFrame === other.insideFrame &&
+      visualPresentationKey(this.record) === visualPresentationKey(other.record);
+  }
+
+  public override toDOM(view: EditorView): HTMLElement {
+    const root = document.createElement("section");
+    root.className = "texleaf-table-of-contents-card";
+    root.tabIndex = 0;
+    root.setAttribute(
+      "aria-label",
+      this.record.language === "zh" ? "文档目录" : "Table of contents",
+    );
+    root.title = this.record.language === "zh"
+      ? "目录预览；点击空白处编辑 \\tableofcontents 命令"
+      : "Table of contents preview; click empty space to edit the \\tableofcontents command";
+    wireSourcePointer(
+      root,
+      view,
+      this.record.replacement.sourceFrom,
+      this.record.replacement.sourceTo,
+    );
+
+    const header = document.createElement("header");
+    header.className = "texleaf-table-of-contents-header";
+    const heading = document.createElement("div");
+    heading.className = "texleaf-table-of-contents-heading";
+    const title = document.createElement("h2");
+    title.className = "texleaf-table-of-contents-title";
+    title.textContent = this.record.template
+      ? this.record.language === "zh" ? "章节目录模板" : "Section outline template"
+      : this.record.scope === "currentSection"
+        ? this.record.language === "zh" ? "当前节目录" : "Current section"
+        : this.record.scope === "currentSubsection"
+          ? this.record.language === "zh" ? "当前小节目录" : "Current subsection"
+          : this.record.language === "zh" ? "目录" : "Contents";
+    title.dataset.texleafLineNumberAnchorId = String(this.record.replacement.from);
+    const count = document.createElement("span");
+    count.className = "texleaf-table-of-contents-count";
+    const entryCount = this.record.entries.length;
+    count.textContent = this.record.template
+      ? this.record.language === "zh" ? "运行时" : "runtime"
+      : this.record.language === "zh"
+        ? `${entryCount} 项`
+        : `${entryCount} ${entryCount === 1 ? "entry" : "entries"}`;
+    heading.append(title, count);
+    const actions = document.createElement("div");
+    actions.className = "texleaf-structure-actions";
+    actions.append(createStructureSourceButton(
+      view,
+      this.record.replacement.sourceFrom,
+      this.record.replacement.sourceTo,
+      this.record.language === "zh" ? "编辑目录命令" : "Edit contents command",
+    ));
+    header.append(heading, actions);
+    root.append(header);
+
+    if (entryCount === 0) {
+      const empty = document.createElement("div");
+      empty.className = "texleaf-table-of-contents-empty";
+      empty.textContent = this.record.template
+        ? this.record.language === "zh"
+          ? "这是 Beamer 的运行时 Frame 模板；编译时会在每一节开始处显示对应章节目录。"
+          : "This is a runtime Beamer frame template; compilation fills it with the matching section outline."
+        : this.record.scope === "currentSection" ||
+            this.record.scope === "currentSubsection"
+          ? this.record.language === "zh"
+            ? "此命令之前尚未解析到对应章节；保留原命令并等待编译时上下文。"
+            : "No matching section precedes this command; the source is preserved for compile-time context."
+          : this.record.language === "zh"
+            ? "当前项目中没有可显示的章节标题。"
+            : "No section headings are available in the current project.";
+      root.append(empty);
+    } else {
+      const tree = document.createElement("ol");
+      tree.className = "texleaf-table-of-contents-tree";
+      tree.setAttribute("role", "tree");
+      tree.setAttribute(
+        "aria-label",
+        this.record.language === "zh" ? "章节树" : "Document outline",
+      );
+      const baseLevel = Math.min(
+        ...this.record.entries.map((entry) =>
+          Number.isSafeInteger(entry.level) ? entry.level : 0
+        ),
+      );
+      for (const entry of this.record.entries) {
+        const visibleTitle = entry.title.trim().length === 0
+          ? this.record.language === "zh" ? "（空标题）" : "(untitled)"
+          : entry.title;
+        const item = document.createElement("li");
+        item.className = "texleaf-table-of-contents-item";
+        item.setAttribute("role", "treeitem");
+        const level = Number.isSafeInteger(entry.level) ? entry.level : baseLevel;
+        const depth = clampInteger(level - baseLevel, 0, 6);
+        item.setAttribute("aria-level", String(depth + 1));
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "texleaf-table-of-contents-entry";
+        button.style.setProperty("--texleaf-toc-indent", `${depth * 18}px`);
+        button.dataset.tocEntryId = entry.id;
+        button.dataset.tocCommand = entry.command;
+        const spokenNumber = entry.number === undefined ? "" : ` ${entry.number}`;
+        button.setAttribute(
+          "aria-label",
+          this.record.language === "zh"
+            ? `跳转到${spokenNumber} ${visibleTitle}`
+            : `Go to${spokenNumber} ${visibleTitle}`,
+        );
+        button.title = this.record.language === "zh"
+          ? `跳转到 ${entry.command}：${visibleTitle}`
+          : `Go to ${entry.command}: ${visibleTitle}`;
+        const number = document.createElement("span");
+        number.className = "texleaf-table-of-contents-number";
+        number.textContent = entry.number ?? "";
+        number.setAttribute("aria-hidden", "true");
+        const entryTitle = document.createElement("span");
+        entryTitle.className = "texleaf-table-of-contents-entry-title";
+        entryTitle.textContent = visibleTitle;
+        button.append(number, entryTitle);
+        wireTableOfContentsNavigation(button, root, view, entry.id);
+        item.append(button);
+        tree.append(item);
+      }
+      root.append(tree);
+    }
+
+    if (this.record.incomplete) {
+      const incomplete = document.createElement("div");
+      incomplete.className = "texleaf-table-of-contents-incomplete";
+      incomplete.textContent = visualTableOfContentsIncompleteText(
+        this.record.notices,
+      );
+      root.append(incomplete);
+    }
+
+    if (this.record.numberingApproximate) {
+      const numberingNote = document.createElement("div");
+      numberingNote.className = "texleaf-table-of-contents-numbering-note";
+      numberingNote.textContent = visualTableOfContentsNumberingText(
+        this.record.notices,
+      );
+      root.append(numberingNote);
+    }
+
+    return createMeasuredBlockShell(
+      root,
+      [
+        "texleaf-table-of-contents-shell",
+        this.insideFrame ? "texleaf-frame-content-shell" : "",
+      ].filter(Boolean).join(" "),
+      view,
+      this.record.replacement.sourceFrom,
+    );
+  }
+
+  public override ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+function visualTableOfContentsIncompleteText(
+  notices: readonly VisualTableOfContentsNotice[],
+): string {
+  const reasons = notices
+    .map(visualTableOfContentsNoticePresentation)
+    .filter((notice) => notice.kind === "incomplete")
+    .map((notice) => notice.label);
+  return reasons.length === 0
+    ? "目录预览可能缺少或多出条目；当前只显示已安全解析的章节。"
+    : `目录预览可能缺少或多出条目（原因：${reasons.join("；")}）；当前只显示已安全解析的章节。`;
+}
+
+function visualTableOfContentsNumberingText(
+  notices: readonly VisualTableOfContentsNotice[],
+): string {
+  const reasons = notices
+    .map(visualTableOfContentsNoticePresentation)
+    .filter((notice) => notice.kind === "numbering")
+    .map((notice) => notice.label);
+  return reasons.length === 0
+    ? "章节标题与跳转可用，但预览编号可能与编译后的目录不同。"
+    : `检测到 ${reasons.join("、")}；章节标题与跳转可用，但预览编号可能与编译后的目录不同。`;
+}
+
+function visualTableOfContentsNoticePresentation(
+  notice: VisualTableOfContentsNotice,
+): { readonly kind: "incomplete" | "numbering"; readonly label: string } {
+  switch (notice) {
+    case "projectGraph":
+      return { kind: "incomplete", label: "项目包含关系未完全解析" };
+    case "conditionalHeadings":
+      return { kind: "incomplete", label: "章节位于无法静态判断的条件分支" };
+    case "sourceLimit":
+      return { kind: "incomplete", label: "项目规模超过安全扫描上限" };
+    case "includeOnly":
+      return { kind: "incomplete", label: "使用了 \\includeonly" };
+    case "manualContents":
+      return {
+        kind: "incomplete",
+        label: "使用了 \\addcontentsline 或 \\addtocontents",
+      };
+    case "tocDepth":
+      return { kind: "incomplete", label: "修改了 tocdepth" };
+    case "counterControl":
+      return { kind: "numbering", label: "手动修改了章节计数器" };
+    case "frontMatter":
+      return { kind: "numbering", label: "\\frontmatter" };
+    case "mainMatter":
+      return { kind: "numbering", label: "\\mainmatter" };
+    case "backMatter":
+      return { kind: "numbering", label: "\\backmatter" };
+    case "appendix":
+      return { kind: "numbering", label: "\\appendix" };
+  }
+}
+
+function wireTableOfContentsNavigation(
+  target: HTMLElement,
+  rangeElement: HTMLElement,
+  view: EditorView,
+  entryId: string,
+  kind: "tableOfContents" | "frontMatter" = "tableOfContents",
+): void {
+  const navigate = (): void => {
+    const range = readMappedDatasetRange(
+      rangeElement,
+      "texleafSourceFrom",
+      "texleafSourceTo",
+      view.state.doc.length,
+    );
+    if (range === undefined || entryId.length === 0) {
+      return;
+    }
+    post({
+      protocol: VISUAL_EDITOR_PROTOCOL,
+      type: "navigate",
+      revision: clientRevision,
+      kind,
+      from: range.from,
+      to: range.to,
+      key: entryId,
+    });
+  };
+  target.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    navigate();
+  });
+  target.addEventListener("click", (event) => {
+    // Suppress the synthetic click which follows pointerdown and would bubble
+    // into the card's source-reveal affordance.
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  target.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    navigate();
+  });
+}
+
 class BibliographyWidget extends WidgetType {
-  public constructor(private readonly record: VisualBibliographyRecord) {
+  public constructor(
+    private readonly record: VisualBibliographyRecord,
+    private readonly insideFrame: boolean,
+  ) {
     super();
   }
 
   public override eq(other: BibliographyWidget): boolean {
-    return visualPresentationKey(this.record) === visualPresentationKey(other.record);
+    return this.insideFrame === other.insideFrame &&
+      visualPresentationKey(this.record) === visualPresentationKey(other.record);
   }
 
   public override toDOM(view: EditorView): HTMLElement {
@@ -15794,22 +19804,39 @@ class BibliographyWidget extends WidgetType {
           ? "尚未读取到参考文献条目；可打开 .bib 文件继续编辑。"
           : "No bibliography entries were found; open the .bib file to continue editing.";
       root.append(empty);
-      return createMeasuredBlockShell(root, "texleaf-bibliography-shell");
+      return createMeasuredBlockShell(
+        root,
+        [
+          "texleaf-bibliography-shell",
+          this.insideFrame ? "texleaf-frame-content-shell" : "",
+        ].filter(Boolean).join(" "),
+        view,
+        this.record.replacement.sourceFrom,
+      );
     }
 
     const list = document.createElement("ol");
     list.className = "texleaf-bibliography-list";
-    this.record.entries.forEach((entry, index) => {
+    const visibleEntries = this.record.entries.slice(0, 120);
+    visibleEntries.forEach((entry, index) => {
       list.append(createBibliographyEntryElement(entry, index));
     });
     root.append(list);
-    if (this.record.totalEntries > this.record.entries.length) {
+    if (this.record.totalEntries > visibleEntries.length) {
       const more = document.createElement("div");
       more.className = "texleaf-bibliography-more";
-      more.textContent = `另有 ${this.record.totalEntries - this.record.entries.length} 条未在编辑器中展开。`;
+      more.textContent = `另有 ${this.record.totalEntries - visibleEntries.length} 条未在编辑器中展开。`;
       root.append(more);
     }
-    return createMeasuredBlockShell(root, "texleaf-bibliography-shell");
+    return createMeasuredBlockShell(
+      root,
+      [
+        "texleaf-bibliography-shell",
+        this.insideFrame ? "texleaf-frame-content-shell" : "",
+      ].filter(Boolean).join(" "),
+      view,
+      this.record.replacement.sourceFrom,
+    );
   }
 
   public override ignoreEvent(): boolean {
@@ -15820,12 +19847,16 @@ class BibliographyWidget extends WidgetType {
 class DocumentEndWidget extends WidgetType {
   public constructor(
     private readonly record: Extract<VisualStructureRecord, { readonly kind: "documentEnd" }>,
+    private readonly lineTerminated: boolean,
+    private readonly terminalSyntheticEof: boolean,
   ) {
     super();
   }
 
   public override eq(other: DocumentEndWidget): boolean {
-    return this.record.language === other.record.language;
+    return this.record.language === other.record.language &&
+      this.lineTerminated === other.lineTerminated &&
+      this.terminalSyntheticEof === other.terminalSyntheticEof;
   }
 
   public override toDOM(view: EditorView): HTMLElement {
@@ -15840,7 +19871,19 @@ class DocumentEndWidget extends WidgetType {
       this.record.replacement.sourceFrom,
       this.record.replacement.sourceTo,
     );
-    return createMeasuredBlockShell(root, "texleaf-document-end-shell");
+    const shell = createMeasuredBlockShell(
+      root,
+      "texleaf-document-end-shell",
+      view,
+      this.record.replacement.sourceFrom,
+    );
+    if (this.lineTerminated) {
+      shell.classList.add("texleaf-document-end-shell-line-terminated");
+    }
+    if (this.terminalSyntheticEof) {
+      shell.classList.add("texleaf-document-end-shell-terminal");
+    }
+    return shell;
   }
 
   public override ignoreEvent(): boolean {
@@ -16022,12 +20065,31 @@ function visualPresentationKey(value: object): string {
   return key;
 }
 
+function visualMakeTitlePositionKey(record: VisualMakeTitleRecord): string {
+  const source = (value: VisualSourceText | undefined): string =>
+    value === undefined ? "" : `${value.from}:${value.to}`;
+  return [
+    record.replacement.from,
+    record.replacement.to,
+    record.replacement.sourceFrom,
+    record.replacement.sourceTo,
+    source(record.title),
+    ...record.authors.map(source),
+    ...record.affiliations.map(source),
+    ...record.emails.map(source),
+    source(record.date),
+    JSON.stringify(record.frontMatter),
+    JSON.stringify(record.title?.definition),
+  ].join("|");
+}
+
 function wireSourcePointer(
   element: HTMLElement,
   view: EditorView,
   from: number,
   to: number,
   navigate?: (from: number, to: number) => void,
+  selectSource = false,
 ): void {
   element.dataset.texleafSourceFrom = String(from);
   element.dataset.texleafSourceTo = String(to);
@@ -16046,7 +20108,7 @@ function wireSourcePointer(
       return;
     }
     hideReferenceHoverOwnedBy(element);
-    openStructureSource(view, range.from, range.to);
+    openStructureSource(view, range.from, range.to, selectSource);
   };
   element.addEventListener("pointerdown", (event) => {
     event.preventDefault();
@@ -16060,6 +20122,23 @@ function wireSourcePointer(
       open(event.ctrlKey || event.metaKey);
     }
   });
+}
+
+function wireMetadataSourcePointer(
+  element: HTMLElement,
+  view: EditorView,
+  source: { readonly from: number; readonly to: number; readonly navigationId?: string },
+): void {
+  element.tabIndex = 0;
+  element.setAttribute("role", "button");
+  element.title = "点击编辑对应源码";
+  if (source.navigationId !== undefined) {
+    element.dataset.texleafSourceFrom = String(source.from);
+    element.dataset.texleafSourceTo = String(source.to);
+    wireTableOfContentsNavigation(element, element, view, source.navigationId, "frontMatter");
+  } else {
+    wireSourcePointer(element, view, source.from, source.to, undefined, true);
+  }
 }
 
 function readMappedDatasetRange(
@@ -16083,6 +20162,7 @@ function openStructureSource(
   view: EditorView,
   from: number,
   to: number,
+  selectSource = false,
 ): void {
   const safeFrom = clampInteger(from, 0, view.state.doc.length);
   const safeTo = clampInteger(to, safeFrom, view.state.doc.length);
@@ -16097,15 +20177,19 @@ function openStructureSource(
     view.state.doc.toString(),
   );
   const effects: StateEffect<unknown>[] = [];
-  if (
+  const expandsPreamble =
     preamble !== undefined &&
     structure?.enabled === true &&
     !structure.preambleExpanded &&
-    safeFrom < preamble.to
-  ) {
+    safeFrom < preamble.to;
+  if (expandsPreamble) {
     effects.push(setPreambleExpanded.of(true));
   }
   effects.push(setStructureSourceReveal.of(reveal));
+  const caret = sourceRevealCaretPosition(view.state, reveal, safeTo);
+  const selection = selectSource && safeFrom < safeTo
+    ? EditorSelection.range(safeFrom, safeTo)
+    : EditorSelection.cursor(caret);
   view.dispatch({
     // A replacement widget has no meaningful glyph position for CodeMirror to
     // map the click back into. `safeFrom + 1` placed the caret immediately
@@ -16116,13 +20200,34 @@ function openStructureSource(
     // line: bibliography replacements often include a trailing newline, and a
     // caret at that following line made the next selection transaction
     // immediately collapse the source again.
-    selection: EditorSelection.cursor(
-      sourceRevealCaretPosition(view.state, reveal, safeTo),
-    ),
+    selection,
     effects,
     scrollIntoView: true,
   });
   view.focus();
+  if (expandsPreamble) {
+    const revealAfterPreambleLayout = (): void => {
+      if (
+        !view.dom.isConnected ||
+        view.state.selection.main.anchor !== selection.anchor ||
+        view.state.selection.main.head !== selection.head
+      ) {
+        return;
+      }
+      view.dispatch({
+        effects: EditorView.scrollIntoView(caret, {
+          y: "center",
+          yMargin: 32,
+        }),
+      });
+    };
+    // Expanding the preamble replaces one compact block widget with all of its
+    // physical source lines.  The first dispatch still sees the old geometry,
+    // so wait for CodeMirror and the browser to finish that layout before
+    // centering the requested title/author/affiliation/email source range.
+    requestAnimationFrame(() => requestAnimationFrame(revealAfterPreambleLayout));
+    setTimeout(revealAfterPreambleLayout, 140);
+  }
 }
 
 function pairedEnvironmentSourceReveal(
@@ -16259,27 +20364,11 @@ function selectionTouchesRange(
   from: number,
   to: number,
 ): boolean {
-  return visualSelectionTouchesSourceRange(state.selection.ranges, from, to);
-}
-
-function hideCitationHoverAfterSelectionLeave(state: EditorState): void {
-  const active = activeReferenceHover;
-  const sourceReveal = state.field(structureField, false)?.sourceReveal;
-  if (
-    active?.kind === "citation" &&
-    !visualSourceRangeRemainsExpanded(
-      state.selection.ranges,
-      sourceReveal?.ranges ?? [],
-      active.from,
-      active.to,
-    )
-  ) {
-    // Citation source and its detail card are one interaction. Once neither the
-    // selection nor a manual source reveal keeps this citation expanded, its
-    // visual chip has returned and the detached detail card must close in the
-    // same update, even while the pointer remains over the card.
-    hideReferenceHover();
-  }
+  return state.selection.ranges.some((range) =>
+    range.empty
+      ? range.head > from && range.head < to
+      : range.from < to && range.to > from,
+  );
 }
 
 function sourceRevealTouchesRange(
@@ -16316,10 +20405,21 @@ function mapVisualStructureRecords(
 ): readonly VisualStructureRecord[] {
   const start = (position: number): number => changes.mapPos(position, 1);
   const end = (position: number): number => changes.mapPos(position, -1);
+  const segment = (value: VisualInlineContentSegment): VisualInlineContentSegment => {
+    if (value.kind === "math") return { ...value, math: { ...value.math, sourceFrom: start(value.math.sourceFrom), sourceTo: end(value.math.sourceTo) } };
+    if (value.kind === "citation") return { ...value, citation: { ...value.citation, from: start(value.citation.from), to: end(value.citation.to) } };
+    if (value.kind === "reference") return { ...value, reference: { ...value.reference, from: start(value.reference.from), to: end(value.reference.to) } };
+    return value;
+  };
   const source = (value: VisualSourceText | undefined): VisualSourceText | undefined =>
     value === undefined
       ? undefined
-      : { ...value, from: start(value.from), to: end(value.to) };
+      : { ...value, from: start(value.from), to: end(value.to),
+          ...(value.definition === undefined ? {} : { definition: {
+            ...value.definition, from: start(value.definition.from), to: end(value.definition.to),
+          } }),
+          ...(value.segments === undefined ? {} : { segments: value.segments.map(segment) }),
+        };
   const replacement = (value: VisualReplacementRange): VisualReplacementRange => ({
     ...value,
     from: start(value.from),
@@ -16350,11 +20450,16 @@ function mapVisualStructureRecords(
         return {
           ...record,
           replacement: replacement(record.replacement),
+          metadataReplacements: (record.metadataReplacements ?? []).map(replacement),
           title: source(record.title),
           authors: record.authors.map((author) => source(author) ?? author),
           affiliations: record.affiliations.map((item) => source(item) ?? item),
           emails: record.emails.map((item) => source(item) ?? item),
           date: source(record.date),
+          ...(record.frontMatter === undefined ? {} : { frontMatter: {
+            replacement: replacement(record.frontMatter.replacement),
+            sections: record.frontMatter.sections.map(section => ({ ...section, source: source(section.source)! })),
+          } }),
         };
       case "heading":
       case "textStyle":
@@ -16398,6 +20503,7 @@ function mapVisualStructureRecords(
         return {
           ...record,
           labels: record.labels.map((item) => label(item) ?? item),
+          optionalTitleSegments: (record.optionalTitleSegments ?? []).map(segment),
           begin: replacement(record.begin),
           end: replacement(record.end),
           bodyFrom: start(record.bodyFrom),
@@ -16431,6 +20537,8 @@ function mapVisualStructureRecords(
           replacement: replacement(record.replacement),
           bodyFrom: start(record.bodyFrom),
           bodyTo: end(record.bodyTo),
+          captionSegments: record.captionSegments.map(segment),
+          rows: record.rows.map(row => row.map(cell => ({ ...cell, sourceFrom: start(cell.sourceFrom), sourceTo: end(cell.sourceTo), segments: cell.segments.map(segment) }))),
           columnSpecFrom: start(record.columnSpecFrom),
           columnSpecTo: end(record.columnSpecTo),
           label: label(record.label),
@@ -16452,6 +20560,7 @@ function mapVisualStructureRecords(
       case "image":
         return {
           ...record,
+          captionSegments: (record.captionSegments ?? []).map(segment),
           replacement: replacement(record.replacement),
           label: label(record.label),
         };
@@ -16470,7 +20579,10 @@ function mapVisualStructureRecords(
             };
           }),
         };
+      case "tableOfContents":
+        return { ...record, replacement: replacement(record.replacement) };
       case "documentEnd":
+      case "comment":
         return { ...record, replacement: replacement(record.replacement) };
     }
   });
@@ -16492,8 +20604,10 @@ function visualStructureStart(record: VisualStructureRecord): number {
     case "tikzcd":
     case "tikzpicture":
     case "image":
+    case "tableOfContents":
     case "bibliography":
     case "documentEnd":
+    case "comment":
       return record.replacement.from;
     case "theorem":
     case "frame":
@@ -16526,21 +20640,78 @@ interface FormulaPresentation {
   readonly sourceFormulaKey: string;
 }
 
-const MAX_INACTIVE_RENDERED_FORMULAS = 256;
+const MAX_RENDERED_FORMULAS = 512;
+const MAX_INACTIVE_RENDERED_FORMULAS = 64;
+const MAX_RENDERED_FORMULA_CACHE_BYTES = 48 * 1024 * 1024;
+
+interface RenderedFormulaCacheRetention {
+  readonly rendered: Map<string, RenderedFormula>;
+  readonly evictedFormulaIds: readonly string[];
+}
 
 function retainRenderedFormulaCache(
   rendered: ReadonlyMap<string, RenderedFormula>,
   activeFormulaIds: ReadonlySet<string>,
-): Map<string, RenderedFormula> {
+): RenderedFormulaCacheRetention {
   const active: [string, RenderedFormula][] = [];
   const inactive: [string, RenderedFormula][] = [];
   for (const entry of rendered) {
     (activeFormulaIds.has(entry[0]) ? active : inactive).push(entry);
   }
-  return new Map([
-    ...inactive.slice(-MAX_INACTIVE_RENDERED_FORMULAS),
-    ...active,
+
+  // Entries are stored oldest-to-newest. Walk them backwards so the formulas
+  // most recently delivered for the current viewport survive both the count
+  // and byte budgets. Always retain one active entry, even if it is unusually
+  // large, to avoid an evict/request loop for a single visible formula.
+  const retainedActive: [string, RenderedFormula][] = [];
+  let retainedBytes = 0;
+  for (let index = active.length - 1; index >= 0; index -= 1) {
+    const entry = active[index]!;
+    const entryBytes = renderedFormulaCacheBytes(entry[1]);
+    if (
+      retainedActive.length >= MAX_RENDERED_FORMULAS ||
+      (retainedBytes + entryBytes > MAX_RENDERED_FORMULA_CACHE_BYTES &&
+        retainedActive.length > 0)
+    ) {
+      continue;
+    }
+    retainedActive.push(entry);
+    retainedBytes += entryBytes;
+  }
+
+  const retainedInactive: [string, RenderedFormula][] = [];
+  const remainingItems = Math.max(0, MAX_RENDERED_FORMULAS - retainedActive.length);
+  const inactiveLimit = Math.min(MAX_INACTIVE_RENDERED_FORMULAS, remainingItems);
+  for (let index = inactive.length - 1; index >= 0; index -= 1) {
+    if (retainedInactive.length >= inactiveLimit) {
+      break;
+    }
+    const entry = inactive[index]!;
+    const entryBytes = renderedFormulaCacheBytes(entry[1]);
+    if (retainedBytes + entryBytes > MAX_RENDERED_FORMULA_CACHE_BYTES) {
+      continue;
+    }
+    retainedInactive.push(entry);
+    retainedBytes += entryBytes;
+  }
+
+  const nextRendered = new Map<string, RenderedFormula>([
+    ...retainedInactive.reverse(),
+    ...retainedActive.reverse(),
   ]);
+  const evictedFormulaIds = [...rendered.keys()].filter((id) => !nextRendered.has(id));
+  return { rendered: nextRendered, evictedFormulaIds };
+}
+
+function renderedFormulaCacheBytes(formula: RenderedFormula): number {
+  // Chromium stores JS strings as one- or two-byte representations depending
+  // on their contents. Use the conservative UTF-16 size plus a small object
+  // overhead so the cache remains bounded on every platform.
+  return 256 + 2 * (
+    formula.svg.length +
+    (formula.source?.length ?? 0) +
+    (formula.errorMessage?.length ?? 0)
+  );
 }
 
 function migrateCommittedFormulaRenders(
@@ -16555,7 +20726,18 @@ function migrateCommittedFormulaRenders(
     previousByRange.set(formulaGeometryKey(record), record);
   }
   for (const record of nextRecords) {
-    if (nextRendered.has(record.id)) {
+    const exactSource = state.sliceDoc(record.from, record.to);
+    const existing = nextRendered.get(record.id);
+    if (existing !== undefined) {
+      // The formula ID covers normalized render input, macro environment,
+      // display mode and scale. An indentation-only format may therefore keep
+      // the ID while changing the outer delimiter source used by the Webview's
+      // stale-asset guard. Rebind that exact source instead of waiting for a
+      // render the Host correctly considers redundant.
+      nextRendered.set(
+        record.id,
+        exactSourceFormulaAsset(record, existing, exactSource),
+      );
       continue;
     }
     const previous = previousByRange.get(formulaGeometryKey(record));
@@ -16568,7 +20750,7 @@ function migrateCommittedFormulaRenders(
     // migrated safely across a content-derived formula ID change.
     if (
       candidate?.source !== undefined &&
-      candidate.source === state.sliceDoc(record.from, record.to)
+      candidate.source === exactSource
     ) {
       nextRendered.set(record.id, candidate);
     }
@@ -16650,13 +20832,29 @@ function buildFormulaPresentation(
         record.to <= theorem.bodyTo
       ? theorem
       : undefined;
-    const widget = new FormulaWidget(record, formula, containingTheorem?.style);
+    const structureRecords = state.field(structureField, false)?.records ?? [];
+    const widget = new FormulaWidget(
+      record,
+      formula,
+      containingTheorem?.style,
+      record.display && frameContainsSourceRange(
+        structureRecords,
+        record.from,
+        record.to,
+      ),
+    );
     const replacement = visualFormulaReplacementRange(state, record);
     ranges.push(
       Decoration.replace({
         widget,
         block: record.display,
-        inclusive: false,
+        inclusiveStart: record.display,
+        inclusiveEnd: visualBlockReplacementInclusiveEnd(
+          record.display,
+          replacement.to,
+          state.doc.length,
+        ),
+        texleafFormulaId: record.id,
       }).range(replacement.from, replacement.to),
     );
     previousEnd = record.to;
@@ -16674,6 +20872,96 @@ function buildFormulaPresentation(
     tooltip,
     sourceFormulaKey: formulaSourceRecordKey(sourceRecords),
   };
+}
+
+/**
+ * Replace only decorations whose formula assets changed. Static viewport
+ * results arrive while the document and selection are otherwise unchanged;
+ * rebuilding every formula in the document here turned a 48-result viewport
+ * into 48 complete DecorationSet constructions and repeated SVG scans.
+ */
+function patchFormulaRenderDecorations(
+  decorations: DecorationSet,
+  recordById: ReadonlyMap<string, VisualFormulaRecord>,
+  rendered: ReadonlyMap<string, RenderedFormula>,
+  changedIds: ReadonlySet<string>,
+  enabled: boolean,
+  visual: boolean,
+  state: EditorState,
+): DecorationSet {
+  if (changedIds.size === 0) {
+    return decorations;
+  }
+  const changedRecords: VisualFormulaRecord[] = [];
+  for (const formulaId of changedIds) {
+    const record = recordById.get(formulaId);
+    if (record !== undefined) {
+      changedRecords.push(record);
+    }
+  }
+  if (changedRecords.length === 0) {
+    return decorations;
+  }
+  const theoremRecords = state.field(structureField, false)?.records.filter(
+    (record): record is VisualTheoremRecord => record.kind === "theorem",
+  ) ?? [];
+  const add: Range<Decoration>[] = [];
+  let filterFrom = Number.POSITIVE_INFINITY;
+  let filterTo = Number.NEGATIVE_INFINITY;
+  for (const record of changedRecords) {
+    const replacement = visualFormulaReplacementRange(state, record);
+    filterFrom = Math.min(filterFrom, record.from, replacement.from);
+    filterTo = Math.max(filterTo, record.to, replacement.to);
+    const selected = selectionIntersectsFormula(state, record);
+    if (enabled && (!visual || selected)) {
+      // Revealed formula source marks are supplied by nativeSyntaxField as a
+      // single flat layer. Adding a second outer mark here would recreate the
+      // nested Chromium DOM that breaks Microsoft Pinyin composition.
+    } else if (enabled) {
+      const formula = rendered.get(record.id);
+      if (
+        formula !== undefined &&
+        isSafeSvg(formula.svg) &&
+        (formula.source === undefined ||
+          formula.source === state.sliceDoc(record.from, record.to))
+      ) {
+        const theorem = theoremRecords.find((candidate) =>
+          record.from >= candidate.bodyFrom && record.to <= candidate.bodyTo
+        );
+        const widget = new FormulaWidget(
+          record,
+          formula,
+          theorem?.style,
+          record.display && frameContainsSourceRange(
+            state.field(structureField, false)?.records ?? [],
+            record.from,
+            record.to,
+          ),
+        );
+        add.push(Decoration.replace({
+          widget,
+          block: record.display,
+          inclusiveStart: record.display,
+          inclusiveEnd: visualBlockReplacementInclusiveEnd(
+            record.display,
+            replacement.to,
+            state.doc.length,
+          ),
+          texleafFormulaId: record.id,
+        }).range(replacement.from, replacement.to));
+      }
+    }
+  }
+  return decorations.update({
+    filterFrom,
+    filterTo,
+    filter: (_from, _to, decoration) => {
+      const formulaId = decoration.spec.texleafFormulaId;
+      return typeof formulaId !== "string" || !changedIds.has(formulaId);
+    },
+    add,
+    sort: true,
+  });
 }
 
 function formulaSourceAttributes(
@@ -16716,9 +21004,8 @@ function buildActiveFormulaTooltip(
   // is running. This both avoids flicker and makes the incremental hot path
   // independent from background base-formula rendering.
   const committedFormula = rendered.get(record.id);
-  // A confirmed failure for the current source must replace the retained last
-  // good frame. Before that response arrives, keep the complete prior SVG to
-  // avoid the typing flicker that this retention path was designed to prevent.
+  // A definitive error for the current source must replace a retained success
+  // frame. Before that response arrives, retaining the old frame avoids flicker.
   const activeFormula = committedFormula?.errorMessage !== undefined
     ? committedFormula
     : cursorFormula ?? continuedTooltip?.texleafFormula ?? committedFormula;
@@ -16789,14 +21076,27 @@ function visualFormulaReplacementRange(
 }
 
 class FormulaWidget extends WidgetType {
-  private cleanup: (() => void) | undefined;
-
   public constructor(
     private readonly record: VisualFormulaRecord,
     private readonly formula: RenderedFormula,
     private readonly theoremStyle: VisualTheoremRecord["style"] | undefined,
+    private readonly insideFrame: boolean,
   ) {
     super();
+  }
+
+  public override get estimatedHeight(): number {
+    if (!this.record.display) {
+      return -1;
+    }
+    // CodeMirror otherwise estimates every off-screen block widget as one text
+    // line. The worker already supplied a stable em height, so include the
+    // formula/root/shell padding and keep cold scrolling close to final layout.
+    const formulaBoxEm = Math.max(
+      2.2,
+      safeFormulaDimension(this.formula.heightEm, 1) + 0.75,
+    );
+    return Math.ceil((formulaBoxEm + 0.5) * 16 + 2);
   }
 
   public override eq(other: FormulaWidget): boolean {
@@ -16804,7 +21104,8 @@ class FormulaWidget extends WidgetType {
       this.formula.svg === other.formula.svg &&
       this.formula.widthEm === other.formula.widthEm &&
       this.formula.heightEm === other.formula.heightEm &&
-      this.theoremStyle === other.theoremStyle;
+      this.theoremStyle === other.theoremStyle &&
+      this.insideFrame === other.insideFrame;
   }
 
   public override toDOM(view: EditorView): HTMLElement {
@@ -16818,6 +21119,7 @@ class FormulaWidget extends WidgetType {
     }
     root.tabIndex = 0;
     root.setAttribute("role", "button");
+    root.dataset.formulaId = this.record.id;
     root.dataset.formulaFrom = String(this.record.from);
     root.dataset.formulaTo = String(this.record.to);
     root.dataset.formulaBodyFrom = String(this.record.bodyFrom);
@@ -16832,11 +21134,11 @@ class FormulaWidget extends WidgetType {
       "aria-label",
       this.formula.errorMessage === undefined
         ? "点击编辑这条公式的 LaTeX 源码"
-        : `公式渲染失败：${this.formula.errorMessage}；点击编辑源码`,
+        : "公式渲染失败：" + this.formula.errorMessage + "；点击编辑源码",
     );
     root.title = this.formula.errorMessage === undefined
       ? "点击编辑公式源码；光标移出公式后重新渲染"
-      : `公式渲染失败：${this.formula.errorMessage}`;
+      : "公式渲染失败：" + this.formula.errorMessage;
     applyFormulaGeometry(root, this.formula);
     let layout: HTMLDivElement | undefined;
     const svg = createFormulaSvg(this.formula);
@@ -16850,16 +21152,19 @@ class FormulaWidget extends WidgetType {
         scroll.setAttribute("role", "region");
         scroll.setAttribute("aria-label", "公式预览；超出正文宽度时可横向滚动");
         scroll.append(svg);
-        scroll.addEventListener("pointerdown", (event) => {
+        const protectFormulaScrollbar = (event: Event): void => {
+          const pointerEvent = event as MouseEvent;
           const scrollbarHeight = scroll.offsetHeight - scroll.clientHeight;
           const box = scroll.getBoundingClientRect();
           if (
             scrollbarHeight > 0 &&
-            event.clientY >= box.bottom - scrollbarHeight
+            pointerEvent.clientY >= box.bottom - scrollbarHeight
           ) {
             event.stopPropagation();
           }
-        });
+        };
+        scroll.addEventListener("pointerdown", protectFormulaScrollbar);
+        scroll.addEventListener("mousedown", protectFormulaScrollbar);
         layout.append(scroll);
         root.append(layout);
       } else {
@@ -16907,8 +21212,9 @@ class FormulaWidget extends WidgetType {
       }
     }
     const open = (event: Event): void => {
-      event.preventDefault();
-      event.stopPropagation();
+      const liveRecord = view.state
+        .field(formulaField, false)
+        ?.recordById.get(this.record.id);
       const outerRange = readMappedDatasetRange(
         root,
         "formulaFrom",
@@ -16921,15 +21227,20 @@ class FormulaWidget extends WidgetType {
         "formulaBodyTo",
         view.state.doc.length,
       );
-      if (outerRange === undefined || bodyRange === undefined) {
+      const target = resolveVisualFormulaActivationTarget(
+        view.state.doc.length,
+        liveRecord,
+        outerRange,
+        bodyRange,
+      );
+      if (target === undefined) {
         return;
       }
+      event.preventDefault();
+      event.stopPropagation();
       const position = visibleFormulaSourceCursor(view.state, {
         ...this.record,
-        from: outerRange.from,
-        to: outerRange.to,
-        bodyFrom: bodyRange.from,
-        bodyTo: bodyRange.to,
+        ...target,
       });
       view.dispatch({
         selection: EditorSelection.cursor(position),
@@ -16937,7 +21248,21 @@ class FormulaWidget extends WidgetType {
       });
       view.focus();
     };
-    root.addEventListener("pointerdown", open);
+    root.addEventListener("mousedown", (event: Event) => {
+      const mouseEvent = event as MouseEvent;
+      if (mouseEvent.button === 0) {
+        open(mouseEvent);
+      }
+    });
+    root.addEventListener("pointerdown", (event: Event) => {
+      const pointerEvent = event as PointerEvent;
+      if (
+        pointerEvent.button === 0 &&
+        (pointerEvent.pointerType === "touch" || pointerEvent.pointerType === "pen")
+      ) {
+        open(pointerEvent);
+      }
+    });
     root.addEventListener("keydown", (event: Event) => {
       const keyboardEvent = event as KeyboardEvent;
       if (keyboardEvent.key === "Enter" || keyboardEvent.key === " ") {
@@ -16947,13 +21272,17 @@ class FormulaWidget extends WidgetType {
     const dom = this.record.display
       ? createMeasuredBlockShell(
           root,
-          this.theoremStyle === undefined
-            ? "texleaf-formula-shell"
-            : `texleaf-formula-shell texleaf-theorem-formula-shell texleaf-theorem-${this.theoremStyle}`,
+          [
+            "texleaf-formula-shell",
+            this.theoremStyle === undefined
+              ? ""
+              : `texleaf-theorem-formula-shell texleaf-theorem-${this.theoremStyle}`,
+            this.insideFrame ? "texleaf-frame-content-shell" : "",
+          ].filter(Boolean).join(" "),
+          view,
+          this.record.from,
         )
       : root;
-    this.cleanup?.();
-    this.cleanup = observeFormulaGeometry(view, dom);
     return dom;
   }
 
@@ -16961,10 +21290,6 @@ class FormulaWidget extends WidgetType {
     return true;
   }
 
-  public override destroy(_dom: HTMLElement): void {
-    this.cleanup?.();
-    this.cleanup = undefined;
-  }
 }
 
 function createFormulaSourceTooltip(
@@ -17056,7 +21381,7 @@ function createFormulaSourceTooltipView(view: EditorView): TooltipView {
       "aria-label",
       formula.errorMessage === undefined
         ? "当前公式的可滚动 Math Preview"
-        : `Math Preview 渲染失败：${formula.errorMessage}`,
+        : "Math Preview 渲染失败：" + formula.errorMessage,
     );
     const svg = createFormulaSvg(formula);
     if (svg !== undefined) {
@@ -17067,23 +21392,36 @@ function createFormulaSourceTooltipView(view: EditorView): TooltipView {
     scroll.scrollLeft = previousLeft;
     scroll.scrollTop = previousTop;
   };
-  const followCaret = (): void => {
+  const followCaret = (options: {
+    readonly refreshGeometry: boolean;
+    readonly scrollToRenderedCaret: boolean;
+    readonly settle: boolean;
+  }): void => {
     if (followFrame !== undefined) {
       cancelAnimationFrame(followFrame);
     }
     followFrame = requestAnimationFrame(() => {
-      // The first frame commits the replacement SVG and CodeMirror's tooltip
-      // placement. Follow in that frame and once more in the next frame so a
-      // tall formula cannot retain the scroll position of the previous caret
-      // while its final clientHeight is still being measured.
-      scrollbarOverlay.update();
+      if (options.refreshGeometry) {
+        scrollbarOverlay.update();
+      }
       repositionTooltips(view);
-      scrollMathPreviewToCaret(scroll);
+      if (options.scrollToRenderedCaret) {
+        scrollMathPreviewToCaret(scroll);
+      }
+      if (!options.settle) {
+        followFrame = undefined;
+        return;
+      }
+      // A replacement SVG can acquire its final height one frame later. Only
+      // that geometry-changing path needs a settling pass; ordinary source
+      // caret motion must not pay two forced-layout cycles per keystroke.
       followFrame = requestAnimationFrame(() => {
         followFrame = undefined;
         scrollbarOverlay.update();
         repositionTooltips(view);
-        scrollMathPreviewToCaret(scroll);
+        if (options.scrollToRenderedCaret) {
+          scrollMathPreviewToCaret(scroll);
+        }
       });
     });
   };
@@ -17094,6 +21432,9 @@ function createFormulaSourceTooltipView(view: EditorView): TooltipView {
     }
     const formulaChanged = next.texleafFormula !== currentFormula;
     const cursorChanged = next.texleafCursorOffset !== current?.texleafCursorOffset;
+    const renderedCursorMatchesSource =
+      next.texleafRenderedCursorOffset !== undefined &&
+      next.texleafRenderedCursorOffset === next.texleafCursorOffset;
     current = next;
     currentRecord = next.texleafRecord;
     currentCursorOffset = next.texleafCursorOffset;
@@ -17111,7 +21452,11 @@ function createFormulaSourceTooltipView(view: EditorView): TooltipView {
       replaceFormula(next.texleafFormula);
     }
     if (formulaChanged || cursorChanged) {
-      followCaret();
+      followCaret({
+        refreshGeometry: formulaChanged,
+        scrollToRenderedCaret: formulaChanged && renderedCursorMatchesSource,
+        settle: formulaChanged,
+      });
     }
   };
 
@@ -17193,7 +21538,13 @@ function createFormulaSourceTooltipView(view: EditorView): TooltipView {
     mount() {
       cleanup = observeFormulaGeometry(view, root);
       scrollbarOverlay.update();
-      followCaret();
+      followCaret({
+        refreshGeometry: true,
+        scrollToRenderedCaret:
+          current?.texleafRenderedCursorOffset !== undefined &&
+          current.texleafRenderedCursorOffset === current.texleafCursorOffset,
+        settle: true,
+      });
     },
     update(update) {
       synchronize(update.state);
@@ -17978,10 +22329,38 @@ function currentFormulaRenderError(
   const record = state.field(formulaField, false)?.records.find(
     (candidate) => candidate.id === formulaId,
   );
-  if (record === undefined || !validRange(record.from, record.to, state.doc.length)) {
+  if (
+    record === undefined ||
+    !validRange(record.from, record.to, state.doc.length)
+  ) {
     return undefined;
   }
   const source = state.sliceDoc(record.from, record.to);
+  return exactSourceFormulaErrorAsset(record, message, source);
+}
+
+function exactSourceFormulaAsset(
+  record: VisualFormulaRecord,
+  formula: RenderedFormula,
+  source: string,
+): RenderedFormula {
+  if (formula.source === source) {
+    return formula;
+  }
+  if (formula.errorMessage === undefined) {
+    return rebindVisualFormulaAssetSource(formula, source);
+  }
+  // Failure cards embed a source excerpt in the SVG itself. Rebinding only the
+  // guard would display the old pre-format excerpt, so regenerate this cheap
+  // local card while preserving the worker's normalized error message.
+  return exactSourceFormulaErrorAsset(record, formula.errorMessage, source);
+}
+
+function exactSourceFormulaErrorAsset(
+  record: VisualFormulaRecord,
+  message: string,
+  source: string,
+): RenderedFormula {
   const bodyClasses = document.body.classList;
   const dark = bodyClasses.contains("vscode-dark") ||
     bodyClasses.contains("vscode-high-contrast");
@@ -18020,11 +22399,19 @@ function createFormulaSvg(formula: RenderedFormula): SVGElement | undefined {
   svg.removeAttribute("width");
   svg.removeAttribute("height");
   svg.style.removeProperty("vertical-align");
+  // MathJax normally supplies this rule through its mjx-container wrapper.
+  // We intentionally embed the bare SVG in CodeMirror, so restore it here:
+  // several NewCM glyphs (notably U+2265/U+2264) touch the viewBox edge and
+  // Chromium can otherwise clip their sub-pixel boundary stroke at text size.
+  svg.style.overflow = "visible";
+  svg.style.minWidth = "1px";
+  svg.style.minHeight = "1px";
   svg.setAttribute("aria-hidden", "true");
   svg.setAttribute("focusable", "false");
   return svg;
 }
 
+/** Tooltip previews live outside the measured editor content tree. */
 function observeFormulaGeometry(
   view: EditorView,
   element: HTMLElement,
@@ -18198,6 +22585,9 @@ function formulaPreviewTargetMatches(
 }
 
 function requestCommittedFormulaAfterSelectionLeave(update: ViewUpdate): void {
+  if (!inputFeatures.mathPreviewEnabled) {
+    return;
+  }
   const previousField = update.startState.field(formulaField, false);
   const nextField = update.state.field(formulaField, false);
   const previous = activeFormulaPreviewTarget(
@@ -18250,12 +22640,89 @@ function requestCommittedFormulaAfterSelectionLeave(update: ViewUpdate): void {
   });
 }
 
-function scheduleViewportRequest(): void {
+function scheduleFormulaCacheEvictionNotice(formulaIds: readonly string[]): void {
+  for (const formulaId of formulaIds) {
+    if (formulaId.length > 0) {
+      pendingFormulaCacheEvictions.add(formulaId);
+    }
+  }
+  if (pendingFormulaCacheEvictions.size === 0 || formulaCacheEvictionNoticeScheduled) {
+    return;
+  }
+  formulaCacheEvictionNoticeScheduled = true;
+  queueMicrotask(() => {
+    formulaCacheEvictionNoticeScheduled = false;
+    const evicted = [...pendingFormulaCacheEvictions];
+    pendingFormulaCacheEvictions.clear();
+    const refillViewport = formulaCacheEvictionsTouchViewport(evicted);
+    for (let index = 0; index < evicted.length; index += 512) {
+      post({
+        protocol: VISUAL_EDITOR_PROTOCOL,
+        type: "formulaCacheEvicted",
+        formulaIds: evicted.slice(index, index + 512),
+        refillViewport: refillViewport && index === 0,
+      });
+    }
+    if (refillViewport) {
+      // The viewport may not have moved, but an asset inside it was just
+      // released. Clear the geometry de-duplication key so the host can refill
+      // only the now-missing visible formulas on the next animation frame.
+      lastViewportRequestKey = undefined;
+      scheduleViewportRequest();
+    }
+  });
+}
+
+function formulaCacheEvictionsTouchViewport(formulaIds: readonly string[]): boolean {
+  if (editor === undefined || formulaIds.length === 0) {
+    return false;
+  }
+  const field = editor.state.field(formulaField, false);
+  if (field === undefined || editor.visibleRanges.length === 0) {
+    return false;
+  }
+  const visibleFrom = Math.min(...editor.visibleRanges.map((range) => range.from));
+  const visibleTo = Math.max(...editor.visibleRanges.map((range) => range.to));
+  const viewportKey = `${documentVersion}:${visibleFrom}:${visibleTo}`;
+  if (lastFormulaCacheRefillViewportKey === viewportKey) {
+    // One refill is enough for an unchanged viewport. If the visible SVGs
+    // themselves exceed the byte budget, repeated refill/eviction would
+    // otherwise ping-pong forever. Scrolling or editing creates a fresh key.
+    return false;
+  }
+  for (const formulaId of formulaIds) {
+    const record = field.recordById.get(formulaId);
+    if (
+      record !== undefined &&
+      editor.visibleRanges.some((range) => range.from < record.to && range.to > record.from)
+    ) {
+      lastFormulaCacheRefillViewportKey = viewportKey;
+      return true;
+    }
+  }
+  return false;
+}
+
+const VIEWPORT_REQUEST_MINIMUM_INTERVAL_MS = 32;
+const VIEWPORT_SETTLE_DELAY_MS = 160;
+
+function scheduleViewportRequest(settled = false): void {
+  if (!inputFeatures.mathPreviewEnabled) {
+    cancelViewportRequestSchedule();
+    lastViewportRequestKey = undefined;
+    lastSettledViewportRequestKey = undefined;
+    return;
+  }
+  if (settled) {
+    // A trailing request must be able to upgrade an already queued live frame;
+    // otherwise the final scroll event can be swallowed by the 32 ms throttle.
+    viewportRequestSettledPending = true;
+  }
   if (viewportTimer !== undefined || viewportFrame !== undefined) {
     return;
   }
-  const minimumIntervalMs = 32;
-  const remaining = minimumIntervalMs - (performance.now() - lastViewportRequestAt);
+  const remaining = VIEWPORT_REQUEST_MINIMUM_INTERVAL_MS -
+    (performance.now() - lastViewportRequestAt);
   if (remaining > 0) {
     viewportTimer = setTimeout(() => {
       viewportTimer = undefined;
@@ -18272,7 +22739,9 @@ function queueViewportRequestFrame(): void {
   }
   viewportFrame = requestAnimationFrame(() => {
     viewportFrame = undefined;
-    if (editor === undefined) {
+    const settled = viewportRequestSettledPending;
+    viewportRequestSettledPending = false;
+    if (!inputFeatures.mathPreviewEnabled || editor === undefined) {
       return;
     }
     const ranges = editor.visibleRanges;
@@ -18282,8 +22751,20 @@ function queueViewportRequestFrame(): void {
     const from = Math.min(...ranges.map((range) => range.from));
     const to = Math.max(...ranges.map((range) => range.to));
     const key = `${documentVersion}:${from}:${to}`;
-    if (key === lastViewportRequestKey) {
+    if (key !== lastViewportGeometryKey) {
+      lastViewportGeometryKey = key;
+      lastFormulaCacheRefillViewportKey = undefined;
+      lastSettledViewportRequestKey = undefined;
+    }
+    if (
+      settled
+        ? key === lastSettledViewportRequestKey
+        : key === lastViewportRequestKey
+    ) {
       return;
+    }
+    if (settled) {
+      lastSettledViewportRequestKey = key;
     }
     lastViewportRequestKey = key;
     lastViewportRequestAt = performance.now();
@@ -18293,8 +22774,23 @@ function queueViewportRequestFrame(): void {
       version: documentVersion,
       from,
       to,
+      ...(settled ? { settled: true } : {}),
     });
   });
+}
+
+function scheduleSettledViewportRequest(): void {
+  if (viewportSettleTimer !== undefined) {
+    clearTimeout(viewportSettleTimer);
+    viewportSettleTimer = undefined;
+  }
+  if (!inputFeatures.mathPreviewEnabled) {
+    return;
+  }
+  viewportSettleTimer = setTimeout(() => {
+    viewportSettleTimer = undefined;
+    scheduleViewportRequest(true);
+  }, VIEWPORT_SETTLE_DELAY_MS);
 }
 
 function cancelViewportRequestSchedule(): void {
@@ -18306,66 +22802,169 @@ function cancelViewportRequestSchedule(): void {
     cancelAnimationFrame(viewportFrame);
     viewportFrame = undefined;
   }
+  if (viewportSettleTimer !== undefined) {
+    clearTimeout(viewportSettleTimer);
+    viewportSettleTimer = undefined;
+  }
+  viewportRequestSettledPending = false;
 }
 
 function scheduleCursorPreviewRequest(view: EditorView | undefined = editor): void {
   cursorPreviewScheduledView = view;
+  if (cursorPreviewTimer !== undefined) {
+    clearTimeout(cursorPreviewTimer);
+    cursorPreviewTimer = undefined;
+  }
   if (cursorPreviewFrame !== undefined) {
+    cancelAnimationFrame(cursorPreviewFrame);
+    cursorPreviewFrame = undefined;
+  }
+  if (!inputFeatures.mathPreviewEnabled || view === undefined) {
+    cursorPreviewScheduledView = undefined;
+    invalidateCursorPreviewRequest();
     return;
   }
-  cursorPreviewFrame = requestAnimationFrame(() => {
-    cursorPreviewFrame = undefined;
-    const scheduledView = cursorPreviewScheduledView;
-    cursorPreviewScheduledView = undefined;
-    if (scheduledView === undefined || scheduledView !== editor) {
-      invalidateCursorPreviewRequest();
-      return;
-    }
-    const field = scheduledView.state.field(formulaField, false);
-    const target = activeFormulaPreviewTarget(
-      scheduledView.state,
-      field?.records ?? [],
-    );
-    if (target === undefined) {
-      invalidateCursorPreviewRequest();
-      return;
-    }
-    const { record, cursorOffset } = target;
-    const key = `${documentVersion}:${clientRevision}:${record.id}:${cursorOffset}`;
-    if (
-      key === lastCursorPreviewRequestKey &&
-      (field?.cursorRendered === undefined ||
-        (field.cursorRendered.formulaId === record.id &&
-          field.cursorRendered.cursorOffset === cursorOffset))
-    ) {
-      return;
-    }
-    const requestId = ++cursorPreviewRequestSequence;
-    latestCursorPreviewRequestId = requestId;
-    lastCursorPreviewRequestKey = key;
-    post({
-      protocol: VISUAL_EDITOR_PROTOCOL,
-      type: "cursorPreview",
-      requestId,
-      version: documentVersion,
-      revision: clientRevision,
-      formulaId: record.id,
-      formulaFrom: record.from,
-      formulaSource: scheduledView.state.sliceDoc(record.from, record.to),
-      bodyFrom: record.bodyFrom - record.from,
-      bodyTo: record.bodyTo - record.from,
-      display: record.display,
-      ...(record.environmentName === undefined
-        ? {}
-        : { environmentName: record.environmentName }),
-      cursorOffset,
+  const configuredDelay = Math.max(50, inputFeatures.mathPreviewDebounceMs);
+  const delay = view.state.doc.length >= 200_000
+    ? Math.max(300, configuredDelay)
+    : configuredDelay;
+  cursorPreviewTimer = setTimeout(() => {
+    cursorPreviewTimer = undefined;
+    cursorPreviewFrame = requestAnimationFrame(() => {
+      cursorPreviewFrame = undefined;
+      const scheduledView = cursorPreviewScheduledView;
+      cursorPreviewScheduledView = undefined;
+      if (scheduledView === undefined || scheduledView !== editor) {
+        invalidateCursorPreviewRequest();
+        return;
+      }
+      const field = scheduledView.state.field(formulaField, false);
+      const target = activeFormulaPreviewTarget(
+        scheduledView.state,
+        field?.records ?? [],
+      );
+      if (target === undefined) {
+        invalidateCursorPreviewRequest();
+        return;
+      }
+      const { record, cursorOffset } = target;
+      const key = `${documentVersion}:${clientRevision}:${record.id}:${cursorOffset}`;
+      if (
+        key === lastCursorPreviewRequestKey &&
+        (field?.cursorRendered === undefined ||
+          (field.cursorRendered.formulaId === record.id &&
+            field.cursorRendered.cursorOffset === cursorOffset))
+      ) {
+        return;
+      }
+      const requestId = ++cursorPreviewRequestSequence;
+      latestCursorPreviewRequestId = requestId;
+      lastCursorPreviewRequestKey = key;
+      post({
+        protocol: VISUAL_EDITOR_PROTOCOL,
+        type: "cursorPreview",
+        requestId,
+        version: documentVersion,
+        revision: clientRevision,
+        formulaId: record.id,
+        formulaFrom: record.from,
+        formulaSource: scheduledView.state.sliceDoc(record.from, record.to),
+        bodyFrom: record.bodyFrom - record.from,
+        bodyTo: record.bodyTo - record.from,
+        display: record.display,
+        ...(record.environmentName === undefined
+          ? {}
+          : { environmentName: record.environmentName }),
+        cursorOffset,
+      });
     });
-  });
+  }, delay);
 }
 
 function invalidateCursorPreviewRequest(): void {
   lastCursorPreviewRequestKey = undefined;
   latestCursorPreviewRequestId = ++cursorPreviewRequestSequence;
+}
+
+function clearReverseSyncWidgetFlash(sequence?: number): void {
+  const element = reverseSyncWidgetFlashElement;
+  if (
+    element === undefined ||
+    (sequence !== undefined &&
+      element.dataset.texleafReverseSyncSequence !== String(sequence))
+  ) {
+    return;
+  }
+  element.classList.remove("texleaf-reverse-sync-widget-flash");
+  delete element.dataset.texleafReverseSyncSequence;
+  delete element.dataset.texleafReverseSyncTarget;
+  reverseSyncWidgetFlashElement = undefined;
+}
+
+function scheduleReverseSyncWidgetFlash(position: number, sequence: number): void {
+  clearReverseSyncWidgetFlash();
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const currentEditor = editor;
+    if (
+      currentEditor === undefined ||
+      editor !== currentEditor ||
+      reverseSyncFlashSequence !== sequence
+    ) {
+      return;
+    }
+    const lineHighlight = currentEditor.dom.querySelector<HTMLElement>(
+      `.texleaf-reverse-sync-flash-line[data-texleaf-reverse-sync-sequence="${sequence}"]`,
+    );
+    if (lineHighlight !== null && lineHighlight.getClientRects().length > 0) {
+      return;
+    }
+    const elements = currentEditor.dom.querySelectorAll<HTMLElement>([
+      "[data-texleaf-source-from]",
+      "[data-formula-from]",
+      "[data-formula-body-from]",
+      "[data-texleaf-body-from]",
+      "[data-texleaf-columns-from]",
+    ].join(","));
+    const rangeKeys = [
+      ["texleafSourceFrom", "texleafSourceTo"],
+      ["formulaFrom", "formulaTo"],
+      ["formulaBodyFrom", "formulaBodyTo"],
+      ["texleafBodyFrom", "texleafBodyTo"],
+      ["texleafColumnsFrom", "texleafColumnsTo"],
+    ] as const;
+    let best: { readonly element: HTMLElement; readonly length: number } | undefined;
+    for (let index = 0; index < elements.length; index += 1) {
+      const element = elements[index]!;
+      for (const [fromKey, toKey] of rangeKeys) {
+        const range = readMappedDatasetRange(
+          element,
+          fromKey,
+          toKey,
+          currentEditor.state.doc.length,
+        );
+        if (range === undefined || position < range.from || position > range.to) {
+          continue;
+        }
+        const length = Math.max(1, range.to - range.from);
+        if (best === undefined || length < best.length) {
+          best = { element, length };
+        }
+      }
+    }
+    if (best === undefined) {
+      return;
+    }
+    // Mapped descendants identify the most precise semantic target, but a
+    // token-sized title, label or button would recreate the old one-word
+    // flash. Promote that target to its visual row/block whenever possible.
+    const flashTarget = best.element.closest<HTMLElement>(
+      ".texleaf-measured-block-shell, .texleaf-formula-widget-block",
+    ) ?? best.element.closest<HTMLElement>(".cm-line") ?? best.element;
+    flashTarget.classList.add("texleaf-reverse-sync-widget-flash");
+    flashTarget.dataset.texleafReverseSyncSequence = String(sequence);
+    flashTarget.dataset.texleafReverseSyncTarget = "visual";
+    reverseSyncWidgetFlashElement = flashTarget;
+  }));
 }
 
 function revealSelection(
@@ -18411,6 +23010,9 @@ function revealSelection(
     annotations: hostSyncAnnotations,
   });
   editor.focus();
+  if (flashSequence !== undefined) {
+    scheduleReverseSyncWidgetFlash(clamped.head, flashSequence);
+  }
 
   if (options?.center === true) {
     const recenterCurrentSelection = (): void => {
@@ -18456,28 +23058,15 @@ function revealSelection(
         effects: setReverseSyncFlash.of(undefined),
         annotations: hostSyncAnnotations,
       });
+      clearReverseSyncWidgetFlash(flashSequence);
       reverseSyncFlashTimer = undefined;
     }, 1_250);
   }
 }
 
-function updateCapabilities(capabilities: {
-  readonly latexWorkshopInstalled: boolean;
-  readonly latexWorkshopCompatibility: boolean;
-}): void {
-  for (const button of [
-    buildMenuButton,
-    buildPdfLaTexButton,
-    buildXeLaTexButton,
-    buildLuaLaTexButton,
-    buildBibTexButton,
-    buildBibLaTexButton,
-    viewPdfButton,
-    topViewPdfButton,
-    synctexButton,
-  ]) {
-    button.disabled = !capabilities.latexWorkshopInstalled;
-  }
+function updateCapabilities(capabilities: VisualEditorCapabilities): void {
+  editorCapabilities = capabilities;
+  setToolbarBusy(toolbarBusy);
   const suffix = capabilities.latexWorkshopInstalled
     ? capabilities.latexWorkshopCompatibility
       ? ""
@@ -18505,7 +23094,14 @@ function toggleEditorMode(): void {
         setStructureEnabled.of(editorMode === "visual"),
         setFormulaVisualMode.of(editorMode === "visual"),
         bracketMatchingCompartment.reconfigure(
-          editorMode === "source" ? bracketMatching() : [],
+          editorMode === "source" && inputFeatures.highlightActiveBracketPair
+            ? bracketMatching()
+            : [],
+        ),
+        syntaxHighlightingCompartment.reconfigure(
+          editorMode === "source"
+            ? syntaxHighlighting(classHighlighter, { fallback: true })
+            : [],
         ),
       ],
       scrollIntoView: true,
@@ -18604,19 +23200,18 @@ function updateTemplateMenu(items: readonly VisualEditorTemplateMenuItem[]): voi
 
 function setToolbarBusy(busy: boolean): void {
   toolbarBusy = busy;
-  const buildUnavailable = buildMenuButton.title.includes("需要安装");
-  buildMenuButton.disabled = busy || buildUnavailable;
-  buildPdfLaTexButton.disabled = busy || buildUnavailable;
-  buildXeLaTexButton.disabled = busy || buildUnavailable;
-  buildLuaLaTexButton.disabled = busy || buildUnavailable;
-  buildBibTexButton.disabled = busy || buildUnavailable;
-  buildBibLaTexButton.disabled = busy || buildUnavailable;
-  viewPdfButton.disabled = busy || viewPdfButton.title.includes("需要安装");
-  topViewPdfButton.disabled = busy || topViewPdfButton.title.includes("需要安装");
-  synctexButton.disabled = busy || synctexButton.title.includes("需要安装");
+  buildMenuButton.disabled = busy || !editorCapabilities.latexWorkshopInstalled || !editorCapabilities.buildEnabled;
+  buildPdfLaTexButton.disabled = busy || !editorCapabilities.latexWorkshopInstalled || !editorCapabilities.buildEnabled;
+  buildXeLaTexButton.disabled = busy || !editorCapabilities.latexWorkshopInstalled || !editorCapabilities.buildEnabled;
+  buildLuaLaTexButton.disabled = busy || !editorCapabilities.latexWorkshopInstalled || !editorCapabilities.buildEnabled;
+  buildBibTexButton.disabled = busy || !editorCapabilities.latexWorkshopInstalled || !editorCapabilities.buildEnabled;
+  buildBibLaTexButton.disabled = busy || !editorCapabilities.latexWorkshopInstalled || !editorCapabilities.buildEnabled;
+  viewPdfButton.disabled = busy || !editorCapabilities.latexWorkshopInstalled || !editorCapabilities.pdfViewerEnabled;
+  topViewPdfButton.disabled = busy || !editorCapabilities.latexWorkshopInstalled || !editorCapabilities.pdfViewerEnabled;
+  synctexButton.disabled = busy || !editorCapabilities.latexWorkshopInstalled || !editorCapabilities.synctexEnabled;
   openSourceButton.disabled = busy;
-  topOpenSourceButton.disabled = busy;
   openNativeSourceButton.disabled = busy;
+  topOpenSourceButton.disabled = busy;
   topOpenNativeSourceButton.disabled = busy;
   topSaveDocumentButton.disabled = busy;
   topPickSnippetButton.disabled = busy;
@@ -18636,6 +23231,13 @@ function setToolbarBusy(busy: boolean): void {
   topAiCompletionButton.disabled = busy;
   aiReviewDocumentButton.disabled = busy;
   topAiReviewDocumentButton.disabled = busy;
+  updateFormatDocumentButtonState();
+}
+
+function updateFormatDocumentButtonState(): void {
+  topFormatDocumentButton.disabled = toolbarBusy ||
+    editor === undefined ||
+    editor.state.readOnly;
 }
 
 function setStatus(
@@ -18933,7 +23535,7 @@ function applyEditingToolbarAtomicPlan(
         isolateHistory.of("full"),
       ],
     });
-    const change = singleTextDifference(sourceBefore, view.state.doc.toString());
+    const change = visualSingleTextDifference(sourceBefore, view.state.doc.toString());
     if (change !== undefined) {
       clientRevision += 1;
       post({
@@ -18988,7 +23590,7 @@ function applyAtomicVisualDocumentChange(
         isolateHistory.of("full"),
       ],
     });
-    const applied = singleTextDifference(sourceBefore, view.state.doc.toString());
+    const applied = visualSingleTextDifference(sourceBefore, view.state.doc.toString());
     if (applied !== undefined) {
       rememberAtomicVisualHistory({
         beforeText: sourceBefore,
@@ -19169,30 +23771,6 @@ function applyEditingToolbarSnippet(
   }
 }
 
-function singleTextDifference(
-  before: string,
-  after: string,
-): VisualEditorChange | undefined {
-  if (before === after) {
-    return undefined;
-  }
-  let from = 0;
-  while (from < before.length && from < after.length && before[from] === after[from]) {
-    from += 1;
-  }
-  let beforeTo = before.length;
-  let afterTo = after.length;
-  while (
-    beforeTo > from &&
-    afterTo > from &&
-    before[beforeTo - 1] === after[afterTo - 1]
-  ) {
-    beforeTo -= 1;
-    afterTo -= 1;
-  }
-  return { from, to: beforeTo, insert: after.slice(from, afterTo) };
-}
-
 function wireButton(
   button: HTMLButtonElement,
   command: VisualEditorWebviewCommand,
@@ -19228,6 +23806,10 @@ function currentSelection(state: EditorState): VisualEditorSelection {
 }
 
 function persistEditorState(view: EditorView): void {
+  if (persistEditorStateTimer !== undefined) {
+    clearTimeout(persistEditorStateTimer);
+    persistEditorStateTimer = undefined;
+  }
   const structure = view.state.field(structureField, false);
   vscode.setState({
     selection: currentSelection(view.state),
@@ -19235,6 +23817,18 @@ function persistEditorState(view: EditorView): void {
     preambleExpanded: structure?.preambleExpanded === true,
     editorMode,
   } satisfies PersistedState);
+}
+
+function schedulePersistEditorState(view: EditorView): void {
+  if (persistEditorStateTimer !== undefined) {
+    clearTimeout(persistEditorStateTimer);
+  }
+  persistEditorStateTimer = setTimeout(() => {
+    persistEditorStateTimer = undefined;
+    if (editor === view) {
+      persistEditorState(view);
+    }
+  }, 180);
 }
 
 function parsePersistedState(value: unknown): PersistedState {

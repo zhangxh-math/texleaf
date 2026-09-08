@@ -2,7 +2,7 @@
   "name": "texleaf",
   "displayName": "TeXLeaf — Fast LaTeX Snippets",
   "description": "安全、可定制的 LaTeX 可视化公式编辑、自动片段、AI 写作检查、Math Preview 与 Zotero 引用管理。",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "publisher": "zhangxh-math",
   "author": {
     "name": "zhangxh-math",
@@ -105,7 +105,7 @@
     "watch": "node esbuild.mjs --watch",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.webview.json --noEmit",
     "test:compile": "tsc -p tsconfig.test.json",
-    "test": "pnpm run test:compile && node --test .test-dist/test/core.test.js .test-dist/test/latexProject.test.js .test-dist/test/latexProjectContext.test.js .test-dist/test/latexCapabilities.test.js .test-dist/test/aiProse.test.js .test-dist/test/aiIssuePersistence.test.js .test-dist/test/deepseekClient.test.js .test-dist/test/openaiClient.test.js .test-dist/test/issueLocation.test.js .test-dist/test/providerIdentity.test.js .test-dist/test/defaultSnippets.test.js .test-dist/test/defaultTemplates.test.js .test-dist/test/snippetManagerWebview.test.js .test-dist/test/citation.test.js .test-dist/test/mathPreview.test.js .test-dist/test/mathPreviewAppearance.test.js .test-dist/test/mathPreviewLayout.test.js .test-dist/test/referenceMatcher.test.js .test-dist/test/visualEditorSyntaxToken.test.js .test-dist/test/zoteroClient.test.js",
+    "test": "pnpm run test:compile && node test/run-bounded.cjs",
     "test:extension-host:run": "node test/run-extension-host.cjs",
     "test:extension-host": "pnpm run compile && pnpm run test:extension-host:run",
     "test:bundle": "node test/bundle-smoke.cjs && node test/math-preview-worker.cjs",
@@ -126,7 +126,8 @@
     "@mathjax/src": "4.1.3",
     "jsonc-parser": "^3.3.1",
     "vscode-oniguruma": "2.0.1",
-    "vscode-textmate": "9.2.0"
+    "vscode-textmate": "9.2.0",
+    "pdfjs-dist": "6.2.108"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -339,6 +340,11 @@
         "command": "texleaf.aiIssues.ignore",
         "title": "TeXLeaf: 本次会话忽略这条 AI 建议",
         "icon": "$(close)"
+      },
+      {
+        "command": "texleaf.visualEditor.navigateForward",
+        "title": "TeXLeaf: 前进到下一处可视化位置",
+        "icon": "$(arrow-right)"
       }
     ],
     "keybindings": [
@@ -403,6 +409,12 @@
         "command": "texleaf.dismissMathPreview",
         "key": "escape",
         "when": "texleaf.mathPreviewVisible && editorTextFocus && !suggestWidgetVisible && !renameInputVisible && !inlineSuggestionVisible"
+      },
+      {
+        "command": "texleaf.visualEditor.navigateForward",
+        "key": "ctrl+]",
+        "mac": "cmd+]",
+        "when": "texleaf.navigationForwardAvailable"
       }
     ],
     "configuration": [
@@ -913,6 +925,31 @@
             "type": "boolean",
             "default": true,
             "description": "保存、编译、查看 PDF 或执行 SyncTeX 时，在后台复用 LaTeX Workshop 的配方、PDF 查看器与定位功能，不切换到原生源码编辑器。关闭后仍可手动切换到源码模式再运行 LaTeX Workshop 命令。"
+          },
+          "texleaf.visualEditor.syntaxTheme": {
+            "order": 1,
+            "scope": "window",
+            "type": "string",
+            "enum": [
+              "followVsCode",
+              "fixedPrimer"
+            ],
+            "enumItemLabels": [
+              "跟随 VS Code TextMate",
+              "固定 Primer"
+            ],
+            "enumDescriptions": [
+              "读取当前 VS Code TextMate 主题、editor.tokenColorCustomizations 和已安装的 LaTeX grammar，使普通源码的逐 token 颜色与原生编辑器一致；启用括号配色时还会复用当前主题的 editorBracketHighlight 六级颜色。无法安全解析时回退到内置 Primer 配色和 grammar。",
+              "始终使用 TeXLeaf 内置的 LaTeX grammar 与 GitHub Primer Prettylights 浅色/深色配色，不受已安装主题、token 自定义或其他 LaTeX 扩展影响。"
+            ],
+            "default": "followVsCode",
+            "markdownDescription": "选择可视化编辑器和同标签页源码模式的 LaTeX 语法配色来源。`followVsCode` 会读取当前 VS Code TextMate 主题、`editor.tokenColorCustomizations` 及可用的 LaTeX grammar/injection，使普通源码逐 token 跟随原生编辑器；当 `texleaf.colorizeBrackets` 和 `editor.bracketPairColorization.enabled` 均开启时，标准 `{}`、`[]`、`()` 配对还会使用主题的六级 `editorBracketHighlight` 颜色。主题或 grammar 无法安全解析时会回退到 TeXLeaf 内置方案。`fixedPrimer` 始终使用内置 grammar 与 GitHub Primer Prettylights Light/Dark 两套固定配色，只按界面明暗切换且不桥接彩色括号。此设置不复制语言服务器 semantic tokens、其他扩展的自定义装饰或已经排版为公式/结构组件的源码颜色。"
+          },
+          "texleaf.visualEditor.texBinPath": {
+            "type": "string",
+            "default": "",
+            "scope": "machine",
+            "description": "可选的本地 TeX 工具目录，用于 TikZ 图形预览和系统宏包查找；留空时使用 PATH 和常见 TeX Live 安装目录。"
           }
         }
       },
@@ -1002,7 +1039,7 @@
             "default": {},
             "maxProperties": 128,
             "propertyNames": {
-              "pattern": "^[A-Za-z@]+$"
+              "pattern": "^(?:[A-Za-z@]+|[!-~])$"
             },
             "additionalProperties": {
               "type": "string",

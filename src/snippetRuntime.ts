@@ -6,6 +6,7 @@
  */
 
 import * as vscode from "vscode";
+import { scanLatexContext } from "./core/latexScanner";
 import {
   compileSnippetFile,
   createLatexScanState,
@@ -319,6 +320,50 @@ export class SnippetRuntime implements vscode.Disposable {
       );
     }
   }
+public matchAtText(
+    resource: vscode.TextDocument | vscode.Uri,
+    text: string,
+    requestedOffset: number,
+    activation: SnippetActivation,
+    config: TeXLeafConfig,
+    visualText?: string,
+  ): RuntimeTextMatch | undefined {
+    const cursorOffset = Math.max(0, Math.min(text.length, requestedOffset));
+    const state = this.stateFor(resourceUri(resource), config);
+    const lookbehind = Math.max(
+      state.maxLookbehind,
+      longestLiteralTrigger(state.compiled),
+    );
+    const prefixStart = Math.max(0, cursorOffset - lookbehind);
+    const textBefore = text.slice(prefixStart, cursorOffset);
+    const textAfter = text.slice(cursorOffset, cursorOffset + 1);
+    const request = {
+      textBefore,
+      textAfter,
+      activation,
+      ...(visualText === undefined ? {} : { visualText }),
+    };
+    if (!state.matcher.hasTriggerCandidate(request)) {
+      return undefined;
+    }
+    const context = scanLatexContext(text, cursorOffset);
+    if (
+      context.environments.some((environment) =>
+        config.excludedEnvironments.includes(environment),
+      )
+    ) {
+      return undefined;
+    }
+    const match = state.matcher.match({ ...request, context });
+    return match === undefined
+      ? undefined
+      : {
+          match,
+          from: prefixStart + match.startOffset,
+          to: prefixStart + match.endOffset,
+          context,
+        };
+  }
 }
 
 function buildResourceRuntimeState(
@@ -405,4 +450,11 @@ export function replacementPartsToSnippetString(
     }
   }
   return snippet;
+}
+
+export interface RuntimeTextMatch {
+  readonly match: SnippetMatch;
+  readonly from: number;
+  readonly to: number;
+  readonly context: LatexContext;
 }

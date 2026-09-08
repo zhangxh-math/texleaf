@@ -652,3 +652,21 @@ test('citation ranking has a deterministic metadata and raw-key tie break', () =
   assert.deepEqual(keys([betaA, alpha, betaZ]), expected);
   assert.deepEqual(keys([alpha, betaZ, betaA]), expected);
 });
+
+test('BibTeX percent characters inside values do not consume braces or following entries', () => {
+  const source = String.raw`% @book{ignored,title={Comment}}
+@article{first,
+  Slaccitation = {%%CITATION = EXAMPLE;%%},
+  title = {Progress at 50%},
+  url = {https://example.test/a%20b},
+  year = {1991}}
+@article(second, title="A 100% literal value", year=2024)
+@book{last,title={Still indexed}}`;
+  const entries = parseBibTeX(source);
+  assert.deepEqual(entries.map(entry => entry.key), ['first', 'second', 'last']);
+  assert.equal(entries[0]!.fields.slaccitation, '%%CITATION = EXAMPLE;%%');
+  assert.equal(entries[0]!.title, 'Progress at 50%');
+  assert.equal(entries[0]!.fields.url, 'https://example.test/a%20b');
+  assert.equal(entries[1]!.title, 'A 100% literal value');
+  assert.equal(findIncompleteBibTeXEntry(source), undefined);
+});

@@ -5,6 +5,15 @@
  * See LICENSE and NOTICE in the project root.
  */
 
+import { NavigationHistoryLanes, type NavigationHistoryDirection } from "./core/navigationHistory";
+import { realpath, lstat } from "node:fs/promises";
+import { findVisualLabeledStructureForLabel, indexVisualStructureReferences, planVisualFormulaViewportLane, planVisualAutomaticSnippetInput, type VisualLabeledStructureTarget, type VisualTableRecord } from "./core";
+import { validateExistingRealProjectDirectory } from "./projectFilesystemSafety";
+import { type VisualEditorReferenceStructurePreview } from "./visualEditorProtocol";
+import { visualEditorSyntaxThemeMode } from "./visualEditorSyntaxTheme";
+import { VisualBracketColorizationIndex } from "./core/visualBracketColorization";
+import { validateExistingRealProjectFile } from "./projectFilesystemSafety";
+import { resolveProjectBibliographyPath } from "./pdf/bibliographyMapping";
 import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import * as path from "node:path";
@@ -33,6 +42,8 @@ import {
   replacementPartsToText,
   replacementPartsToVirtualSnippet,
   resolveVisualBibliography,
+  visualInlineReferenceRecords,
+  resolveUnorderedMathPreviewPreambleMacros,
   scanLatexContext,
   scanMathPreviewDocument,
   scanVisualDocumentStructure,
@@ -59,6 +70,7 @@ import {
   type VisualImageRecord,
   type VisualLatexCompletionContext,
   type VisualMathFragment,
+  type VisualSourceText,
   type VisualStructureRecord,
 } from "./core";
 import {
@@ -67,6 +79,8 @@ import {
   type LatexProjectFile,
   type LatexProjectLabelTarget,
 } from "./latexProjectContext";
+import { resolveVisualTableOfContents } from "./visualTableOfContents";
+import { resolveVisualFrontMatter } from "./visualFrontMatter";
 import {
   createMathPreviewCursorMarker,
   resolveMathPreviewAppearance,
@@ -287,6 +301,8 @@ const VISUAL_IMAGE_EXTENSIONS = [
   ".webp",
   ".bmp",
   ".avif",
+  ".svg",
+  ".pdf",
 ] as const;
 const DOCUMENT_SYNC_DELAY_MS = 70;
 // Cursor Math Preview and the local CodeMirror transaction update immediately.
@@ -453,6 +469,7 @@ function buildVisualSnapshot(
 }
 
 interface VisualEditorSession {
+  buildRootUri?: vscode.Uri;
   readonly document: vscode.TextDocument;
   readonly panel: vscode.WebviewPanel;
   readonly subscriptions: vscode.Disposable[];
@@ -461,6 +478,8 @@ interface VisualEditorSession {
   disposed: boolean;
   acceptedRevision: number;
   selection: VisualEditorSelection;
+  /** One-shot reveal metadata for an external `file.tex:line` initial open. */
+  initialFocus: VisualEditorFocusOptions | undefined;
   snapshot: VisualSnapshot | undefined;
   documentGeneration: number;
   renderGeneration: number;
@@ -476,6 +495,9 @@ interface VisualEditorSession {
     | undefined;
   readonly completionActions: Map<string, VisualCompletionAction>;
   bibliographyRequest: string | undefined;
+  bibliographyUris?: readonly vscode.Uri[] | undefined;
+  bibliographySetKey?: string | undefined;
+  bibliographyError?: string | undefined;
   bibliographyEntries: readonly BibTeXEntry[] | undefined;
   backgroundViewColumn: vscode.ViewColumn | undefined;
   /**
@@ -486,14 +508,21 @@ interface VisualEditorSession {
    */
   syntaxRefreshRequired: boolean;
   syntaxRefreshAttempts: number;
+  /** A complete six-depth bracket snapshot must reach this Webview. */
+  bracketRefreshRequired: boolean;
 }
 
 interface VisualViewportRenderRequest {
   readonly sequence: number;
+  /** Render generation that created this priority lane. */
   readonly generation: number;
   readonly version: number;
   readonly from: number;
   readonly to: number;
+  /** The scrolling gesture has stopped and this lane targets exact visibility. */
+  readonly settled: boolean;
+  /** Immutable origin that prevents chained overlapping scrolls from carrying
+   * one priority lane arbitrarily far through the document. */
   readonly anchorFrom: number;
   readonly anchorTo: number;
 }
@@ -512,6 +541,7 @@ interface VisualDocumentState {
   lastCursorPreviewAt: number;
   diagnosticTimer: ReturnType<typeof setTimeout> | undefined;
   refreshSyntaxOnNextSync: boolean;
+  refreshBracketsOnNextSync: boolean;
 }
 
 interface RecentVisualDeactivation {
@@ -529,6 +559,7 @@ export class VisualEditorProvider
 {
   private readonly renderer: VisualEditorRenderer;
   private readonly syntaxTheme: VisualEditorSyntaxThemeResolver;
+  private readonly bracketColorization = new VisualBracketColorizationIndex();
   private readonly projectContexts: LatexProjectContextService;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly states = new Map<string, VisualDocumentState>();
@@ -537,7 +568,9 @@ export class VisualEditorProvider
    * Navigation is provider-wide rather than panel-local so a jump from one
    * included TeX file to another can return to the physical source document.
    */
-  private readonly navigationHistory: VisualNavigationLocation[] = [];
+  private readonly navigationHistories = new NavigationHistoryLanes<string, VisualNavigationLocation>(
+    (left, right) => left.uri === right.uri && sameSelection(left.selection, right.selection));
+  private navigationQueue: Promise<void> = Promise.resolve();
   /**
    * TeXLeaf edits update the Webview optimistically and schedule one idle full
    * snapshot. Their synchronous TextDocument notification must invalidate
@@ -576,11 +609,17 @@ export class VisualEditorProvider
 
   public register(): void {
     void this.synchronizeDefaultEditorAssociation();
+    this.disposables.push(vscode.commands.registerCommand("texleaf.visualEditor.navigateForward", () => this.navigateForward(this.activeSession)));
     void vscode.commands.executeCommand(
       "setContext",
       "texleaf.visualNavigationAvailable",
       false,
     );
+    const bibliographyWatcher = vscode.workspace.createFileSystemWatcher("**/*.{bib,bbl}");
+    this.disposables.push(bibliographyWatcher,
+      bibliographyWatcher.onDidCreate(() => this.invalidateBibliographyPreviews()),
+      bibliographyWatcher.onDidChange(() => this.invalidateBibliographyPreviews()),
+      bibliographyWatcher.onDidDelete(() => this.invalidateBibliographyPreviews()));
     const projectWatcher = vscode.workspace.createFileSystemWatcher("**/*.tex");
     const invalidateProjectFile = (uri: vscode.Uri): void => {
       this.projectContexts.invalidate(uri);
@@ -679,11 +718,14 @@ export class VisualEditorProvider
       }),
       vscode.window.onDidChangeActiveColorTheme(() => {
         this.renderer.clear();
+        this.bracketColorization.invalidate();
         this.syntaxTheme.invalidate();
         for (const state of this.states.values()) {
+          state.refreshBracketsOnNextSync = true;
           state.refreshSyntaxOnNextSync = true;
           for (const session of state.sessions) {
-            session.syntaxRefreshRequired = true;
+            session.bracketRefreshRequired = true;
+              session.syntaxRefreshRequired = true;
             session.syntaxRefreshAttempts = 0;
             session.renderedFormulaIds.clear();
             session.renderGeneration += 1;
@@ -718,7 +760,11 @@ export class VisualEditorProvider
         const backgroundChanged = event.affectsConfiguration("background");
         const syntaxThemeChanged =
           event.affectsConfiguration("workbench.colorTheme") ||
-          event.affectsConfiguration("editor.tokenColorCustomizations");
+          event.affectsConfiguration("editor.tokenColorCustomizations") ||
+          event.affectsConfiguration("texleaf.visualEditor.syntaxTheme") ||
+          event.affectsConfiguration("editor.bracketPairColorization") ||
+          event.affectsConfiguration("texleaf.colorizeBrackets") ||
+          event.affectsConfiguration("texleaf.highlightActiveBracketPair");
         const texleafChanged =
           event.affectsConfiguration("texleaf.visualEditor") ||
           event.affectsConfiguration("texleaf.mathPreview") ||
@@ -732,10 +778,13 @@ export class VisualEditorProvider
           return;
         }
         if (syntaxThemeChanged) {
-          this.syntaxTheme.invalidate();
+          this.bracketColorization.invalidate();
+        this.syntaxTheme.invalidate();
           for (const state of this.states.values()) {
-            state.refreshSyntaxOnNextSync = true;
+            state.refreshBracketsOnNextSync = true;
+          state.refreshSyntaxOnNextSync = true;
             for (const session of state.sessions) {
+              session.bracketRefreshRequired = true;
               session.syntaxRefreshRequired = true;
               session.syntaxRefreshAttempts = 0;
             }
@@ -855,6 +904,8 @@ export class VisualEditorProvider
       bibliographyRequest: undefined,
       bibliographyEntries: undefined,
       backgroundViewColumn: panel.viewColumn,
+      initialFocus: undefined,
+      bracketRefreshRequired: true,
       syntaxRefreshRequired: true,
       syntaxRefreshAttempts: 0,
     };
@@ -956,6 +1007,7 @@ export class VisualEditorProvider
       syncKind: undefined,
       lastCursorPreviewAt: 0,
       diagnosticTimer: undefined,
+      refreshBracketsOnNextSync: true,
       refreshSyntaxOnNextSync: false,
     };
     this.states.set(key, state);
@@ -1009,6 +1061,12 @@ export class VisualEditorProvider
       case "clipboard":
         await this.handleClipboardAction(state, session, message);
         return;
+      case "navigationCommand":
+        if (message.revision === session.acceptedRevision) {
+          session.selection = clampSelection(message.selection, state.mirrorText.length);
+          await this.navigateVisualHistory(message.direction, session);
+        }
+        return;
       case "navigate":
         await this.handleVisualNavigation(state, session, message);
         return;
@@ -1022,7 +1080,15 @@ export class VisualEditorProvider
         session.selection = clampSelection(message.selection, state.mirrorText.length);
         return;
       case "viewport":
-        await this.renderViewport(session, message.version, message.from, message.to);
+        await this.renderViewport(session, message.version, message.from, message.to, message.settled === true);
+        return;
+      case "formulaCacheEvicted":
+        for (const formulaId of message.formulaIds) {
+          session.renderedFormulaIds.delete(formulaId);
+        }
+        if (message.refillViewport) {
+          resetViewportRenderRequest(session);
+        }
         return;
       case "cursorPreview":
         this.enqueueCursorPreview(session, message);
@@ -1140,7 +1206,7 @@ export class VisualEditorProvider
         display: false,
         macros: environment.macros,
         macroFingerprint: environment.macroFingerprint,
-      }, config.mathPreviewScale);
+      }, config.mathPreviewScale, visualTexBinPath(session.document.uri));
       if (
         session.disposed ||
         session.renderGeneration !== generation ||
@@ -1224,10 +1290,29 @@ export class VisualEditorProvider
 
     session.acceptedRevision = message.revision;
     session.selection = clampSelection(message.selection, afterText.length);
+    if (message.source === "user") {
+      state.lastCursorPreviewAt = Date.now();
+    }
     state.mirrorText = afterText;
     state.pendingEdits += 1;
     for (const candidate of state.sessions) {
       candidate.documentGeneration += 1;
+    }
+    if (message.source === "user" && !message.composing) {
+      // Match automatic snippets against the optimistic mirror immediately,
+      // before WorkspaceEdit latency or other queued keystrokes can hide the
+      // trigger. The eventual canonical edit remains unchanged and revision
+      // guards make a duplicate idle transform harmless.
+      void this.tryPostOptimisticInputTransform(
+        state,
+        session,
+        changes,
+        message.revision,
+      ).catch((error: unknown) => {
+        this.output.warn(
+          `乐观片段匹配失败：${errorMessage(error)}`,
+        );
+      });
     }
     const epoch = state.epoch;
     const operation = async (): Promise<void> => {
@@ -1264,7 +1349,7 @@ export class VisualEditorProvider
       const syntaxInput = visualIncrementalSyntaxInput(
         state.document,
         beforeText,
-        afterText,
+        actualAfterEdit,
         syntaxEditSpan,
       );
       if (syntaxInput !== undefined) {
@@ -1278,6 +1363,8 @@ export class VisualEditorProvider
       }
       state.pendingEdits = Math.max(0, state.pendingEdits - 1);
       if (state.pendingEdits === 0) {
+        // `actualAfterEdit` was already read and verified above. Reusing it
+        // avoids allocating another full copy of a large paper on every key.
         state.mirrorText = actualAfterEdit;
         const transformed = message.source === "user" && !message.composing
           ? await this.tryPostInputTransform(
@@ -1311,34 +1398,64 @@ export class VisualEditorProvider
       if (state.epoch !== epoch || session.disposed) {
         return;
       }
-      const patch = await this.syntaxTheme.tokenizeIncremental(
+      const syntaxPatch = await this.syntaxTheme.tokenizeIncremental(
         input,
         session.document.uri,
       );
+      const bracketPairColorizationEnabled = visualBracketColorizationEnabled(
+        session.document,
+        readConfig(session.document.uri),
+      );
+      const bracketPatch = bracketPairColorizationEnabled
+        ? this.bracketColorization.tokenizeIncremental(input, state.key)
+        : undefined;
       if (state.epoch !== epoch || session.disposed) {
         return;
       }
-      if (patch === undefined || !patch.complete) {
-        session.syntaxRefreshRequired = true;
+      if (syntaxPatch === undefined || !syntaxPatch.complete) {
+        session.bracketRefreshRequired = true;
+              session.syntaxRefreshRequired = true;
         session.syntaxRefreshAttempts = 0;
-        state.refreshSyntaxOnNextSync = true;
+        state.refreshBracketsOnNextSync = true;
+          state.refreshSyntaxOnNextSync = true;
       }
       if (
-        patch === undefined ||
+        bracketPairColorizationEnabled &&
+        (bracketPatch === undefined || !bracketPatch.complete)
+      ) {
+        session.bracketRefreshRequired = true;
+        state.refreshBracketsOnNextSync = true;
+      }
+      if (
         session.acceptedRevision !== revision ||
         state.mirrorText !== input.afterText
       ) {
         return;
       }
-      await session.panel.webview.postMessage({
-        protocol: VISUAL_EDITOR_PROTOCOL,
-        type: "syntaxTokenPatch",
-        revision,
-        from: patch.from,
-        to: patch.to,
-        expectedText: patch.expectedText,
-        tokens: patch.tokens,
-      } satisfies VisualEditorHostMessage);
+      await Promise.all([
+        syntaxPatch === undefined
+          ? Promise.resolve(false)
+          : session.panel.webview.postMessage({
+              protocol: VISUAL_EDITOR_PROTOCOL,
+              type: "syntaxTokenPatch",
+              revision,
+              from: syntaxPatch.from,
+              to: syntaxPatch.to,
+              expectedText: syntaxPatch.expectedText,
+              tokens: syntaxPatch.tokens,
+            } satisfies VisualEditorHostMessage),
+        bracketPatch === undefined
+          ? Promise.resolve(false)
+          : session.panel.webview.postMessage({
+              protocol: VISUAL_EDITOR_PROTOCOL,
+              type: "bracketTokenPatch",
+              revision,
+              from: bracketPatch.from,
+              to: bracketPatch.to,
+              expectedText: bracketPatch.expectedText,
+              tokens: bracketPatch.tokens,
+            } satisfies VisualEditorHostMessage),
+      ]);
     };
     state.syntaxQueue = state.syntaxQueue.then(operation, operation);
   }
@@ -1427,11 +1544,15 @@ export class VisualEditorProvider
       }
     }
 
-    if (
-      config.autoSnippets &&
-      shouldRunVisualAutomaticSnippet(changes, cursorOffset)
-    ) {
-      const position = visualPositionAt(document, cursorOffset);
+    const automaticInputPlan = planVisualAutomaticSnippetInput(
+      changes,
+      cursorOffset,
+    );
+    if (config.autoSnippets && automaticInputPlan !== undefined) {
+      const position = visualPositionAt(document, automaticInputPlan.matchOffset);
+      const inputModifiers = automaticInputPlan.generatedCloser === undefined
+        ? []
+        : [automaticInputPlan.generatedCloser];
       const template = this.templates.match(document, position);
       if (template !== undefined) {
         return this.postSnippet(
@@ -1441,6 +1562,8 @@ export class VisualEditorProvider
           visualOffsetAt(document, template.range.end),
           template.parts,
           revision,
+          undefined,
+          inputModifiers,
         );
       }
       const automatic = this.runtime.matchAt(
@@ -1457,6 +1580,8 @@ export class VisualEditorProvider
           visualOffsetAt(document, automatic.range.end),
           automatic.match.replacement,
           revision,
+          undefined,
+          inputModifiers,
         );
       }
     }
@@ -1679,10 +1804,7 @@ export class VisualEditorProvider
         if (
           plan !== undefined &&
           (plan.kind !== "math-delimiter" ||
-            (
-              mathRegion?.mode === "inline" &&
-              mathRegion.environmentName === undefined
-            ))
+            mathRegion?.environmentName === undefined)
         ) {
           await this.postApplyEdit(
             state,
@@ -1751,7 +1873,9 @@ export class VisualEditorProvider
     }
 
     if (message.action === "shiftEnter") {
-      const exitPlan = planVisualEnvironmentExit(state.mirrorText, offset);
+      const exitPlan = planVisualEnvironmentExit(state.mirrorText, offset, {
+        eol: "\n",
+      });
       if (exitPlan !== undefined) {
         await this.postApplyEdit(
           state,
@@ -1932,6 +2056,7 @@ export class VisualEditorProvider
           position,
           cancellation.token,
           session.bibliographyRequest,
+          session.bibliographyUris,
         );
       } catch (error: unknown) {
         this.output.info(
@@ -2533,7 +2658,127 @@ export class VisualEditorProvider
       projectExecutableText(projectContext, session.document.uri, text),
       visualProjectScanOptions(projectContext, session.document.uri),
     );
-    const record = structure.records.find((candidate) =>
+    if (message.kind === "frontMatter") {
+      const target = message.key === undefined ? undefined
+        : resolveVisualFrontMatter(structure, projectContext).targetsById.get(message.key);
+      if (target === undefined || target.originFrom !== message.from || target.originTo !== message.to ||
+        session.disposed || session.documentGeneration !== projectGeneration || state.pendingEdits !== 0 ||
+        session.acceptedRevision !== message.revision || visualDocumentText(state.document) !== text) {
+        await this.postStatus(session, "warning", "文首信息已变化，请等待预览更新后再点击。");
+        return;
+      }
+      const focused = await this.focusVisualRange(target.uri, target.from, target.to, false,
+        { from: 0, to: target.expectedDocument.length, expectedText: target.expectedDocument },
+        true, { center: true, flash: true });
+      if (focused) {
+        await this.rememberNavigationOrigin(session, { anchor: message.from, head: message.from });
+      } else {
+        await this.postStatus(session, "warning", "文首源码已变化或无法打开，本次跳转已取消。");
+      }
+      return;
+    }
+    if (message.kind === "tableOfContents") {
+      const tableOfContents = structure.records.find(
+        (candidate): candidate is Extract<
+          VisualStructureRecord,
+          { readonly kind: "tableOfContents" }
+        > =>
+          candidate.kind === "tableOfContents" &&
+          candidate.replacement.sourceFrom === message.from &&
+          candidate.replacement.sourceTo === message.to,
+      );
+      if (tableOfContents === undefined || message.key === undefined) {
+        await this.postStatus(session, "warning", "目录已变化，无法安全跳转。");
+        return;
+      }
+      const resolution = resolveVisualTableOfContents(structure, projectContext);
+      const target = resolution.targetsById.get(message.key);
+      const resolvedRecord = resolution.structure.records.find(
+        (candidate): candidate is Extract<
+          VisualStructureRecord,
+          { readonly kind: "tableOfContents" }
+        > =>
+          candidate.kind === "tableOfContents" &&
+          candidate.replacement.sourceFrom === message.from &&
+          candidate.replacement.sourceTo === message.to,
+      );
+      if (
+        target === undefined ||
+        resolvedRecord?.kind !== "tableOfContents" ||
+        !resolvedRecord.entries.some((entry) => entry.id === message.key)
+      ) {
+        await this.postStatus(session, "warning", "目录项已变化，无法安全跳转。");
+        return;
+      }
+      if (
+        session.disposed ||
+        session.documentGeneration !== projectGeneration ||
+        state.pendingEdits !== 0 ||
+        session.acceptedRevision !== message.revision ||
+      visualDocumentText(state.document) !== text
+      ) {
+        await this.postStatus(session, "warning", "项目或文档已变化，本次目录跳转已取消。");
+        return;
+      }
+      const targetFile = projectFileFor(projectContext, target.uri);
+      if (
+        targetFile === undefined ||
+        target.to > targetFile.text.length ||
+        targetFile.text.slice(target.from, target.to) !== target.expectedText
+      ) {
+        await this.postStatus(session, "warning", "目录目标已变化，无法安全跳转。");
+        return;
+      }
+      const navigationOrigin = {
+        anchor: tableOfContents.replacement.sourceFrom,
+        head: tableOfContents.replacement.sourceFrom,
+      };
+      if (sameUri(target.uri, session.document.uri)) {
+        if (
+          session.disposed ||
+          session.documentGeneration !== projectGeneration ||
+          state.pendingEdits !== 0 ||
+          session.acceptedRevision !== message.revision ||
+          visualDocumentText(state.document) !== text ||
+          text.slice(target.from, target.to) !== target.expectedText
+        ) {
+          await this.postStatus(session, "warning", "文档已变化，本次目录跳转已取消。");
+          return;
+        }
+        session.selection = { anchor: target.contentFrom, head: target.contentFrom };
+        const focused = await session.panel.webview.postMessage({
+          protocol: VISUAL_EDITOR_PROTOCOL,
+          type: "focus",
+          selection: session.selection,
+          options: { center: true, flash: true },
+        } satisfies VisualEditorHostMessage);
+        if (focused) {
+          await this.rememberNavigationOrigin(session, navigationOrigin);
+        }
+      } else {
+        const focused = await this.focusVisualRange(
+          target.uri,
+          target.contentFrom,
+          target.contentFrom,
+          false,
+          {
+            from: target.from,
+            to: target.to,
+            expectedText: target.expectedText,
+          },
+          true,
+          { center: true, flash: true },
+        );
+        if (focused) {
+          await this.rememberNavigationOrigin(session, navigationOrigin);
+        } else {
+          await this.postStatus(session, "warning", "无法打开跨文件目录目标。");
+        }
+      }
+      return;
+    }
+    const record = visualInlineReferenceRecords(structure).find((candidate) =>
+      (candidate.kind === "reference" || candidate.kind === "citation") &&
       candidate.kind === message.kind &&
       candidate.from === message.from &&
       candidate.to === message.to
@@ -2621,10 +2866,7 @@ export class VisualEditorProvider
         await this.postStatus(session, "warning", "引用目标已变化，无法安全跳转。");
         return;
       }
-      await this.rememberNavigationOrigin(session, {
-        anchor: record.from,
-        head: record.from,
-      });
+      const navigationOrigin = { anchor: record.from, head: record.from };
       if (sameUri(target.uri, session.document.uri)) {
         if (
           session.disposed ||
@@ -2638,23 +2880,31 @@ export class VisualEditorProvider
           return;
         }
         session.selection = { anchor: target.keyFrom, head: target.keyFrom };
-        await session.panel.webview.postMessage({
+        const focused = await session.panel.webview.postMessage({
           protocol: VISUAL_EDITOR_PROTOCOL,
           type: "focus",
           selection: session.selection,
         } satisfies VisualEditorHostMessage);
-      } else if (!await this.focusVisualRange(
-        target.uri,
-        target.keyFrom,
-        target.keyFrom,
-        false,
-        {
-          from: target.keyFrom,
-          to: target.keyTo,
-          expectedText: key,
-        },
-      )) {
-        await this.postStatus(session, "warning", "无法打开跨文件引用目标。");
+        if (focused) {
+          await this.rememberNavigationOrigin(session, navigationOrigin);
+        }
+      } else {
+        const focused = await this.focusVisualRange(
+          target.uri,
+          target.keyFrom,
+          target.keyFrom,
+          false,
+          {
+            from: target.keyFrom,
+            to: target.keyTo,
+            expectedText: key,
+          },
+        );
+        if (focused) {
+          await this.rememberNavigationOrigin(session, navigationOrigin);
+        } else {
+          await this.postStatus(session, "warning", "无法打开跨文件引用目标。");
+        }
       }
       return;
     }
@@ -2680,35 +2930,23 @@ export class VisualEditorProvider
         return;
       }
       const position = manualTargets[0]!.sourceFrom!;
-      await this.rememberNavigationOrigin(session, {
-        anchor: record.from,
-        head: record.from,
-      });
+      const navigationOrigin = { anchor: record.from, head: record.from };
       session.selection = { anchor: position, head: position };
-      await session.panel.webview.postMessage({
+      const focused = await session.panel.webview.postMessage({
         protocol: VISUAL_EDITOR_PROTOCOL,
         type: "focus",
         selection: session.selection,
       } satisfies VisualEditorHostMessage);
+      if (focused) {
+        await this.rememberNavigationOrigin(session, navigationOrigin);
+      }
       return;
     }
 
-    let bibliographyUris: readonly vscode.Uri[];
-    try {
-      bibliographyUris = await this.resolveProjectBibliographyUris(
-        projectContext,
-        session.document,
-        structure.bibliographyPaths,
-        session.bibliographyRequest,
-      );
-    } catch (error) {
-      await this.postStatus(
-        session,
-        "warning",
-        `无法解析项目参考文献库：${errorMessage(error)}`,
-      );
-      return;
-    }
+    const bibliographyUris = await resolveTemplateBibliographyUris(projectContext);
+    const bibliographyDocument = projectContext.rootUri === undefined
+      ? session.document
+      : await vscode.workspace.openTextDocument(projectContext.rootUri);
     if (
       session.disposed ||
       session.documentGeneration !== projectGeneration ||
@@ -2718,10 +2956,9 @@ export class VisualEditorProvider
     ) {
       return;
     }
-    const result = await this.citations.revealProjectBibliographyEntry(
-      bibliographyUris,
-      key,
-    );
+    const result = bibliographyUris === undefined
+      ? await this.citations.revealVisualBibliographyEntry(bibliographyDocument, session.bibliographyRequest, key)
+      : await this.citations.revealProjectBibliographyEntry(bibliographyUris, key);
     if (result.status === "found") {
       await this.rememberNavigationOrigin(session, {
         anchor: record.from,
@@ -2732,10 +2969,8 @@ export class VisualEditorProvider
         session,
         "warning",
         result.status === "duplicate"
-          ? `参考文献 “${key}” 在项目参考文献库中定义了多次，已停止跳转。`
-          : result.searchedUris.length === 0
-          ? "当前项目没有可搜索的 .bib 参考文献库。"
-          : `没有在 ${result.searchedUris.length} 个项目参考文献库中找到 “${key}”。`,
+          ? `项目参考文献中 “${key}” 定义了多次，已停止跳转。`
+          : `没有在当前项目的参考文献文件中找到 “${key}”。`,
       );
     }
   }
@@ -2746,63 +2981,10 @@ export class VisualEditorProvider
     currentPaths: readonly string[],
     fallbackPath: string | undefined,
   ): Promise<readonly vscode.Uri[]> {
-    const declarations: Array<{
-      readonly documentUri: vscode.Uri;
-      readonly bibliographyPath: string;
-    }> = [];
-    const reachableFiles = context.files
-      .filter((file) => file.reachableFromRoot)
-      .sort((left, right) => left.texOrder - right.texOrder);
-
-    for (const file of reachableFiles) {
-      const bibliographyPaths = sameUri(file.uri, currentDocument.uri)
-        ? currentPaths
-        : scanVisualDocumentStructure(
-            projectExecutableText(context, file.uri, file.text),
-            visualProjectScanOptions(context, file.uri),
-          ).bibliographyPaths;
-      for (const bibliographyPath of bibliographyPaths) {
-        declarations.push({ documentUri: file.uri, bibliographyPath });
-        if (declarations.length > MAX_VISUAL_PROJECT_BIBLIOGRAPHIES) {
-          throw new Error(
-            `项目声明的参考文献库超过安全上限 ${MAX_VISUAL_PROJECT_BIBLIOGRAPHIES} 个`,
-          );
-        }
-      }
-    }
-
-    // Keep the configured library as a fallback for projects that use a class
-    // or package macro which the lightweight structure scanner cannot see.
-    if (fallbackPath !== undefined && fallbackPath.trim().length > 0) {
-      declarations.push({
-        documentUri: currentDocument.uri,
-        bibliographyPath: fallbackPath,
-      });
-    }
-
-    const result: vscode.Uri[] = [];
-    const seen = new Set<string>();
-    for (const declaration of declarations) {
-      const sourceDocument = sameUri(declaration.documentUri, currentDocument.uri)
-        ? currentDocument
-        : await vscode.workspace.openTextDocument(declaration.documentUri);
-      const bibliographyUri = await this.citations.resolveProjectBibliographyUri(
-        sourceDocument,
-        declaration.bibliographyPath,
-      );
-      const key = visualUriKey(bibliographyUri);
-      if (seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      result.push(bibliographyUri);
-      if (result.length > MAX_VISUAL_PROJECT_BIBLIOGRAPHIES) {
-        throw new Error(
-          `项目参考文献库超过安全上限 ${MAX_VISUAL_PROJECT_BIBLIOGRAPHIES} 个`,
-        );
-      }
-    }
-    return result;
+    const explicit = await resolveTemplateBibliographyUris(context);
+    if (explicit !== undefined) return explicit;
+    const configuredPath = fallbackPath ?? readConfig(currentDocument.uri).bibliographyFile;
+    return [await this.citations.resolveProjectBibliographyUri(currentDocument, configuredPath)];
   }
 
   private async handleAiIssueAction(
@@ -2864,65 +3046,67 @@ export class VisualEditorProvider
     await this.postAiIssues(session);
   }
 
-  private async rememberNavigationOrigin(
-    session: VisualEditorSession,
-    requestedSelection: VisualEditorSelection = session.selection,
-  ): Promise<void> {
-    const selection = clampSelection(
-      requestedSelection,
-      this.stateFor(session.document).mirrorText.length,
-    );
-    const previous = this.navigationHistory.at(-1);
-    if (
-      previous === undefined ||
-      previous.uri !== session.document.uri.toString() ||
-      previous.selection.anchor !== selection.anchor ||
-      previous.selection.head !== selection.head
-    ) {
-      this.navigationHistory.push({
-        uri: session.document.uri.toString(),
-        selection,
-      });
-      if (this.navigationHistory.length > 100) {
-        this.navigationHistory.splice(0, this.navigationHistory.length - 100);
-      }
-    }
-    this.activeSession = session;
-    await vscode.commands.executeCommand(
-      "setContext",
-      "texleaf.visualNavigationAvailable",
-      true,
-    );
+  private async rememberNavigationOrigin(session: VisualEditorSession, requestedSelection = session.selection): Promise<void> {
+    const origin = { uri: session.document.uri.toString(), selection: clampSelection(requestedSelection, this.stateFor(session.document).mirrorText.length) };
+    const run = this.navigationQueue.then(async () => {
+      this.navigationHistories.recordOrigin("visual", origin);
+      await this.updateNavigationContexts();
+    });
+    this.navigationQueue = run.catch(error => this.output.error(errorMessage(error)));
+    await run;
   }
 
-  private async navigateBack(
-    preferred: VisualEditorSession | undefined,
-  ): Promise<void> {
+  private navigateBack(preferred: VisualEditorSession | undefined): Promise<void> {
+    return this.navigateVisualHistory("back", preferred);
+  }
+
+  private navigateForward(preferred: VisualEditorSession | undefined): Promise<void> {
+    return this.navigateVisualHistory("forward", preferred);
+  }
+
+  private async navigateVisualHistory(direction: NavigationHistoryDirection, preferred: VisualEditorSession | undefined): Promise<void> {
     const session = preferred ?? this.activeSession;
-    const location = this.navigationHistory.pop();
-    if (session?.disposed === true || location === undefined) {
-      await vscode.commands.executeCommand(
-        "setContext",
-        "texleaf.visualNavigationAvailable",
-        false,
-      );
-      await vscode.commands.executeCommand("workbench.action.navigateBack");
-      return;
-    }
-    const focused = await this.focusVisualRange(
-      location.uri,
-      location.selection.anchor,
-      location.selection.head,
-      false,
-    );
-    if (!focused) {
-      this.navigationHistory.push(location);
-    }
-    await vscode.commands.executeCommand(
-      "setContext",
-      "texleaf.visualNavigationAvailable",
-      this.navigationHistory.length > 0,
-    );
+    const native = vscode.window.activeTextEditor;
+    const observed = session !== undefined && !session.disposed
+      ? { uri: session.document.uri.toString(), selection: { ...session.selection } }
+      : native === undefined ? undefined : {
+          uri: native.document.uri.toString(),
+          selection: { anchor: visualOffsetAt(native.document, native.selection.anchor), head: visualOffsetAt(native.document, native.selection.active) },
+        };
+    const generation = this.navigationHistories.generation("visual");
+    const run = this.navigationQueue.then(async () => {
+      const target = this.navigationHistories.peek("visual", direction);
+      if (target === undefined || observed === undefined) {
+        await vscode.commands.executeCommand(direction === "back" ? "workbench.action.navigateBack" : "workbench.action.navigateForward");
+        return;
+      }
+      const current = this.navigationHistories.currentFor("visual", generation, observed);
+      const uri = vscode.Uri.parse(target.uri, true);
+      let restored: boolean;
+      if (uri.path.toLowerCase().endsWith(".tex")) {
+        restored = await this.focusVisualRange(uri, Math.min(target.selection.anchor, target.selection.head), Math.max(target.selection.anchor, target.selection.head), false);
+      } else {
+        const document = await vscode.workspace.openTextDocument(uri);
+        const editor = await vscode.window.showTextDocument(document, { preview: false });
+        editor.selection = new vscode.Selection(visualPositionAt(document, target.selection.anchor), visualPositionAt(document, target.selection.head));
+        editor.revealRange(editor.selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+        restored = true;
+      }
+      if (restored) {
+        this.navigationHistories.commitRestored("visual", direction, target, current, target);
+        await this.updateNavigationContexts();
+      }
+    });
+    this.navigationQueue = run.catch(error => this.output.error(errorMessage(error)));
+    await run;
+  }
+
+  private async updateNavigationContexts(): Promise<void> {
+    const snapshot = this.navigationHistories.snapshot("visual");
+    await Promise.all([
+      vscode.commands.executeCommand("setContext", "texleaf.visualNavigationAvailable", snapshot.back > 0),
+      vscode.commands.executeCommand("setContext", "texleaf.navigationForwardAvailable", snapshot.forward > 0),
+    ]);
   }
 
   private projectFileSnapshot(
@@ -3070,6 +3254,7 @@ export class VisualEditorProvider
     parts: readonly ReplacementPart[],
     revision: number,
     requestId?: number,
+    additionalModifiers: readonly VisualEditorSnippetModifier[] = [],
   ): Promise<boolean> {
     const text = state.mirrorText;
     if (
@@ -3089,7 +3274,7 @@ export class VisualEditorProvider
           : { ...part, placeholder: normalizeVisualText(part.placeholder) }
     );
     const config = readConfig(session.document.uri);
-    const modifiers = config.autoEnlargeBrackets
+    const autoEnlargeModifiers = config.autoEnlargeBrackets
       ? planVisualAutoEnlarge(
           text,
           from,
@@ -3098,10 +3283,13 @@ export class VisualEditorProvider
           config.autoEnlargeTriggers,
         )
       : [];
-    const visualModifiers = modifiers.map((modifier) => ({
+    const modifiers = [
+      ...autoEnlargeModifiers,
+      ...additionalModifiers,
+    ].map((modifier) => ({
       ...modifier,
       insert: normalizeVisualText(modifier.insert),
-    }));
+    })).sort((left, right) => left.from - right.from || left.to - right.to);
     const encoding = replacementPartsToCodeMirrorSnippet(visualParts);
     const posted = await session.panel.webview.postMessage({
       protocol: VISUAL_EDITOR_PROTOCOL,
@@ -3116,7 +3304,7 @@ export class VisualEditorProvider
       openBraceMarker: encoding.openBraceMarker,
       closeBraceMarker: encoding.closeBraceMarker,
       hasSnippetFields: visualParts.some((part) => part.kind === "tabstop"),
-      modifiers: visualModifiers,
+      modifiers,
     } satisfies VisualEditorHostMessage);
     return posted;
   }
@@ -3194,10 +3382,12 @@ export class VisualEditorProvider
     // Native/external edits can replace arbitrary grammar state. Unlike edits
     // originating in CodeMirror, they cannot safely reuse mapped TextMate
     // ranges, so refresh exact theme tokens on this synchronization only.
-    state.refreshSyntaxOnNextSync = true;
+    state.refreshBracketsOnNextSync = true;
+          state.refreshSyntaxOnNextSync = true;
     for (const session of state.sessions) {
       session.acceptedRevision = 0;
-      session.syntaxRefreshRequired = true;
+      session.bracketRefreshRequired = true;
+              session.syntaxRefreshRequired = true;
       session.syntaxRefreshAttempts = 0;
     }
     this.scheduleDocumentSync(state, DOCUMENT_SYNC_DELAY_MS);
@@ -3207,8 +3397,13 @@ export class VisualEditorProvider
     state.epoch += 1;
     state.pendingEdits = 0;
     state.mirrorText = visualDocumentText(state.document);
+    state.refreshBracketsOnNextSync = true;
+    state.refreshSyntaxOnNextSync = true;
     for (const session of state.sessions) {
       session.acceptedRevision = 0;
+      session.bracketRefreshRequired = true;
+      session.syntaxRefreshRequired = true;
+      session.syntaxRefreshAttempts = 0;
       void this.postDocument(session, "document");
     }
   }
@@ -3256,7 +3451,13 @@ export class VisualEditorProvider
   private invalidateBibliographyPreviews(): void {
     for (const state of this.states.values()) {
       for (const session of state.sessions) {
+        // Also cancel an in-flight read; clearing entries alone lets an older
+        // filesystem snapshot repopulate the cache before the scheduled render.
+        session.documentGeneration += 1;
+        session.completionGeneration += 1;
         session.bibliographyRequest = undefined;
+        session.bibliographyUris = undefined;
+        session.bibliographySetKey = undefined;
         session.bibliographyEntries = undefined;
       }
       this.scheduleDocumentSync(state, DOCUMENT_SYNC_DELAY_MS);
@@ -3305,12 +3506,20 @@ export class VisualEditorProvider
     // changes, and external/native-editor replacements instead.
     const refreshSyntax = type === "initialize" ||
       session.syntaxRefreshRequired || state.refreshSyntaxOnNextSync;
+    const bracketPairColorizationEnabled = visualBracketColorizationEnabled(
+      session.document,
+      config,
+    );
+    const refreshBrackets = type === "initialize" ||
+      session.bracketRefreshRequired || state.refreshBracketsOnNextSync;
     const executableText = projectExecutableText(
       projectContext,
       session.document.uri,
       text,
     );
     let structure = scanVisualDocumentStructure(executableText, structureOptions);
+    structure = resolveVisualTableOfContents(structure, projectContext).structure;
+    structure = resolveVisualFrontMatter(structure, projectContext).structure;
     this.traceMathPreview("document:structure", { generation: documentGeneration });
     const rootFile = projectContext.rootUri === undefined
       ? undefined
@@ -3322,31 +3531,63 @@ export class VisualEditorProvider
           projectExecutableText(projectContext, rootFile.uri, rootFile.text),
           visualProjectScanOptions(projectContext, rootFile.uri),
         ).bibliographyPaths;
-    const needsExternalBibliography = structure.citedKeys.length > 0 ||
+    const manualCitationKeys = new Set(structure.records.flatMap((record) =>
+      record.kind === "bibliography" && record.manual ? record.entries.map((entry) => entry.key) : []));
+    const needsExternalBibliography = structure.citedKeys.some((key) => !manualCitationKeys.has(key)) ||
       structure.records.some(
         (record) => record.kind === "bibliography" && !record.manual,
       );
+    const requestedPath = structure.bibliographyPaths[0] ??
+      rootBibliographyPaths[0] ?? config.bibliographyFile;
+    let bibliographyUris: readonly vscode.Uri[] | undefined;
     if (needsExternalBibliography) {
-      const requestedPath = structure.bibliographyPaths[0] ??
-        rootBibliographyPaths[0] ?? config.bibliographyFile;
-      if (
-        session.bibliographyRequest !== requestedPath ||
-        session.bibliographyEntries === undefined
-      ) {
-        try {
+      let bibliographySetKey: string | undefined;
+      try {
+        bibliographyUris = await resolveTemplateBibliographyUris(projectContext);
+        bibliographySetKey = bibliographyUris?.map((uri) => uri.toString()).join("\n");
+        if (
+          session.disposed || session.documentGeneration !== documentGeneration ||
+          session.document.version !== version || visualDocumentText(session.document) !== text
+        ) return;
+        if (
+          session.bibliographyRequest !== requestedPath ||
+          session.bibliographySetKey !== bibliographySetKey ||
+          session.bibliographyEntries === undefined
+        ) {
           const bibliographyDocument = projectContext.rootUri === undefined
             ? session.document
             : await vscode.workspace.openTextDocument(projectContext.rootUri);
-          const bibliography = await this.citations.readBibliographyPreview(
-            bibliographyDocument,
-            requestedPath,
-          );
-          session.bibliographyRequest = bibliography.configuredPath;
-          session.bibliographyEntries = bibliography.entries;
-        } catch (error: unknown) {
+          const bibliography = bibliographyUris === undefined
+            ? await this.citations.readBibliographyPreview(bibliographyDocument, requestedPath)
+            : await this.citations.readProjectBibliographyPreview(bibliographyUris);
+          if (
+            session.disposed || session.documentGeneration !== documentGeneration ||
+            session.document.version !== version || visualDocumentText(session.document) !== text
+          ) return;
+          // Publish the set and entries together, only while this request still
+          // owns the session. Citation completion reads this same cache.
           session.bibliographyRequest = requestedPath;
-          session.bibliographyEntries = [];
-          this.output.warn(`可视化参考文献预览读取失败：${errorMessage(error)}`);
+          session.bibliographyUris = bibliographyUris;
+          session.bibliographySetKey = bibliographySetKey;
+          session.bibliographyEntries = bibliography.entries;
+          session.bibliographyError = undefined;
+        }
+      } catch (error: unknown) {
+        if (
+          session.disposed || session.documentGeneration !== documentGeneration ||
+          session.document.version !== version || visualDocumentText(session.document) !== text
+        ) return;
+        session.bibliographyRequest = requestedPath;
+        // If resolution itself failed, an explicit empty set prevents citation
+        // completion from silently falling back to an unrelated machine default.
+        session.bibliographyUris = bibliographyUris ?? [];
+        session.bibliographySetKey = bibliographySetKey;
+        session.bibliographyEntries = undefined;
+        const message = `可视化参考文献预览读取失败：${errorMessage(error)}`;
+        if (session.bibliographyError !== message) {
+          this.output.warn(message);
+          void vscode.window.showWarningMessage(`TeXLeaf：${message}`);
+          session.bibliographyError = message;
         }
       }
       if (
@@ -3357,14 +3598,14 @@ export class VisualEditorProvider
       ) {
         return;
       }
-      structure = resolveVisualBibliography(
-        structure,
-        session.bibliographyEntries ?? [],
-        path.posix.basename(
-          (session.bibliographyRequest ?? requestedPath).replaceAll("\\", "/"),
-        ),
-      );
     }
+    structure = resolveVisualBibliography(
+      structure,
+      needsExternalBibliography ? session.bibliographyEntries ?? [] : [],
+      bibliographyUris === undefined ? path.posix.basename(
+        (session.bibliographyRequest ?? requestedPath).replaceAll("\\", "/"),
+      ) : `${bibliographyUris.length} 个项目文献文件`,
+    );
     structure = await resolveVisualImagePreviews(
       session.panel.webview,
       session.document,
@@ -3385,12 +3626,19 @@ export class VisualEditorProvider
       inheritedMacroEnvironment: projectEnvironment,
     });
     this.traceMathPreview("document:formula-scan", { generation: documentGeneration });
-    structure = await resolveVisualStructureMath(
-      this.renderer,
-      structure,
-      preview,
-      config.mathPreviewScale,
-    );
+    if (config.mathPreviewEnabled) {
+      structure = await resolveVisualStructureMath(
+        this.renderer,
+        structure,
+        preview,
+        config.mathPreviewScale,
+        visualTexBinPath(session.document.uri),
+        () =>
+          !session.disposed &&
+          session.documentGeneration === documentGeneration &&
+          session.document.version === version,
+      );
+    }
     this.traceMathPreview("document:structure-math", { generation: documentGeneration });
     if (
       session.disposed ||
@@ -3411,25 +3659,32 @@ export class VisualEditorProvider
     const records = snapshot.records;
     session.snapshot = snapshot;
     session.renderGeneration += 1;
-    resetViewportRenderRequest(session);
     const currentFormulaIds = new Set(records.map((record) => record.id));
     for (const renderedId of session.renderedFormulaIds) {
       if (!currentFormulaIds.has(renderedId)) {
         session.renderedFormulaIds.delete(renderedId);
       }
     }
-    const compatibility = this.shouldBridgeLatexWorkshop(session.document.uri);
     const aiIssues = visualAiIssuesFor(this.aiWriting, session.document);
-    const diagnostics = visualDiagnosticsFor(session.document);
+    const diagnostics = visualDiagnosticsFor(
+      session.document,
+    );
     const background = resolveVisualEditorBackground(
       session.panel.webview,
       session.document.uri,
       session.backgroundViewColumn,
     );
-    const [syntaxPalette, syntaxTokens, templateCatalog] = await Promise.all([
+    const [syntaxPalette, syntaxTokens, bracketTokens, templateCatalog] = await Promise.all([
       this.syntaxTheme.resolve(session.document.uri),
       refreshSyntax
         ? this.syntaxTheme.tokenize(text, session.document.uri)
+        : Promise.resolve(undefined),
+      refreshBrackets
+        ? Promise.resolve(
+            bracketPairColorizationEnabled
+              ? this.bracketColorization.tokenize(text, state.key)
+              : [],
+          )
         : Promise.resolve(undefined),
       this.templates.listTemplates(),
     ]);
@@ -3441,6 +3696,12 @@ export class VisualEditorProvider
     ) {
       return;
     }
+    const initializeSelection = type === "initialize"
+      ? session.selection
+      : undefined;
+    const initializeFocus = type === "initialize"
+      ? session.initialFocus
+      : undefined;
     const message: VisualEditorHostMessage = {
       protocol: VISUAL_EDITOR_PROTOCOL,
       type,
@@ -3452,11 +3713,19 @@ export class VisualEditorProvider
         session.document.uri.scheme === "untitled",
       formulas: records,
       structures: structure.records,
-      ...(type === "initialize" ? { selection: session.selection } : {}),
+      ...(initializeSelection === undefined
+        ? {}
+        : { selection: initializeSelection }),
+      ...(initializeFocus === undefined ? {} : { initialFocus: initializeFocus }),
       mathPreviewPlacement: config.mathPreviewPlacement,
       capabilities: {
         latexWorkshopInstalled: latexWorkshopExtension() !== undefined,
-        latexWorkshopCompatibility: compatibility,
+        latexWorkshopCompatibility: this.shouldBridgeLatexWorkshop(session.document.uri),
+        localFileSystem: session.document.uri.scheme === "file",
+        workspaceTrusted: vscode.workspace.isTrusted,
+        buildEnabled: session.document.uri.scheme === "file" && vscode.workspace.isTrusted,
+        pdfViewerEnabled: session.document.uri.scheme === "file",
+        synctexEnabled: session.document.uri.scheme === "file" && vscode.workspace.isTrusted,
       },
       inputFeatures: {
         enabled: config.enabled,
@@ -3464,14 +3733,18 @@ export class VisualEditorProvider
         matrixShortcuts: config.matrixShortcuts,
         matrixEnvironments: config.matrixEnvironments,
         autoDeleteMathDelimiters: config.autoDeleteMathDelimiters,
-        providerCompletions: readVisualProviderCompletionSetting(
-          session.document.uri,
-        ),
+        internalCompletions: readVisualProviderCompletionSetting(session.document.uri),
+        providerCompletions: readVisualProviderCompletionSetting(session.document.uri),
+        mathPreviewEnabled: config.mathPreviewEnabled,
+        mathPreviewDebounceMs: config.mathPreviewDebounceMs,
+        bracketPairColorizationEnabled,
+        highlightActiveBracketPair: config.highlightActiveBracketPair,
         citationCommands: config.citationCommands,
       },
       ...(background === undefined ? {} : { background }),
       ...(syntaxPalette === undefined ? {} : { syntaxPalette }),
       ...(syntaxTokens === undefined ? {} : { syntaxTokens }),
+      ...(bracketTokens === undefined ? {} : { bracketTokens }),
       aiIssues,
       diagnostics,
       templates: templateCatalog.templates.map(
@@ -3492,10 +3765,31 @@ export class VisualEditorProvider
       return;
     }
     const delivered = await session.panel.webview.postMessage(message);
+    if (
+      delivered &&
+      type === "initialize" &&
+      session.initialFocus === initializeFocus
+    ) {
+      // This is a one-shot external-open intent. Keeping it after delivery
+      // would make a later Webview reload ignore the user's persisted caret.
+      session.initialFocus = undefined;
+    }
     this.traceMathPreview("document:posted", {
       generation: documentGeneration,
       delivered,
     });
+    if (
+      refreshBrackets &&
+      delivered &&
+      bracketTokens !== undefined &&
+      session.document.version === version &&
+      visualDocumentText(session.document) === text
+    ) {
+      session.bracketRefreshRequired = false;
+      state.refreshBracketsOnNextSync = [...state.sessions].some(
+        (candidate) => candidate.ready && candidate.bracketRefreshRequired,
+      );
+    }
     if (
       refreshSyntax &&
       delivered &&
@@ -3509,10 +3803,10 @@ export class VisualEditorProvider
           (candidate) => candidate.ready && candidate.syntaxRefreshRequired,
         );
       } else {
-        // On a fresh Extension Host, LaTeX Workshop's grammar contribution can
-        // appear just after this custom editor's first ready message.  The old
-        // code treated an omitted token snapshot as success, permanently
-        // leaving that visual tab on fallback colours.  Retry a few times with
+        // On a fresh Extension Host, theme contributions can settle just after
+        // this custom editor's first ready message. Treat an omitted token
+        // snapshot as transient and retry a few times while continuing to use
+        // TeXLeaf's bundled LaTeX grammar.
         // a rebuilt grammar runtime; future ordinary document syncs can still
         // retry after this bounded startup window.
         const retryDelay = SYNTAX_REFRESH_RETRY_DELAYS_MS[
@@ -3629,43 +3923,27 @@ export class VisualEditorProvider
     version: number,
     requestedFrom: number,
     requestedTo: number,
+    settled: boolean,
   ): Promise<void> {
-    if (!readConfig(session.document.uri).mathPreviewEnabled || session.disposed) {
+    if (!readConfig(session.document.uri).mathPreviewEnabled) {
       return;
     }
-    const snapshot = session.snapshot;
-    if (snapshot === undefined || snapshot.version !== version) {
-      return;
-    }
-    const normalizedFrom = clampInteger(
-      Math.min(requestedFrom, requestedTo),
-      0,
-      snapshot.text.length,
-    );
-    const normalizedTo = clampInteger(
-      Math.max(requestedFrom, requestedTo),
-      normalizedFrom,
-      snapshot.text.length,
-    );
     const requestGeneration = session.renderGeneration;
     const previous = session.viewportRenderRequest;
-    const sequence = previous !== undefined &&
-        previous.version === version &&
-        previous.generation === requestGeneration &&
-        visualFormulaViewportsKeepPriority(
-          previous.anchorFrom,
-          previous.anchorTo,
-          normalizedFrom,
-          normalizedTo,
-        )
-      ? previous.sequence
+    const viewportPlan = planVisualFormulaViewportLane(
+      previous,
+      {
+        version,
+        generation: requestGeneration,
+        from: requestedFrom,
+        to: requestedTo,
+        settled,
+      },
+      session.snapshot?.text.length ?? visualDocumentLength(session.document),
+    );
+    const sequence = viewportPlan.reusePreviousLane
+      ? previous!.sequence
       : ++session.viewportRenderSequence;
-    const anchorFrom = sequence === previous?.sequence
-      ? previous.anchorFrom
-      : normalizedFrom;
-    const anchorTo = sequence === previous?.sequence
-      ? previous.anchorTo
-      : normalizedTo;
     if (session.viewportRenderBudgetSequence !== sequence) {
       session.viewportRenderBudgetSequence = sequence;
       session.viewportRenderBudgetUsed = 0;
@@ -3674,15 +3952,16 @@ export class VisualEditorProvider
       sequence,
       generation: requestGeneration,
       version,
-      from: normalizedFrom,
-      to: normalizedTo,
-      anchorFrom,
-      anchorTo,
+      from: viewportPlan.from,
+      to: viewportPlan.to,
+      settled: viewportPlan.settled,
+      anchorFrom: viewportPlan.anchorFrom,
+      anchorTo: viewportPlan.anchorTo,
     };
     if (session.viewportRenderActive) {
-      // One pump always observes the latest request. A fast scrollbar gesture
-      // therefore replaces the old viewport instead of queueing another
-      // 48-formula render loop behind it.
+      // The single active pump observes the latest request after its current
+      // MathJax item. Old viewports therefore cannot build up independent
+      // 48-item loops behind a fast scrollbar gesture.
       return;
     }
 
@@ -3694,11 +3973,11 @@ export class VisualEditorProvider
         await waitForViewportInputQuiet(state, session);
         const request: VisualViewportRenderRequest | undefined =
           session.viewportRenderRequest;
-        const currentSnapshot = session.snapshot;
+        const snapshot = session.snapshot;
         if (
           request === undefined ||
-          currentSnapshot === undefined ||
-          currentSnapshot.version !== request.version ||
+          snapshot === undefined ||
+          snapshot.version !== request.version ||
           request.generation !== session.renderGeneration
         ) {
           return;
@@ -3713,23 +3992,34 @@ export class VisualEditorProvider
         if (remainingBudget <= 0) {
           return;
         }
-        const from = clampInteger(
-          request.from - 2_000,
-          0,
-          currentSnapshot.text.length,
+        // Live scrolling may prefetch a small source margin. Once the gesture
+        // settles, spend the fresh 48-item lane only on formulas that are
+        // actually visible; otherwise dense off-screen math can starve the
+        // final top/bottom edge and leave raw LaTeX behind indefinitely.
+        const candidatePlan = planVisualFormulaViewportLane(
+          undefined,
+          {
+            version: request.version,
+            generation: request.generation,
+            from: request.from,
+            to: request.to,
+            settled: request.settled,
+          },
+          snapshot.text.length,
         );
-        const to = clampInteger(
-          request.to + 2_000,
-          from,
-          currentSnapshot.text.length,
-        );
+        const from = candidatePlan.candidateFrom;
+        const to = candidatePlan.candidateTo;
         const firstVisibleResult = immediateSequence !== request.sequence;
+        // Inspect a complete small batch even before first paint. Empty formula
+        // bodies have no render input; processing them one at a time caused a
+        // synchronous full-record scan loop. The loop below still publishes at
+        // most the first renderable result alone for fast first paint.
         const batchSize = Math.min(
           VIEWPORT_FORMULA_RENDER_BATCH_SIZE,
           remainingBudget,
         );
         const candidates = selectVisualFormulaViewportBatch(
-          currentSnapshot.records,
+          snapshot.records,
           session.renderedFormulaIds,
           from,
           to,
@@ -3740,8 +4030,14 @@ export class VisualEditorProvider
         }
 
         const config = readConfig(session.document.uri);
-        const results: VisualFormulaRenderResult[] = [];
-        const errors: VisualFormulaRenderError[] = [];
+        const results: Array<{
+          formulaId: string;
+          formulaSource: string;
+          svg: string;
+          widthEm: number;
+          heightEm: number;
+        }> = [];
+        const errors: Array<{ formulaId: string; message: string }> = [];
         let reprioritize = false;
         let skippedWithoutAsset = false;
         for (const record of candidates) {
@@ -3751,7 +4047,7 @@ export class VisualEditorProvider
           if (
             session.disposed ||
             generation !== session.renderGeneration ||
-            session.snapshot !== currentSnapshot ||
+            session.snapshot !== snapshot ||
             activeRequest?.sequence !== request.sequence ||
             !visualFormulaViewportsKeepPriority(
               request.from,
@@ -3771,29 +4067,34 @@ export class VisualEditorProvider
             break;
           }
           session.viewportRenderBudgetUsed += 1;
-          const formula = currentSnapshot.formulaById.get(record.id);
+          const formula = snapshot.formulaById.get(record.id);
           const input = formula === undefined
             ? undefined
             : createMathPreviewRenderInput(
-                currentSnapshot.text,
+                snapshot.text,
                 formula,
-                currentSnapshot.preview,
+                snapshot.preview,
               );
           if (input === undefined) {
-            // This immutable snapshot can never produce an asset for this ID.
-            // Mark it once so geometry-only notifications do not retry it.
+            // This immutable snapshot cannot produce an asset for the record.
+            // Avoid retrying it on every geometry-only viewport notification;
+            // a source change creates a fresh content-derived ID.
             rememberRenderedFormulaId(session, record.id);
             skippedWithoutAsset = true;
             continue;
           }
           try {
-            const result = await this.renderer.render(input, config.mathPreviewScale);
+            const result = await this.renderer.render(
+              input,
+              config.mathPreviewScale,
+              visualTexBinPath(session.document.uri),
+            );
             const latestRequest: VisualViewportRenderRequest | undefined =
               session.viewportRenderRequest;
             if (
               session.disposed ||
               generation !== session.renderGeneration ||
-              session.snapshot !== currentSnapshot ||
+              session.snapshot !== snapshot ||
               latestRequest?.sequence !== request.sequence ||
               !visualFormulaViewportsKeepPriority(
                 request.from,
@@ -3808,13 +4109,14 @@ export class VisualEditorProvider
             rememberRenderedFormulaId(session, record.id);
             results.push({
               formulaId: record.id,
-              formulaSource: currentSnapshot.text.slice(record.from, record.to),
+              formulaSource: snapshot.text.slice(record.from, record.to),
               svg: result.svg,
               widthEm: result.widthEm,
               heightEm: result.heightEm,
             });
-            // Publish the nearest render immediately. If geometry or scrolling
-            // refined the viewport meanwhile, recalculate around its new center.
+            // A geometry update may have refined an overlapping viewport while
+            // this item rendered. Publish this valid result, then recalculate
+            // the next candidates around the newest center.
             if (firstVisibleResult || latestRequest !== request) {
               reprioritize = true;
               break;
@@ -3825,7 +4127,7 @@ export class VisualEditorProvider
             if (
               session.disposed ||
               generation !== session.renderGeneration ||
-              session.snapshot !== currentSnapshot ||
+              session.snapshot !== snapshot ||
               latestRequest?.sequence !== request.sequence ||
               !visualFormulaViewportsKeepPriority(
                 request.from,
@@ -3848,7 +4150,6 @@ export class VisualEditorProvider
             }
           }
         }
-
         const releaseUnposted = (): void => {
           for (const result of results) {
             session.renderedFormulaIds.delete(result.formulaId);
@@ -3863,8 +4164,11 @@ export class VisualEditorProvider
         }
         if (
           generation !== session.renderGeneration ||
-          session.snapshot !== currentSnapshot
+          session.snapshot !== snapshot
         ) {
+          // A latest viewport may already have arrived while this generation's
+          // MathJax promise was pending. Keep the one active pump alive so that
+          // request is not stranded behind viewportRenderActive=true.
           releaseUnposted();
           continue;
         }
@@ -3878,8 +4182,9 @@ export class VisualEditorProvider
             latestRequest.to,
           )
         ) {
-          // Keep the renderer cache warm, but do not publish stale SVG/DOM work
-          // for a viewport the user has already left.
+          // Results completed for a viewport that the user has already left.
+          // Keep the renderer cache warm, but do not force stale SVG/DOM work
+          // into the Webview. Returning to that region can resend them cheaply.
           releaseUnposted();
           continue;
         }
@@ -3901,6 +4206,9 @@ export class VisualEditorProvider
             if (session.viewportRenderRequest === request) {
               throw error;
             }
+            // A newer request arrived during the failed delivery. Give that
+            // request one attempt; a repeated failure without another request
+            // escapes to the existing message-handler error boundary.
             continue;
           }
           if (delivered) {
@@ -3911,28 +4219,37 @@ export class VisualEditorProvider
               session.disposed ||
               session.viewportRenderRequest === request
             ) {
+              // Never retry the same undeliverable batch in this pump. The next
+              // real viewport event may retry after the Webview is available.
               return;
             }
             continue;
           }
         } else if (skippedWithoutAsset) {
-          // Yield a task (not only a microtask) so fresh viewport messages can
-          // supersede a run of empty/unrenderable formula records.
-          await delay(0);
+          // Let new viewport/document messages run between bounded groups of
+          // empty formulas. Promise.resolve() would only yield a microtask and
+          // could still starve the Extension Host message queue.
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
         if (session.disposed) {
           return;
         }
         if (
           generation !== session.renderGeneration ||
-          session.snapshot !== currentSnapshot
+          session.snapshot !== snapshot
         ) {
+          // A delivered old-generation batch is harmlessly idempotent in the
+          // Webview, but releasing its reservation guarantees that the newest
+          // snapshot can resend the formula if the old version was ignored.
           releaseUnposted();
           continue;
         }
         if (reprioritize) {
           continue;
         }
+        // Continue with another bounded group. The first nearest formula was
+        // already delivered alone, so subsequent groups amortize Webview DOM
+        // work without delaying first paint.
       }
     } finally {
       session.viewportRenderActive = false;
@@ -3943,6 +4260,9 @@ export class VisualEditorProvider
     session: VisualEditorSession,
     message: Extract<VisualEditorWebviewMessage, { readonly type: "cursorPreview" }>,
   ): Promise<void> {
+    if (!readConfig(session.document.uri).mathPreviewEnabled) {
+      return;
+    }
     const snapshot = session.snapshot;
     this.traceMathPreview("cursor:start", {
       requestId: message.requestId,
@@ -4035,6 +4355,7 @@ export class VisualEditorProvider
         input,
         config.mathPreviewScale,
         appearance.cursor,
+        visualTexBinPath(session.document.uri),
       );
       this.traceMathPreview("cursor:rendered", { requestId: message.requestId });
       if (
@@ -4087,6 +4408,9 @@ export class VisualEditorProvider
     session: VisualEditorSession,
     message: Extract<VisualEditorWebviewMessage, { readonly type: "formulaCommitPreview" }>,
   ): Promise<void> {
+    if (!readConfig(session.document.uri).mathPreviewEnabled) {
+      return;
+    }
     const snapshot = session.snapshot;
     const state = this.stateFor(session.document);
     const formulaTo = message.formulaFrom + message.formulaSource.length;
@@ -4151,6 +4475,7 @@ export class VisualEditorProvider
       const result = await this.renderer.renderCommittedFormula(
         input,
         config.mathPreviewScale,
+        visualTexBinPath(session.document.uri),
       );
       if (
         session.disposed ||
@@ -4266,7 +4591,7 @@ export class VisualEditorProvider
     ) {
       return;
     }
-    const reference = snapshot.structures.find(
+    const reference = visualInlineReferenceRecords({ records: snapshot.structures }).find(
       (record): record is Extract<VisualStructureRecord, { readonly kind: "reference" }> =>
         record.kind === "reference" &&
         record.from === message.from &&
@@ -4338,6 +4663,7 @@ export class VisualEditorProvider
           resolution.snapshot,
           message.key,
           resolution.target.uri,
+          "completion",
         );
     if (
       session.disposed ||
@@ -4363,9 +4689,10 @@ export class VisualEditorProvider
     snapshot: VisualSnapshot,
     key: string,
     resource: vscode.Uri = session.document.uri,
+    previewContext: "hover" | "completion" = "hover",
   ): Promise<Pick<
     Extract<VisualEditorHostMessage, { readonly type: "referencePreviewResult" }>,
-    "previews" | "theorem" | "heading" | "unavailableKeys"
+    "previews" | "theorem" | "heading" | "structure" | "unavailableKeys"
   >> {
     const config = readConfig(resource);
     const formulaMatches = snapshot.records.filter((record) =>
@@ -4390,7 +4717,11 @@ export class VisualEditorProvider
     const theoremRecord = theoremMatches.length === 1
       ? theoremMatches[0]
       : undefined;
-    const headingRecord = formula === undefined && theoremRecord === undefined
+    const structureTarget = formula === undefined && theoremRecord === undefined
+      ? findVisualLabeledStructureForLabel(snapshot.text, snapshot.structures, key)
+      : undefined;
+    const headingRecord = formula === undefined && theoremRecord === undefined &&
+        structureTarget === undefined
       ? findVisualHeadingForLabel(snapshot.text, snapshot.structures, key)
       : undefined;
 
@@ -4409,6 +4740,7 @@ export class VisualEditorProvider
         const result = await this.renderer.renderInteractive(
           input,
           config.mathPreviewScale,
+          visualTexBinPath(session.document.uri),
         );
         return {
           key,
@@ -4456,6 +4788,7 @@ export class VisualEditorProvider
           const result = await this.renderer.renderInteractive(
             input,
             config.mathPreviewScale,
+            visualTexBinPath(session.document.uri),
           );
           return {
             from: record.from - theoremRecord.bodyFrom,
@@ -4493,8 +4826,25 @@ export class VisualEditorProvider
           ...(headingRecord.number === undefined ? {} : { number: headingRecord.number }),
           title: headingRecord.title,
         };
+    let structure: VisualEditorReferenceStructurePreview | undefined;
+    if (structureTarget !== undefined) {
+      try {
+        structure = await this.createReferenceStructurePreview(
+          session,
+          snapshot,
+          key,
+          resource,
+          structureTarget,
+          previewContext,
+        );
+      } catch {
+        // A missing cross-file image or a failed local TeX process must end in
+        // the ordinary unavailable state, never leave the hover spinner alive.
+        structure = undefined;
+      }
+    }
     const unavailableKeys = rendered.some((result) => result.available) ||
-        theorem !== undefined || heading !== undefined
+        theorem !== undefined || heading !== undefined || structure !== undefined
       ? []
       : [key];
     return {
@@ -4510,6 +4860,7 @@ export class VisualEditorProvider
         : []),
       ...(theorem === undefined ? {} : { theorem }),
       ...(heading === undefined ? {} : { heading }),
+      ...(structure === undefined ? {} : { structure }),
       unavailableKeys: [...new Set(unavailableKeys)],
     };
   }
@@ -4597,6 +4948,15 @@ export class VisualEditorProvider
         return;
       case "openBibliography": {
         const projectContext = await this.projectContexts.getContext(session.document);
+        const uris = await resolveTemplateBibliographyUris(projectContext);
+        if (uris !== undefined) {
+          const picked = uris.length === 1 ? uris[0] : (await vscode.window.showQuickPick(
+            uris.map((uri) => ({ label: path.basename(uri.fsPath), description: uri.fsPath, uri })),
+            { title: "打开当前目标的参考文献文件" },
+          ))?.uri;
+          if (picked !== undefined) await vscode.window.showTextDocument(picked, { preview: false });
+          return;
+        }
         const bibliographyDocument = projectContext.rootUri === undefined
           ? session.document
           : await vscode.workspace.openTextDocument(projectContext.rootUri);
@@ -4620,6 +4980,9 @@ export class VisualEditorProvider
         return;
       case "navigateBack":
         await this.navigateBack(session);
+        return;
+      case "navigateForward":
+        await this.navigateForward(session);
         return;
       case "undo":
       case "redo":
@@ -4719,6 +5082,7 @@ export class VisualEditorProvider
         triggerKind: vscode.CompletionTriggerKind.Invoke,
         triggerCharacter: undefined,
       },
+      session.bibliographyUris === undefined ? undefined : { bibliographyUris: session.bibliographyUris },
     ).finally(() => cancellation.dispose());
     if (completions === undefined || completions.items.length === 0) {
       void vscode.window.showInformationMessage(
@@ -5327,6 +5691,9 @@ export class VisualEditorProvider
       // actual visual-editor jump instead of a background-only scroll.
       await vscode.commands.executeCommand(focusGroupCommand);
     }
+    if (session.disposed || (sourceGuard !== undefined && visualDocumentText(document) !== documentText)) {
+      return false;
+    }
     this.activeSession = session;
     return this.postVisualFocusWithAcknowledgement(
       session,
@@ -5696,11 +6063,14 @@ export class VisualEditorProvider
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, "dist", "visualEditor.js"),
     );
+    const pdfAssetsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.context.extensionUri, "dist", "pdfjs"),
+    );
     return `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; img-src ${webview.cspSource} https: data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; img-src ${webview.cspSource} https: data:; connect-src ${webview.cspSource}; font-src ${webview.cspSource} data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}' blob: 'wasm-unsafe-eval';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style nonce="${nonce}">
     :root { color-scheme: light dark; --texleaf-math-preview-caret: #ff2bd6; --texleaf-main-scrollbar-track: rgba(128, 128, 128, .34); --texleaf-main-scrollbar-thumb: rgba(224, 224, 224, .92); }
@@ -5812,7 +6182,7 @@ export class VisualEditorProvider
     #reference-hover { position: fixed; z-index: 85; display: none; box-sizing: border-box; width: min(460px, calc(100vw - 16px)); max-height: min(62vh, 420px); overflow: hidden; border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-editorWidget-border)); border-radius: 7px; color: var(--vscode-editorHoverWidget-foreground); background: var(--vscode-editorHoverWidget-background); box-shadow: 0 4px 14px var(--vscode-widget-shadow); font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size, 13px); line-height: 1.45; }
     #reference-hover.visible { display: block; }
     #reference-hover-content { max-height: min(62vh, 420px); overflow: auto; overscroll-behavior: contain; }
-    #reference-hover .texleaf-completion-info { padding: 12px 14px; }
+    #reference-hover .texleaf-completion-info { padding: 12px 14px; white-space: normal; overflow-wrap: anywhere; }
     #reference-hover .texleaf-completion-info + .texleaf-completion-info { border-top: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-editorWidget-border)); }
     #reference-hover .texleaf-completion-info h3 { margin: 0 0 10px; color: inherit; font-family: var(--vscode-font-family); font-size: 1.08em; line-height: 1.3; }
     #reference-hover .texleaf-completion-info p { margin: 7px 0; }
@@ -5845,16 +6215,42 @@ export class VisualEditorProvider
     #reference-hover .texleaf-reference-hover-theorem-math-canvas svg { display: block; width: 100%; height: 100%; max-width: none; max-height: none; color: inherit; }
     #reference-hover .texleaf-reference-hover-theorem-qed { float: right; margin-left: 10px; }
     #reference-hover .texleaf-reference-hover-theorem-truncated { clear: both; margin-top: 8px; color: var(--vscode-descriptionForeground); font-size: .86em; font-style: normal; }
+    #reference-hover.texleaf-reference-hover-wide { width: min(720px, calc(100vw - 16px)); }
+    #reference-hover .texleaf-reference-hover-structure { margin: 10px; overflow: hidden; border: 1px solid var(--vscode-editorWidget-border); border-radius: 7px; background: color-mix(in srgb, var(--vscode-editorWidget-background) 76%, transparent); }
+    #reference-hover .texleaf-reference-hover-structure-header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 8px 10px 7px; border-bottom: 1px solid var(--vscode-editorWidget-border); }
+    #reference-hover .texleaf-reference-hover-structure-header code { padding: 1px 5px; color: var(--vscode-descriptionForeground); background: var(--vscode-textCodeBlock-background); border: 1px solid var(--vscode-editorWidget-border); border-radius: 4px; font-size: .82em; }
+    #reference-hover .texleaf-reference-hover-structure-caption { padding: 7px 10px; color: var(--vscode-descriptionForeground); overflow-wrap: anywhere; }
+    #reference-hover .texleaf-reference-hover-structure-scroll { box-sizing: border-box; max-width: 100%; max-height: min(44vh, 320px); padding: 8px; overflow: auto; scrollbar-width: thin; }
+    #reference-hover .texleaf-reference-hover-structure-note { padding: 6px 10px 8px; color: var(--vscode-descriptionForeground); font-size: .84em; }
+    #reference-hover .texleaf-reference-hover-table-grid { width: max-content; min-width: min(100%, 32em); margin: 0 auto; border-collapse: collapse; font: inherit; }
+    #reference-hover .texleaf-reference-hover-table-grid th, #reference-hover .texleaf-reference-hover-table-grid td { max-width: 36em; padding: 5px 9px; border-bottom: 1px solid var(--vscode-editorWidget-border); text-align: center; vertical-align: middle; white-space: pre-wrap; }
+    #reference-hover .texleaf-reference-hover-table-grid th { font-weight: 700; border-top: 2px solid var(--vscode-editor-foreground); border-bottom-color: var(--vscode-editor-foreground); }
+    #reference-hover .texleaf-reference-hover-table-grid tbody tr:last-child td { border-bottom: 2px solid var(--vscode-editor-foreground); }
+    #reference-hover .texleaf-table-inline-content { white-space: pre-wrap; }
+    #reference-hover .texleaf-structure-math { display: inline-flex; align-items: center; justify-content: center; max-width: 100%; line-height: 1; vertical-align: middle; }
+    #reference-hover .texleaf-structure-math svg { display: block; width: var(--texleaf-structure-math-width, 1em); height: var(--texleaf-structure-math-height, 1em); max-width: 100%; max-height: 2.8em; color: inherit; }
+    #reference-hover .texleaf-reference-hover-image-viewport { display: grid; box-sizing: border-box; max-width: 100%; max-height: min(44vh, 340px); padding: 8px; overflow: auto; place-items: center; }
+    #reference-hover .texleaf-reference-hover-image-preview { display: block; max-width: 100%; max-height: min(42vh, 320px); object-fit: contain; border-radius: 4px; }
+    #reference-hover .texleaf-image-placeholder, #reference-hover .texleaf-local-latex-preview-fallback { display: grid; min-height: 7em; padding: 14px; place-items: center; color: var(--vscode-descriptionForeground); background: var(--vscode-textCodeBlock-background); border: 1px dashed var(--vscode-editorWidget-border); border-radius: 5px; }
+    #reference-hover .texleaf-local-latex-preview { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; padding: 8px; overflow: auto; color: inherit; text-align: center; scrollbar-width: thin; }
+    #reference-hover .texleaf-local-latex-preview svg { display: block; width: var(--texleaf-local-preview-width, auto); height: var(--texleaf-local-preview-height, auto); max-width: none; max-height: none; margin: 0 auto; color: inherit; }
+    #reference-hover .texleaf-reference-hover-diagram-canvas { position: relative; box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; min-height: 8em; max-height: min(44vh, 340px); padding: 1.5em; overflow: auto; }
+    #reference-hover .texleaf-tikzcd-grid { position: relative; z-index: 2; display: grid; align-items: center; justify-items: center; grid-auto-rows: minmax(3.2em, max-content); gap: 3.2em 4.2em; width: max-content; margin: 0 auto; }
+    #reference-hover .texleaf-tikzcd-node { display: flex; align-items: center; justify-content: center; min-width: 4.5em; min-height: 2.5em; padding: .2em .45em; background: color-mix(in srgb, var(--vscode-editorWidget-background) 94%, transparent); border-radius: 4px; }
+    #reference-hover .texleaf-tikzcd-node-empty { min-width: .5em; min-height: .5em; padding: 0; opacity: .35; }
+    #reference-hover .texleaf-tikzcd-arrows { position: absolute; inset: 0; z-index: 1; overflow: visible; color: var(--vscode-editor-foreground); pointer-events: none; }
+    #reference-hover .texleaf-tikzcd-arrow-label { position: absolute; z-index: 3; display: inline-flex; align-items: center; justify-content: center; padding: 1px 4px; color: var(--vscode-editor-foreground); background: var(--vscode-editorWidget-background); border-radius: 3px; transform: translate(-50%, -50%); pointer-events: none; }
     #editor { flex: 1; min-height: 0; overflow: hidden; background: transparent; }
   </style>
 </head>
 <body>
   <div id="toolbar" role="toolbar" aria-label="TeXLeaf 常用编辑工具栏">
     <button id="build-menu-button" class="primary toolbar-menu-trigger" type="button" title="选择 LaTeX 编译方式" aria-haspopup="menu" aria-expanded="false" data-toolbar-menu="build-menu"><span aria-hidden="true">▶</span><span>编译</span></button>
-    <button id="top-view-pdf" type="button" title="使用 LaTeX Workshop 查看 PDF"><span aria-hidden="true">▣</span><span>PDF</span></button>
+    <button id="top-view-pdf" type="button" title="在 TeXLeaf 内置查看器中打开 PDF"><span aria-hidden="true">▣</span><span>PDF</span></button>
     <button id="top-open-source" class="toolbar-toggle" type="button" title="在当前标签页切换源码模式" aria-pressed="false"><span aria-hidden="true">⌨</span><span class="toolbar-button-label">源码</span></button>
     <button id="top-open-native-source" type="button" title="在 VS Code 原生编辑器中打开"><span aria-hidden="true">↗</span><span>原生</span></button>
     <button id="top-save-document" type="button" title="保存文档（Ctrl/Cmd+S）"><span aria-hidden="true">▣</span><span>保存</span></button>
+    <button id="top-format-document" type="button" title="按 LaTeX 结构一键规范源码缩进（Shift+Alt/Option+F）" disabled><span aria-hidden="true">≡</span><span>排版</span></button>
     <span class="separator" aria-hidden="true"></span>
     <button id="edit-undo" type="button" title="撤销（Ctrl/Cmd+Z）">↶</button>
     <button id="edit-redo" type="button" title="重做（Ctrl/Cmd+Shift+Z）">↷</button>
@@ -5940,7 +6336,7 @@ export class VisualEditorProvider
   </div>
   <div id="editing-context-menu" role="menu" aria-label="TeXLeaf 编辑菜单" tabindex="-1" hidden>
     <div class="context-menu-group" role="group" aria-label="PDF 与视图">
-      <button id="view-pdf" type="button" role="menuitem" title="使用 LaTeX Workshop 查看 PDF"><span class="context-menu-icon">▣</span><span class="context-menu-label">查看 PDF</span></button>
+      <button id="view-pdf" type="button" role="menuitem" title="在 TeXLeaf 内置查看器中打开 PDF"><span class="context-menu-icon">▣</span><span class="context-menu-label">查看 PDF</span></button>
       <button id="synctex" type="button" role="menuitem" title="从当前光标正向定位到 PDF"><span class="context-menu-icon">⇄</span><span class="context-menu-label">从光标定位到 PDF</span></button>
       <button id="open-source" type="button" role="menuitem" aria-pressed="false"><span class="context-menu-icon">⌨</span><span class="context-menu-label">源码模式</span></button>
       <button id="open-native-source" type="button" role="menuitem"><span class="context-menu-icon">↗</span><span class="context-menu-label">在原生编辑器打开</span></button>
@@ -5950,7 +6346,6 @@ export class VisualEditorProvider
       <button id="edit-cut" type="button" role="menuitem"><span class="context-menu-icon">✂</span><span class="context-menu-label">剪切</span><span class="context-menu-shortcut">Ctrl+X</span></button>
       <button id="edit-copy" type="button" role="menuitem"><span class="context-menu-icon">▧</span><span class="context-menu-label">复制</span><span class="context-menu-shortcut">Ctrl+C</span></button>
       <button id="edit-paste" type="button" role="menuitem"><span class="context-menu-icon">▣</span><span class="context-menu-label">粘贴</span><span class="context-menu-shortcut">Ctrl+V</span></button>
-      <button id="edit-format-document" type="button" role="menuitem" title="只整理 LaTeX 行首缩进，不改写正文"><span class="context-menu-icon">≣</span><span class="context-menu-label">整理 LaTeX 缩进</span><span class="context-menu-shortcut">Shift+Alt+F</span></button>
     </div>
     <div class="context-menu-group" role="group" aria-label="插入 LaTeX 结构">
       <button data-texleaf-insert="proof" type="button" role="menuitem"><span class="context-menu-icon">∎</span><span class="context-menu-label">证明环境</span></button>
@@ -5994,7 +6389,7 @@ export class VisualEditorProvider
   <div id="reference-hover" role="tooltip" aria-hidden="true">
     <div id="reference-hover-content"></div>
   </div>
-  <div id="editor" data-csp-nonce="${nonce}">
+  <div id="editor" data-csp-nonce="${nonce}" data-pdf-assets="${pdfAssetsUri}/">
     <div id="editor-background" aria-hidden="true"></div>
     <div class="texleaf-editor-scrollbar" tabindex="0" role="scrollbar" aria-orientation="vertical" aria-label="可视化编辑器文档滚动条" title="可视化编辑器文档滚动条">
       <div class="texleaf-editor-scrollbar-thumb disabled" style="top: 3px; height: 52px"></div>
@@ -6003,6 +6398,129 @@ export class VisualEditorProvider
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
+  }
+private async tryPostOptimisticInputTransform(
+    state: VisualDocumentState,
+    session: VisualEditorSession,
+    changes: readonly VisualEditorChange[],
+    revision: number,
+  ): Promise<boolean> {
+    if (
+      session.disposed ||
+      session.acceptedRevision !== revision ||
+      session.selection.anchor !== session.selection.head
+    ) {
+      return false;
+    }
+    const document = session.document;
+    const config = readConfig(document.uri);
+    const cursorOffset = session.selection.head;
+    const inputPlan = planVisualAutomaticSnippetInput(changes, cursorOffset);
+    if (
+      !config.autoSnippets ||
+      !isVisualEditingDocument(document, config) ||
+      inputPlan === undefined
+    ) {
+      return false;
+    }
+    const automatic = this.runtime.matchAtText(
+      document.uri,
+      state.mirrorText,
+      inputPlan.matchOffset,
+      "auto",
+      config,
+    );
+    return automatic === undefined
+      ? false
+      : this.postSnippet(
+          state,
+          session,
+          automatic.from,
+          automatic.to,
+          automatic.match.replacement,
+          revision,
+          undefined,
+          inputPlan.generatedCloser === undefined
+            ? []
+            : [inputPlan.generatedCloser],
+        );
+  }
+
+private async createReferenceStructurePreview(
+    session: VisualEditorSession,
+    snapshot: VisualSnapshot,
+    key: string,
+    resource: vscode.Uri,
+    target: VisualLabeledStructureTarget,
+    previewContext: "hover" | "completion",
+  ): Promise<VisualEditorReferenceStructurePreview | undefined> {
+    const config = readConfig(resource);
+    if (target.targetKind === "table" && target.record.kind === "table") {
+      const bounded = boundedReferenceTableRecord(target.record);
+      const resolved = config.mathPreviewEnabled && previewContext === "hover"
+        ? await resolveVisualStructureMath(
+            this.renderer,
+            visualStructureDocument([bounded.record]),
+            snapshot.preview,
+            config.mathPreviewScale,
+            visualTexBinPath(session.document.uri),
+            () => !session.disposed,
+            "interactive",
+          )
+        : visualStructureDocument([bounded.record]);
+      const record = resolved.records[0];
+      return record?.kind === "table"
+        ? {
+            kind: "table",
+            key,
+            record,
+            previewTruncated: bounded.previewTruncated,
+          }
+        : undefined;
+    }
+    if (target.targetKind === "image" && target.record.kind === "image") {
+      let record = target.record;
+      if (record.previewUri === undefined) {
+        const document = sameUri(resource, session.document.uri)
+          ? session.document
+          : await vscode.workspace.openTextDocument(resource);
+        const resolved = await resolveVisualImagePreviews(
+          session.panel.webview,
+          document,
+          visualStructureDocument([record]),
+          snapshot.projectContext?.rootUri,
+        );
+        const candidate = resolved.records[0];
+        if (candidate?.kind !== "image") {
+          return undefined;
+        }
+        record = candidate;
+      }
+      return { kind: "image", key, record };
+    }
+    if (
+      target.targetKind === "diagram" &&
+      (target.record.kind === "tikzcd" || target.record.kind === "tikzpicture")
+    ) {
+      const resolved = config.mathPreviewEnabled &&
+          previewContext === "hover" &&
+          target.record.asset === undefined
+        ? await resolveVisualStructureMath(
+            this.renderer,
+            visualStructureDocument([target.record]),
+            snapshot.preview,
+            config.mathPreviewScale,
+            visualTexBinPath(session.document.uri),
+            () => !session.disposed,
+            "interactive",
+          )
+        : visualStructureDocument([target.record]);
+      const record = resolved.records[0];
+      return record?.kind === "tikzcd" || record?.kind === "tikzpicture"
+        ? { kind: "diagram", key, record }
+        : undefined;
+    }
+    return undefined;
   }
 }
 
@@ -6206,7 +6724,7 @@ function unavailableReferencePreviewPayload(
   key: string,
 ): Pick<
   Extract<VisualEditorHostMessage, { readonly type: "referencePreviewResult" }>,
-  "previews" | "theorem" | "heading" | "unavailableKeys"
+  "previews" | "theorem" | "heading" | "structure" | "unavailableKeys"
 > {
   return {
     previews: [],
@@ -6421,16 +6939,26 @@ async function resolveVisualImagePreviews(
   const projectDirectory = projectRoot?.scheme === "file"
     ? path.resolve(path.dirname(projectRoot.fsPath))
     : undefined;
+  const graphicsRoots: string[] = [];
+  extendWebviewLocalResourceRoots(webview, [
+    vscode.Uri.file(documentDirectory),
+    ...(projectDirectory === undefined ? [] : [vscode.Uri.file(projectDirectory)]),
+    ...graphicsRoots.map((directory) => vscode.Uri.file(directory)),
+  ]);
   const allowedRoots = uniqueResolvedPaths([
     documentDirectory,
     ...(projectDirectory === undefined ? [] : [projectDirectory]),
     ...workspaceRoots,
+    ...graphicsRoots,
   ]);
   const searchRoots = uniqueResolvedPaths([
-    documentDirectory,
     ...(projectDirectory === undefined ? [] : [projectDirectory]),
+    ...graphicsRoots,
+    documentDirectory,
     ...workspaceRoots,
   ]);
+  const allowedRealRoots = (await Promise.all(allowedRoots.map((directory) => realpath(directory).catch(() => undefined))))
+    .filter((directory): directory is string => directory !== undefined);
   let requested = 0;
   const records = await Promise.all(structure.records.map(async (record) => {
     if (record.kind !== "image" || requested >= MAX_VISUAL_IMAGE_PREVIEWS) {
@@ -6442,6 +6970,7 @@ async function resolveVisualImagePreviews(
       record,
       searchRoots,
       allowedRoots,
+      allowedRealRoots,
     );
     return previewUri === undefined ? record : { ...record, previewUri };
   }));
@@ -6453,6 +6982,9 @@ async function resolveVisualStructureMath(
   structure: VisualDocumentStructure,
   preview: MathPreviewSnapshot,
   scale: number,
+  texBinPath: string,
+  shouldContinue: () => boolean = () => true,
+  lane: "structure" | "interactive" = "structure",
 ): Promise<VisualDocumentStructure> {
   const fragments: Array<{
     readonly fragment: VisualMathFragment;
@@ -6466,7 +6998,21 @@ async function resolveVisualStructureMath(
   };
   const localAssets = new Map<string, NonNullable<VisualMathFragment["asset"]>>();
   for (const record of structure.records) {
-    if (record.kind === "table") {
+    if (record.kind === "maketitle") {
+      for (const source of [record.title, ...record.authors, ...record.affiliations, ...record.emails, record.date, ...(record.frontMatter?.sections ?? []).map(section => section.source)]) {
+        if (source === undefined) continue;
+        // Remote source keeps its literal formula fallback until that file is
+        // opened; never render it with this document's macro timeline.
+        if (source.navigationId !== undefined) continue;
+        for (const segment of source.segments ?? []) {
+          if (segment.kind === "math") appendFragment(segment.math, segment.math.sourceFrom);
+        }
+      }
+    } else if (record.kind === "image" || record.kind === "theorem") {
+      for (const segment of (record.kind === "image" ? record.captionSegments : record.optionalTitleSegments) ?? []) {
+        if (segment.kind === "math") appendFragment(segment.math, segment.math.sourceFrom);
+      }
+    } else if (record.kind === "table") {
       for (const segment of record.captionSegments) {
         if (segment.kind === "math") {
           appendFragment(segment.math, segment.math.sourceFrom);
@@ -6516,15 +7062,23 @@ async function resolveVisualStructureMath(
   const localRecords = structure.records.filter(
     (record) => record.kind === "tikzcd" || record.kind === "tikzpicture",
   );
-  await Promise.all([
-    ...[...unique].map(async ([key, input]) => {
+  const renderTasks: Array<() => Promise<void>> = [
+    ...[...unique].map(([key, input]) => async () => {
+      if (!shouldContinue()) {
+        return;
+      }
       try {
-        const rendered = await renderer.render({
+        const rendered = await renderer[
+          lane === "interactive" ? "renderInteractive" : "renderStructure"
+        ]({
           tex: input.tex,
           display: false,
           macros: input.environment.macros,
           macroFingerprint: input.environment.macroFingerprint,
-        }, scale);
+        }, scale, texBinPath);
+        if (!shouldContinue()) {
+          return;
+        }
         assets.set(key, {
           svg: rendered.svg,
           widthEm: rendered.widthEm,
@@ -6534,18 +7088,26 @@ async function resolveVisualStructureMath(
         // Unsupported cell/node syntax keeps its bounded plain-text fallback.
       }
     }),
-    ...localRecords.map(async (record) => {
+    ...localRecords.map((record) => async () => {
+      if (!shouldContinue()) {
+        return;
+      }
       try {
         const environment = mathPreviewMacroEnvironmentAtOffset(
           preview,
           record.replacement.sourceFrom,
         );
-        const rendered = await renderer.render({
+        const rendered = await renderer[
+          lane === "interactive" ? "renderInteractive" : "renderStructure"
+        ]({
           tex: record.tex,
           display: true,
           macros: environment.macros,
           macroFingerprint: environment.macroFingerprint,
-        }, scale);
+        }, scale, texBinPath);
+        if (!shouldContinue()) {
+          return;
+        }
         localAssets.set(localStructureAssetKey(record), {
           svg: rendered.svg,
           widthEm: rendered.widthEm,
@@ -6555,7 +7117,13 @@ async function resolveVisualStructureMath(
         // tikzcd keeps its geometric fallback; tikzpicture keeps editable source.
       }
     }),
-  ]);
+  ];
+  // The MathJax and local-TeX clients are deliberately bounded. Invoking as
+  // many as 160 promises at once overflowed their queues before the first item
+  // had completed, so later document syncs repeatedly retried dropped assets.
+  // A few lazy producers keep both queues below their limits and make the
+  // initial document cost deterministic.
+  await runBoundedTasks(renderTasks, VISUAL_STRUCTURE_RENDER_CONCURRENCY);
   const resolveFragment = (fragment: VisualMathFragment): VisualMathFragment => {
     const key = fragmentKeys.get(fragment);
     const asset = key === undefined ? undefined : assets.get(key);
@@ -6564,6 +7132,20 @@ async function resolveVisualStructureMath(
   return {
     ...structure,
     records: structure.records.map((record) => {
+      if (record.kind === "maketitle") {
+        const source = (value: VisualSourceText | undefined): VisualSourceText | undefined => value?.segments === undefined ? value
+          : { ...value, segments: value.segments.map(segment => segment.kind === "math" ? { ...segment, math: resolveFragment(segment.math) } : segment) };
+        return { ...record, title: source(record.title), authors: record.authors.map(value => source(value)!),
+          affiliations: record.affiliations.map(value => source(value)!), emails: record.emails.map(value => source(value)!), date: source(record.date),
+          ...(record.frontMatter === undefined ? {} : { frontMatter: { ...record.frontMatter,
+            sections: record.frontMatter.sections.map(section => ({ ...section, source: source(section.source)! })),
+          } }),
+        };
+      }
+      if (record.kind === "image") return { ...record, captionSegments: (record.captionSegments ?? []).map(segment =>
+        segment.kind === "math" ? { ...segment, math: resolveFragment(segment.math) } : segment) };
+      if (record.kind === "theorem") return { ...record, optionalTitleSegments: (record.optionalTitleSegments ?? []).map(segment =>
+        segment.kind === "math" ? { ...segment, math: resolveFragment(segment.math) } : segment) };
       if (record.kind === "table") {
         return {
           ...record,
@@ -6624,6 +7206,7 @@ async function resolveVisualImageUri(
   record: VisualImageRecord,
   searchRoots: readonly string[],
   allowedRoots: readonly string[],
+  allowedRealRoots: readonly string[],
 ): Promise<string | undefined> {
   const normalizedSource = record.path.replaceAll("/", path.sep);
   const sourceExtension = path.extname(normalizedSource).toLowerCase();
@@ -6643,8 +7226,18 @@ async function resolveVisualImageUri(
       try {
         const uri = vscode.Uri.file(candidate);
         const stat = await vscode.workspace.fs.stat(uri);
-        if ((stat.type & vscode.FileType.File) !== 0) {
-          return webview.asWebviewUri(uri).toString();
+        const actual = await realpath(candidate);
+        const fileStat = await lstat(candidate);
+        if ((stat.type & vscode.FileType.File) !== 0 && fileStat.isFile()
+          && allowedRealRoots.some((directory) => isPathInside(directory, actual))) {
+          const isPdf = path.extname(candidate).toLowerCase() === ".pdf";
+          if (isPdf && fileStat.size > MAX_VISUAL_PDF_IMAGE_BYTES) continue;
+          const previewUri = webview.asWebviewUri(uri);
+          // Remote file conversion can discard the original query, so add
+          // the PDF version only after converting to a Webview resource URI.
+          return (isPdf
+            ? previewUri.with({ query: `v=${fileStat.mtimeMs}-${fileStat.size}` })
+            : previewUri).toString();
         }
       } catch {
         // Try the next TeX-style extension or workspace-relative candidate.
@@ -6652,6 +7245,41 @@ async function resolveVisualImageUri(
     }
   }
   return undefined;
+}
+
+/** TeX declarations are root-cwd relative; portable paths are project-relative. */
+async function resolveTemplateBibliographyUris(context: LatexProjectContext): Promise<readonly vscode.Uri[] | undefined> {
+  const root = context.rootUri;
+  if (root?.scheme !== "file") return [];
+  const boundary = context.workspaceUri ?? vscode.Uri.file(path.dirname(root.fsPath));
+  const structures = context.files.filter((file) => file.reachableFromRoot).map((file) =>
+    scanVisualDocumentStructure(projectExecutableText(context, file.uri, file.text), visualProjectScanOptions(context, file.uri)));
+  const declared = structures.flatMap((structure) => structure.bibliographyPaths);
+
+  if (declared.length === 0 && !structures.some((structure) => structure.hasBibliographyDeclaration)) return undefined;
+  // Manual paths are deliberate, target-scoped supplements. Only the unrelated
+  // machine default is suppressed when the project has its own declaration.
+  const paths = [
+    ...declared.map((value) => resolveProjectBibliographyPath(root.fsPath, value, boundary.fsPath)).filter((value): value is string => value !== undefined),
+  ];
+  const uris: vscode.Uri[] = [];
+  const candidates = uniqueResolvedPaths(paths);
+  if (candidates.length > 64) {
+    throw new Error("当前构建目标关联的参考文献超过 64 个文件，请在项目元数据中缩小文献范围；未截断或展示不完整的文献集。");
+  }
+  for (const candidate of candidates) {
+    const relative = path.relative(boundary.fsPath, candidate).split(path.sep).join("/");
+    try {
+      uris.push((await validateExistingRealProjectFile(vscode, boundary, relative)).uri);
+    } catch { /* Missing declarations remain missing; never read a symlink escape. */ }
+  }
+  if (uris.length === 0 && declared.length > 0) {
+    const compiled = path.join(path.dirname(root.fsPath), `${path.parse(root.fsPath).name}.bbl`);
+    const relative = path.relative(boundary.fsPath, compiled).split(path.sep).join("/");
+    try { uris.push((await validateExistingRealProjectFile(vscode, boundary, relative)).uri); }
+    catch { /* Missing or escaped generated bibliographies remain unavailable. */ }
+  }
+  return uris;
 }
 
 function uniqueResolvedPaths(values: readonly string[]): readonly string[] {
@@ -6684,12 +7312,15 @@ function visualCollapsedSourceRanges(
       case "preamble":
         return [[record.from, record.to]];
       case "maketitle":
+        return [[record.replacement.from, record.replacement.to], ...(record.metadataReplacements ?? []).map(range => [range.from, range.to] as const)];
+      case "tableOfContents":
       case "table":
       case "tikzcd":
       case "tikzpicture":
       case "image":
       case "bibliography":
       case "documentEnd":
+      case "comment":
         return [[record.replacement.from, record.replacement.to]];
       default:
         return [];
@@ -7755,7 +8386,8 @@ function parseWebviewMessage(value: unknown): VisualEditorWebviewMessage | undef
       if (
         !Number.isSafeInteger(message.version) ||
         !Number.isSafeInteger(message.from) ||
-        !Number.isSafeInteger(message.to)
+        !Number.isSafeInteger(message.to) ||
+        (message.settled !== undefined && typeof message.settled !== "boolean")
       ) {
         return undefined;
       }
@@ -7765,6 +8397,30 @@ function parseWebviewMessage(value: unknown): VisualEditorWebviewMessage | undef
         version: message.version!,
         from: message.from!,
         to: message.to!,
+        ...(message.settled === true ? { settled: true } : {}),
+      };
+    }
+    case "formulaCacheEvicted": {
+      const message = candidate as Partial<Extract<
+        VisualEditorWebviewMessage,
+        { type: "formulaCacheEvicted" }
+      >>;
+      if (
+        !Array.isArray(message.formulaIds) ||
+        message.formulaIds.length === 0 ||
+        message.formulaIds.length > 512 ||
+        typeof message.refillViewport !== "boolean" ||
+        message.formulaIds.some((id) =>
+          typeof id !== "string" || id.length === 0 || id.length > 256 || id.includes("\0")
+        )
+      ) {
+        return undefined;
+      }
+      return {
+        protocol: VISUAL_EDITOR_PROTOCOL,
+        type: "formulaCacheEvicted",
+        formulaIds: [...new Set(message.formulaIds)],
+        refillViewport: message.refillViewport,
       };
     }
     case "cursorPreview": {
@@ -7930,6 +8586,26 @@ function parseWebviewMessage(value: unknown): VisualEditorWebviewMessage | undef
         protocol: VISUAL_EDITOR_PROTOCOL,
         type: "clipboard",
         action: message.action,
+        revision: message.revision!,
+        selection: message.selection,
+      };
+    }
+    case "navigationCommand": {
+      const message = candidate as Partial<Extract<
+        VisualEditorWebviewMessage,
+        { readonly type: "navigationCommand" }
+      >>;
+      if (
+        (message.direction !== "back" && message.direction !== "forward") ||
+        !Number.isSafeInteger(message.revision) ||
+        !isSelection(message.selection)
+      ) {
+        return undefined;
+      }
+      return {
+        protocol: VISUAL_EDITOR_PROTOCOL,
+        type: "navigationCommand",
+        direction: message.direction,
         revision: message.revision!,
         selection: message.selection,
       };
@@ -8112,13 +8788,19 @@ function parseWebviewMessage(value: unknown): VisualEditorWebviewMessage | undef
       >>;
       if (
         !Number.isSafeInteger(message.revision) ||
-        (message.kind !== "reference" && message.kind !== "citation") ||
+        (message.kind !== "reference" &&
+          message.kind !== "citation" &&
+          message.kind !== "frontMatter" &&
+          message.kind !== "tableOfContents") ||
         !Number.isSafeInteger(message.from) ||
         !Number.isSafeInteger(message.to) ||
         (message.key !== undefined &&
           (typeof message.key !== "string" ||
             message.key.length === 0 ||
-            message.key.length > 512))
+            message.key.length > 512)) ||
+        ((message.kind === "tableOfContents" || message.kind === "frontMatter") &&
+          (typeof message.key !== "string" ||
+            !/^[a-f0-9]{32}$/u.test(message.key)))
       ) {
         return undefined;
       }
@@ -8341,13 +9023,13 @@ function isWebviewCommand(value: unknown): value is VisualEditorWebviewCommand {
     value === "redo" || value === "pickSnippet" || value === "pickCitation" ||
     value === "openSnippetManager" || value === "openTemplateManager" ||
     value === "openBibliography" ||
-    value === "navigateBack" ||
+    value === "navigateBack" || value === "navigateForward" ||
     value === "aiReview" || value === "aiReviewDocument" ||
     value === "aiRewrite" || value === "aiCompletion";
 }
 
 function isBibliographyDocument(document: vscode.TextDocument): boolean {
-  return document.languageId === "bibtex" || /\.bib$/iu.test(document.uri.path);
+  return document.languageId === "bibtex" || /\.(?:bib|bbl)$/iu.test(document.uri.path);
 }
 
 function isInputAction(value: unknown): value is VisualEditorInputAction {
@@ -8393,6 +9075,21 @@ function visualReferenceCompletionItems(
   labelsByKey: ReadonlyMap<string, readonly LatexProjectLabelTarget[]>,
   descriptors: ReadonlyMap<string, VisualProjectReferenceDescriptor>,
 ): readonly VisualEditorCompletionItem[] {
+  const structureIndexes = new Map<
+    VisualSnapshot,
+    ReturnType<typeof indexVisualStructureReferences>
+  >();
+  const structureIndex = (
+    snapshot: VisualSnapshot,
+  ): ReturnType<typeof indexVisualStructureReferences> => {
+    const existing = structureIndexes.get(snapshot);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const created = indexVisualStructureReferences(snapshot.text, snapshot.structures);
+    structureIndexes.set(snapshot, created);
+    return created;
+  };
   return orderedKeys.map((key, index) => {
     const targets = labelsByKey.get(key) ?? [];
     const descriptor = descriptors.get(key);
@@ -8407,17 +9104,15 @@ function visualReferenceCompletionItems(
             record.labels.some((label) => label.key === key),
         ) ?? []
       : [];
-    const heading = formulaMatches.length === 0 &&
-        theoremMatches.length === 0 && snapshot !== undefined
+    const indexedTarget = formulaMatches.length === 0 && snapshot !== undefined
+      ? structureIndex(snapshot).get(key)
+      : undefined;
+    const heading = indexedTarget?.targetKind === "heading" && snapshot !== undefined
       ? findVisualHeadingForLabel(snapshot.text, snapshot.structures, key)
       : undefined;
     const previewKind = formulaMatches.length === 1
       ? "formula" as const
-      : theoremMatches.length === 1
-        ? "theorem" as const
-        : heading !== undefined
-          ? "heading" as const
-          : undefined;
+      : indexedTarget?.targetKind;
     const theorem = theoremMatches.length === 1 ? theoremMatches[0] : undefined;
     const ambiguity = targets.length > 1
       ? `${targets.length} 个同名定义，预览已禁用`
@@ -8425,18 +9120,24 @@ function visualReferenceCompletionItems(
         ? `来源文件被重复包含 ${targets[0].occurrenceCount} 次，预览已禁用`
         : undefined;
     const description = ambiguity ?? (previewKind === "formula"
-      ? "公式标签 · 右侧显示 Math Preview"
+      ? "公式标签 · 自动显示 Math Preview"
       : previewKind === "heading"
-        ? [heading?.number, heading?.title, "右侧显示章节标题"]
+        ? [heading?.number, heading?.title, "自动显示章节标题"]
             .filter((part): part is string => part !== undefined && part.length > 0)
             .join(" ")
+      : previewKind === "table"
+        ? "表格标签 · 自动显示表格预览"
+      : previewKind === "image"
+        ? "图片标签 · 自动显示图片预览"
+      : previewKind === "diagram"
+        ? "交换图标签 · 自动显示交换图预览"
       : theorem === undefined
         ? visualReferenceLabelDescription(key)
         : [
             theorem.label,
             theorem.number,
             theorem.optionalTitle === undefined ? undefined : `(${theorem.optionalTitle})`,
-            "右侧显示定理预览",
+            "自动显示定理预览",
           ].filter((part): part is string => part !== undefined && part.length > 0).join(" "));
     const labelDescription = [description, descriptor?.source]
       .filter((part): part is string => part !== undefined && part.length > 0)
@@ -8843,3 +9544,98 @@ async function waitForViewportInputQuiet(
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+
+function visualStructureDocument(
+  records: readonly VisualStructureRecord[],
+): VisualDocumentStructure {
+  return {
+    records,
+    bibliographyPaths: [],
+    hasBibliographyDeclaration: false,
+    citedKeys: [],
+  };
+}
+
+function boundedReferenceTableRecord(
+  record: VisualTableRecord,
+): { readonly record: VisualTableRecord; readonly previewTruncated: boolean } {
+  const rows = record.rows
+    .slice(0, MAX_REFERENCE_HOVER_TABLE_ROWS)
+    .map((row) => row.slice(0, MAX_REFERENCE_HOVER_TABLE_COLUMNS));
+  const columnCount = Math.min(record.columnCount, MAX_REFERENCE_HOVER_TABLE_COLUMNS);
+  const previewTruncated = record.truncated ||
+    record.rows.length > rows.length ||
+    record.columnCount > columnCount;
+  return {
+    record: {
+      ...record,
+      rows,
+      columnCount,
+      columnAlignments: record.columnAlignments.slice(0, columnCount),
+      truncated: previewTruncated,
+    },
+    previewTruncated,
+  };
+}
+
+function extendWebviewLocalResourceRoots(
+  webview: vscode.Webview,
+  additionalRoots: readonly vscode.Uri[],
+): void {
+  const options = webview.options;
+  const roots = [...(options.localResourceRoots ?? [])];
+  let changed = false;
+  for (const root of additionalRoots) {
+    if (roots.some((candidate) => sameUri(candidate, root))) {
+      continue;
+    }
+    roots.push(root);
+    changed = true;
+  }
+  if (changed) {
+    webview.options = { ...options, localResourceRoots: roots };
+  }
+}
+
+function visualBracketColorizationEnabled(
+  document: vscode.TextDocument,
+  config: TeXLeafConfig,
+): boolean {
+  const configuredSyntaxMode = vscode.workspace
+    .getConfiguration("texleaf.visualEditor", document)
+    .get<unknown>("syntaxTheme");
+  const editorBracketColorizationEnabled = vscode.workspace
+    .getConfiguration("editor", document)
+    .get<boolean>("bracketPairColorization.enabled", true);
+  return config.colorizeBrackets &&
+    editorBracketColorizationEnabled &&
+    visualEditorSyntaxThemeMode(configuredSyntaxMode) === "followVsCode";
+}
+
+async function runBoundedTasks(
+  tasks: readonly (() => Promise<void>)[],
+  requestedConcurrency: number,
+): Promise<void> {
+  const concurrency = Math.max(
+    1,
+    Math.min(tasks.length, Math.trunc(requestedConcurrency)),
+  );
+  let next = 0;
+  await Promise.all(Array.from({ length: concurrency }, async () => {
+    while (next < tasks.length) {
+      const index = next;
+      next += 1;
+      await tasks[index]?.();
+    }
+  }));
+}
+
+function visualTexBinPath(resource: vscode.Uri): string {
+  return vscode.workspace.getConfiguration("texleaf.visualEditor", resource).get<string>("texBinPath", "");
+}
+
+const VISUAL_STRUCTURE_RENDER_CONCURRENCY = 1;
+const MAX_VISUAL_PDF_IMAGE_BYTES = 16 * 1024 * 1024;
+const MAX_REFERENCE_HOVER_TABLE_ROWS = 12;
+const MAX_REFERENCE_HOVER_TABLE_COLUMNS = 8;

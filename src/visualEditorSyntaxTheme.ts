@@ -22,11 +22,33 @@ import {
   createOnigString,
   loadWASM,
 } from "vscode-oniguruma";
+import {
+  resolveLatexTextMateGrammarRegistration,
+  withLiteralColumnDefinitions,
+  textMateGrammarInjectionsForScope,
+  type TextMateGrammarContribution,
+} from "./core/textMateGrammarRegistry";
+import {
+  fixedLatexSyntaxTheme,
+  type FixedLatexSyntaxAppearance,
+} from "./fixedLatexSyntaxTheme";
 import type {
   VisualEditorSyntaxPalette,
   VisualEditorSyntaxToken,
 } from "./visualEditorProtocol";
 import { visualEditorSyntaxTokenFromTextMate } from "./visualEditorSyntaxToken";
+
+interface ResolvedTheme {
+  readonly rawTheme: IRawTheme;
+  readonly palette: VisualEditorSyntaxPalette;
+  /**
+   * A private TextMate fallback color that means “inherit the editor's normal
+   * foreground”. It is installed when the resolved theme relies on
+   * editor.foreground instead of defining an unscoped TextMate foreground.
+   */
+  readonly inheritedForeground?: string;
+  readonly source: VisualEditorSyntaxThemeMode;
+}
 
 interface ThemeContribution {
   readonly id: string;
@@ -45,23 +67,7 @@ interface ThemeBundle {
   readonly rules: readonly ThemeTokenRule[];
 }
 
-interface ResolvedTheme {
-  readonly rawTheme: IRawTheme;
-  readonly palette?: VisualEditorSyntaxPalette;
-  /**
-   * A private TextMate fallback color that means “inherit the real VS Code
-   * editor foreground in the Webview”. It is only installed when a theme has
-   * no unscoped token foreground of its own.
-   */
-  readonly inheritedForeground?: string;
-}
-
-interface GrammarContribution {
-  readonly scopeName: string;
-  readonly language?: string;
-  readonly uri: vscode.Uri;
-  readonly injectTo: readonly string[];
-}
+type GrammarContribution = TextMateGrammarContribution<vscode.Uri>;
 
 interface TextMateRuntime {
   readonly registry: Registry;
@@ -109,8 +115,18 @@ interface SyntaxDocumentCache {
 
 interface ThemeRequest {
   readonly key: string;
+  readonly mode: VisualEditorSyntaxThemeMode;
+  readonly appearance: FixedLatexSyntaxAppearance;
   readonly activeName: string;
   readonly customizations: unknown;
+}
+
+export type VisualEditorSyntaxThemeMode = "followVsCode" | "fixedPrimer";
+
+export function visualEditorSyntaxThemeMode(
+  value: unknown,
+): VisualEditorSyntaxThemeMode {
+  return value === "fixedPrimer" ? "fixedPrimer" : "followVsCode";
 }
 
 const TARGET_SCOPE_STACKS = {
@@ -162,22 +178,25 @@ const TEXTMATE_FONT_STYLE_MASK = 0x00007800;
 const TEXTMATE_FONT_STYLE_OFFSET = 11;
 const TEXTMATE_FOREGROUND_MASK = 0x00ff8000;
 const TEXTMATE_FOREGROUND_OFFSET = 15;
-// vscode-textmate otherwise falls back to #000000 when a VS Code theme (such
-// as Dark Modern) relies on editor.foreground instead of an unscoped
-// tokenColors rule. The Webview already receives that fully resolved value as
-// --vscode-editor-foreground, so this sentinel lets ordinary text inherit it.
+// vscode-textmate otherwise assigns an opaque default token color when a theme
+// relies on editor.foreground. The Webview already receives that resolved VS
+// Code color, so this sentinel lets ordinary prose inherit it in either mode.
 const TEXTMATE_INHERITED_FOREGROUND = "#010203";
 // A malformed or intentionally open construct can carry its TextMate state to
 // the end of a very large paper. Keep routine typing bounded; in that rare
 // case the Webview falls back to its immediate grammar colors and the normal
-// idle document refresh supplies a complete native snapshot.
+// idle document refresh supplies a complete authoritative snapshot.
 const MAX_INCREMENTAL_SYNTAX_LINES = 512;
 let onigLibraryPromise: Promise<IOnigLib> | undefined;
 
 /**
- * Resolve the active TextMate theme and tokenize LaTeX with the same grammar
- * that powers VS Code's native editor. The old coarse palette remains as a
- * fallback while exact per-token decorations are loading.
+ * Resolve LaTeX syntax in one of two deliberately separate modes.
+ *
+ * followVsCode rebuilds the active TextMate theme and installed LaTeX grammar
+ * inside the Extension Host so the Webview can use the same scoped colors as
+ * Monaco. fixedPrimer keeps TeXLeaf's self-contained light/dark Primer
+ * palette and bundled grammar. Any unavailable or malformed external theme or
+ * grammar safely falls back to that self-contained pair.
  */
 export class VisualEditorSyntaxThemeResolver {
   private cachedKey: string | undefined;
@@ -192,6 +211,21 @@ export class VisualEditorSyntaxThemeResolver {
     this.cachedTheme = undefined;
     this.cachedRuntime = undefined;
     this.documentCaches.clear();
+  }
+
+  /** Return true when the selected mode or any input to that mode changes. */
+  public invalidateIfThemeChanged(resource?: vscode.Uri): boolean {
+    const nextKey = themeRequest(resource).key;
+    if (this.cachedKey !== undefined && this.cachedKey === nextKey) {
+      return false;
+    }
+    this.invalidate();
+    return true;
+  }
+
+  /** Compatibility alias for providers built before the dual-mode setting. */
+  public invalidateIfAppearanceChanged(): boolean {
+    return this.invalidateIfThemeChanged();
   }
 
   /**
@@ -209,6 +243,10 @@ export class VisualEditorSyntaxThemeResolver {
   public async resolve(
     resource: vscode.Uri,
   ): Promise<VisualEditorSyntaxPalette | undefined> {
+    // Resolve the grammar pair first. If an external grammar fails to load,
+    // createRuntime atomically switches cachedTheme to the fixed fallback so
+    // the coarse Webview palette and exact token stream cannot disagree.
+    await this.resolveRuntime(resource);
     return (await this.resolveTheme(resource))?.palette;
   }
 
@@ -225,8 +263,8 @@ export class VisualEditorSyntaxThemeResolver {
       this.documentCaches.set(resource.toString(), snapshot.cache);
       return snapshot.tokens;
     } catch {
-      // A third-party injection grammar must never make the custom editor
-      // unusable. CodeMirror's local highlighting remains the safe fallback.
+      // A malformed built-in grammar state must never make the custom editor
+      // unusable. The editor foreground remains the safe visual fallback.
       return undefined;
     }
   }
@@ -234,7 +272,7 @@ export class VisualEditorSyntaxThemeResolver {
   /**
    * Re-tokenize only the changed logical lines and the minimal suffix needed
    * for TextMate's rule stack to stabilize. This produces the same token
-   * metadata as VS Code's native editor without re-scanning an entire thesis
+   * metadata as the bundled grammar without re-scanning an entire thesis
    * after every key press.
    */
   public async tokenizeIncremental(
@@ -356,7 +394,7 @@ export class VisualEditorSyntaxThemeResolver {
     const request = themeRequest(resource);
     this.ensureRequest(request);
     if (this.cachedTheme === undefined) {
-      this.cachedTheme = resolveTheme(request.activeName, request.customizations);
+      this.cachedTheme = resolveThemeRequest(request);
     }
     return this.cachedTheme;
   }
@@ -377,7 +415,7 @@ export class VisualEditorSyntaxThemeResolver {
       return;
     }
     this.cachedKey = request.key;
-    this.cachedTheme = resolveTheme(request.activeName, request.customizations);
+    this.cachedTheme = resolveThemeRequest(request);
     this.cachedRuntime = undefined;
     this.documentCaches.clear();
   }
@@ -385,74 +423,58 @@ export class VisualEditorSyntaxThemeResolver {
   private async createRuntime(
     resource: vscode.Uri,
   ): Promise<TextMateRuntime | undefined> {
+    const request = themeRequest(resource);
+    this.ensureRequest(request);
     const resolvedTheme = await this.resolveTheme(resource);
     if (resolvedTheme === undefined) {
       return undefined;
     }
-    const contributions = grammarContributions();
-    const latex = selectLatexGrammar(contributions);
-    if (latex === undefined) {
-      return undefined;
-    }
-    const grammarByScope = new Map<string, GrammarContribution>();
-    for (const contribution of contributions) {
-      const existing = grammarByScope.get(contribution.scopeName);
-      if (
-        existing === undefined ||
-        grammarContributionPriority(contribution) >
-          grammarContributionPriority(existing)
-      ) {
-        grammarByScope.set(contribution.scopeName, contribution);
+    if (resolvedTheme.source === "followVsCode") {
+      try {
+        const runtime = await createTextMateRuntime(
+          this.context,
+          resolvedTheme,
+          installedGrammarContributions(),
+        );
+        if (runtime !== undefined) {
+          return runtime;
+        }
+      } catch {
+        // Even an unusual extension manifest getter must not prevent the
+        // bundled grammar fallback below.
       }
     }
-    const injections = new Map<string, string[]>();
-    for (const contribution of contributions) {
-      for (const target of contribution.injectTo) {
-        const scopes = injections.get(target) ?? [];
-        if (!scopes.includes(contribution.scopeName)) {
-          scopes.push(contribution.scopeName);
-          injections.set(target, scopes);
-        }
-      }
+
+    // Active themes and third-party grammars are untrusted extension assets.
+    // If either side cannot be resolved, keep source editing usable with the
+    // bundled grammar and contrast-safe Primer palette.
+    const fallbackTheme = resolveFixedTheme(request.appearance);
+    if (this.cachedKey === request.key) {
+      this.cachedTheme = Promise.resolve(fallbackTheme);
     }
-    const rawGrammarCache = new Map<
-      string,
-      Promise<IRawGrammar | undefined>
-    >();
-    const registry = new Registry({
-      onigLib: loadOnigLibrary(this.context),
-      theme: resolvedTheme.rawTheme,
-      loadGrammar: async (scopeName) => {
-        const contribution = grammarByScope.get(scopeName);
-        if (contribution === undefined) {
-          return undefined;
-        }
-        let pending = rawGrammarCache.get(scopeName);
-        if (pending === undefined) {
-          pending = readRawGrammar(contribution.uri);
-          rawGrammarCache.set(scopeName, pending);
-        }
-        return pending;
-      },
-      getInjections: (scopeName) => injections.get(scopeName),
-    });
-    const grammar = await registry.loadGrammar(latex.scopeName);
-    if (grammar === null) {
-      registry.dispose();
-      return undefined;
-    }
-    return {
-      registry,
-      grammar,
-      colorMap: registry.getColorMap(),
-      ...(resolvedTheme.inheritedForeground === undefined
-        ? {}
-        : { inheritedForeground: resolvedTheme.inheritedForeground }),
-    };
+    return createTextMateRuntime(
+      this.context,
+      fallbackTheme,
+      bundledGrammarContributions(this.context.extensionUri),
+    );
   }
 }
 
-function themeRequest(resource: vscode.Uri): ThemeRequest {
+function themeRequest(resource?: vscode.Uri): ThemeRequest {
+  const appearance = syntaxAppearance(vscode.window.activeColorTheme.kind);
+  const configuredMode = vscode.workspace
+    .getConfiguration("texleaf.visualEditor", resource)
+    .get<unknown>("syntaxTheme");
+  const mode = visualEditorSyntaxThemeMode(configuredMode);
+  if (mode === "fixedPrimer") {
+    return {
+      key: `${mode}\u0000${appearance}`,
+      mode,
+      appearance,
+      activeName: "",
+      customizations: undefined,
+    };
+  }
   const activeName = vscode.workspace
     .getConfiguration("workbench", resource)
     .get<string>("colorTheme") ?? "";
@@ -460,21 +482,72 @@ function themeRequest(resource: vscode.Uri): ThemeRequest {
     .getConfiguration("editor", resource)
     .get<unknown>("tokenColorCustomizations");
   return {
-    key: `${vscode.window.activeColorTheme.kind}\u0000${activeName}\u0000${stableJson(customizations)}`,
+    key: `${mode}\u0000${vscode.window.activeColorTheme.kind}\u0000${activeName}\u0000${stableJson(customizations)}`,
+    mode,
+    appearance,
     activeName,
     customizations,
   };
 }
 
-async function resolveTheme(
+async function resolveThemeRequest(request: ThemeRequest): Promise<ResolvedTheme> {
+  if (request.mode === "followVsCode") {
+    try {
+      const followed = await resolveVsCodeTheme(
+        request.activeName,
+        request.customizations,
+        request.appearance,
+      );
+      if (followed !== undefined) {
+        return followed;
+      }
+    } catch {
+      // Theme files are contributed by other extensions. A malformed include,
+      // unreadable URI, or unsupported document must never remove highlighting.
+    }
+  }
+  return resolveFixedTheme(request.appearance);
+}
+
+function resolveFixedTheme(
+  appearance: FixedLatexSyntaxAppearance,
+): ResolvedTheme {
+  const theme = fixedLatexSyntaxTheme(appearance);
+  const settings: IRawTheme["settings"] = [
+    { settings: { foreground: TEXTMATE_INHERITED_FOREGROUND } },
+    ...theme.rules.map((rule) => ({
+      scope: [...rule.scopes],
+      settings: {
+        foreground: rule.foreground,
+        ...(rule.fontStyle === undefined ? {} : { fontStyle: rule.fontStyle }),
+      },
+    })),
+  ];
+  return {
+    rawTheme: {
+      name: theme.id,
+      settings,
+    },
+    palette: theme.palette,
+    inheritedForeground: TEXTMATE_INHERITED_FOREGROUND,
+    source: "fixedPrimer",
+  };
+}
+
+async function resolveVsCodeTheme(
   activeName: string,
   customizations: unknown,
+  appearance: FixedLatexSyntaxAppearance,
 ): Promise<ResolvedTheme | undefined> {
   const contribution = findThemeContribution(activeName) ??
     findThemeContribution(defaultThemeId(vscode.window.activeColorTheme.kind));
-  const baseRules = contribution === undefined
-    ? []
-    : (await loadThemeBundle(contribution.uri, new Set<string>())).rules;
+  if (contribution === undefined) {
+    return undefined;
+  }
+  const baseRules = (await loadThemeBundle(
+    contribution.uri,
+    new Set<string>(),
+  )).rules;
   const rules = [
     ...baseRules,
     ...customizationRules(customizations, activeName),
@@ -482,6 +555,7 @@ async function resolveTheme(
   if (rules.length === 0) {
     return undefined;
   }
+  const fallbackPalette = fixedLatexSyntaxTheme(appearance).palette;
   const palette = resolvePalette(rules);
   const inheritsEditorForeground = !rules.some(
     (rule) => rule.scopes.length === 0 && rule.foreground !== undefined,
@@ -491,18 +565,18 @@ async function resolveTheme(
       ? [{ settings: { foreground: TEXTMATE_INHERITED_FOREGROUND } }]
       : []),
     ...rules.map((rule) => ({
-    ...(rule.scopes.length === 0 ? {} : { scope: [...rule.scopes] }),
-    settings: {
-      ...(rule.foreground === undefined
-        ? {}
-        : { foreground: rule.foreground }),
-      ...(rule.background === undefined
-        ? {}
-        : { background: rule.background }),
-      ...(rule.fontStyle === undefined
-        ? {}
-        : { fontStyle: rule.fontStyle }),
-    },
+      ...(rule.scopes.length === 0 ? {} : { scope: [...rule.scopes] }),
+      settings: {
+        ...(rule.foreground === undefined
+          ? {}
+          : { foreground: rule.foreground }),
+        ...(rule.background === undefined
+          ? {}
+          : { background: rule.background }),
+        ...(rule.fontStyle === undefined
+          ? {}
+          : { fontStyle: rule.fontStyle }),
+      },
     })),
   ];
   return {
@@ -510,11 +584,24 @@ async function resolveTheme(
       ...(activeName.trim().length === 0 ? {} : { name: activeName }),
       settings,
     },
-    ...(palette === undefined ? {} : { palette }),
+    palette: {
+      ...fallbackPalette,
+      ...(palette ?? {}),
+    },
     ...(inheritsEditorForeground
       ? { inheritedForeground: TEXTMATE_INHERITED_FOREGROUND }
       : {}),
+    source: "followVsCode",
   };
+}
+
+function syntaxAppearance(
+  kind: vscode.ColorThemeKind,
+): FixedLatexSyntaxAppearance {
+  return kind === vscode.ColorThemeKind.Light ||
+      kind === vscode.ColorThemeKind.HighContrastLight
+    ? "light"
+    : "dark";
 }
 
 function resolvePalette(
@@ -770,7 +857,7 @@ function themeCustomizationNames(key: string): string[] {
   return [...key.matchAll(/\[([^\]]+)\]/gu)].map((match) => match[1] ?? "");
 }
 
-function grammarContributions(): GrammarContribution[] {
+function installedGrammarContributions(): GrammarContribution[] {
   const contributions: GrammarContribution[] = [];
   for (const extension of vscode.extensions.all) {
     const packageJson = asRecord(extension.packageJSON);
@@ -805,35 +892,74 @@ function grammarContributions(): GrammarContribution[] {
   return contributions;
 }
 
-function selectLatexGrammar(
-  contributions: readonly GrammarContribution[],
-): GrammarContribution | undefined {
-  return [...contributions]
-    .filter((contribution) => contribution.scopeName === "text.tex.latex")
-    .sort((left, right) =>
-      grammarContributionPriority(right) - grammarContributionPriority(left))[0] ??
-    [...contributions]
-      .filter((contribution) => contribution.language === "latex")
-      .sort((left, right) =>
-        grammarContributionPriority(right) - grammarContributionPriority(left))[0];
+function bundledGrammarContributions(
+  extensionUri: vscode.Uri,
+): GrammarContribution[] {
+  return [{
+    scopeName: "text.tex.latex",
+    language: "latex",
+    uri: vscode.Uri.joinPath(
+      extensionUri,
+      "syntaxes",
+      "texleaf-latex.tmLanguage.json",
+    ),
+    injectTo: [],
+  }];
 }
 
-function grammarContributionPriority(
-  contribution: GrammarContribution,
-): number {
-  if (contribution.language === "latex") {
-    return 30;
+async function createTextMateRuntime(
+  context: vscode.ExtensionContext,
+  resolvedTheme: ResolvedTheme,
+  contributions: readonly GrammarContribution[],
+): Promise<TextMateRuntime | undefined> {
+  const registration = resolveLatexTextMateGrammarRegistration(contributions);
+  if (registration.rootScopeName === undefined) {
+    return undefined;
   }
-  if (
-    contribution.language === "latex-class" ||
-    contribution.language === "latex-package"
-  ) {
-    return 20;
+  const rawGrammarCache = new Map<
+    string,
+    Promise<IRawGrammar | undefined>
+  >();
+  let registry: Registry | undefined;
+  try {
+    registry = new Registry({
+      onigLib: loadOnigLibrary(context),
+      theme: resolvedTheme.rawTheme,
+      loadGrammar: async (scopeName) => {
+        const contribution = registration.grammarByScope.get(scopeName);
+        if (contribution === undefined) {
+          return undefined;
+        }
+        let pending = rawGrammarCache.get(scopeName);
+        if (pending === undefined) {
+          pending = readRawGrammar(contribution.uri).then((grammar) =>
+            grammar !== undefined && scopeName === registration.rootScopeName
+              ? withLiteralColumnDefinitions(grammar) : grammar,
+          );
+          rawGrammarCache.set(scopeName, pending);
+        }
+        return pending;
+      },
+      getInjections: (scopeName) =>
+        textMateGrammarInjectionsForScope(registration, scopeName),
+    });
+    const grammar = await registry.loadGrammar(registration.rootScopeName);
+    if (grammar === null) {
+      registry.dispose();
+      return undefined;
+    }
+    return {
+      registry,
+      grammar,
+      colorMap: registry.getColorMap(),
+      ...(resolvedTheme.inheritedForeground === undefined
+        ? {}
+        : { inheritedForeground: resolvedTheme.inheritedForeground }),
+    };
+  } catch {
+    registry?.dispose();
+    return undefined;
   }
-  if (contribution.language === "tex") {
-    return 10;
-  }
-  return contribution.injectTo.length > 0 ? 0 : 1;
 }
 
 async function readRawGrammar(
@@ -939,9 +1065,6 @@ function tokenizeSyntaxLine(
       runtime.colorMap,
       (metadata & TEXTMATE_FOREGROUND_MASK) >>> TEXTMATE_FOREGROUND_OFFSET,
     );
-    // TextMate's background field contains the theme-wide editor canvas
-    // color for ordinary tokens. VS Code paints that once on the editor; it
-    // does not wrap every token in an opaque background rectangle.
     const token = visualEditorSyntaxTokenFromTextMate({
       from: localFrom,
       to: localTo,

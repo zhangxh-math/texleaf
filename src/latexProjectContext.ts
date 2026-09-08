@@ -24,6 +24,7 @@ import {
   type VisualLabelTarget,
 } from "./core/visualStructure";
 import { normalizeVisualText } from "./core/visualTextCoordinates";
+import { TexSystemInputResolver, isSimpleTexSystemInputName } from "./texSystemInputResolver";
 
 const DEFAULT_MAX_DEPTH = 24;
 const DEFAULT_MAX_FILES = 256;
@@ -53,6 +54,7 @@ export type LatexProjectRootResolution =
 
 export type LatexProjectIncludeStatus =
   | "resolved"
+  | "library"
   | "dynamic"
   | "missing"
   | "outside-workspace"
@@ -123,6 +125,22 @@ export interface LatexProjectLabelTarget {
   readonly occurrenceCount: 1 | 2;
 }
 
+/** One bounded source interval in TeX document-body execution order. */
+export interface LatexProjectBodyExecutionSlice {
+  readonly uri: vscode.Uri;
+  readonly role: LatexProjectFileRole;
+  readonly from: number;
+  readonly to: number;
+  /** Identifies one execution-node occurrence; split slices share the index. */
+  readonly executionIndex: number;
+}
+
+export interface LatexProjectBodyExecution {
+  readonly slices: readonly LatexProjectBodyExecutionSlice[];
+  /** Consumers must fail closed when the graph or bounded expansion is incomplete. */
+  readonly incomplete: boolean;
+}
+
 export interface LatexProjectContext {
   /** Stable for one workspace/root selection, independent of file contents. */
   readonly contextId: string;
@@ -142,6 +160,7 @@ export interface LatexProjectContext {
    * source order. This is a bounded static approximation, not TeX execution.
    */
   readonly preambleSource: string;
+  readonly bodyExecution: LatexProjectBodyExecution;
   readonly files: readonly LatexProjectFile[];
   readonly labels: readonly LatexProjectLabelTarget[];
   readonly labelsByKey: ReadonlyMap<string, readonly LatexProjectLabelTarget[]>;
@@ -168,6 +187,10 @@ export type LatexProjectRootFileProvider = (
 ) => string | undefined | PromiseLike<string | undefined>;
 
 export interface LatexProjectContextServiceOptions {
+  /** Confirm a bare preamble input only after all project candidates are missing. */
+  readonly systemInputResolver?: (
+    name: string, source: vscode.Uri, projectBoundary: vscode.Uri,
+  ) => Promise<boolean>;
   readonly scanner?: LatexProjectSourceScanner;
   readonly rootFileProvider?: LatexProjectRootFileProvider;
   readonly maxDepth?: number;
@@ -278,6 +301,7 @@ interface ProjectExecutionEdge {
 }
 
 type ProjectIncludeResolution =
+  | { readonly ok: true; readonly library: true }
   | {
       readonly ok: true;
       readonly uri: vscode.Uri;
@@ -325,6 +349,7 @@ const DEFAULT_SCANNER: LatexProjectSourceScanner = {
  * keeping listeners outside this class avoids duplicate workspace watchers.
  */
 export class LatexProjectContextService implements vscode.Disposable {
+  private systemInputs: TexSystemInputResolver | undefined;
   private readonly options: NormalizedOptions;
   private readonly cache = new Map<string, CacheEntry>();
   private readonly sourceCache = new Map<string, SourceRecord>();
@@ -337,8 +362,8 @@ export class LatexProjectContextService implements vscode.Disposable {
 
   public readonly onDidInvalidate = this.invalidationEmitter.event;
 
-  public constructor(options: LatexProjectContextServiceOptions = {}) {
-    this.options = normalizeOptions(options);
+  public constructor(private readonly serviceOptions: LatexProjectContextServiceOptions = {}) {
+    this.options = normalizeOptions(serviceOptions);
   }
 
   /** Alias kept deliberately small for consumers that prefer resolver naming. */
@@ -420,6 +445,7 @@ export class LatexProjectContextService implements vscode.Disposable {
     this.revision += 1;
     this.cache.clear();
     if (resource === undefined) {
+      this.systemInputs?.invalidate();
       this.sourceCache.clear();
       this.sourceCacheLength = 0;
     } else {
@@ -441,6 +467,7 @@ export class LatexProjectContextService implements vscode.Disposable {
       return;
     }
     this.disposed = true;
+    this.systemInputs?.dispose();
     this.epoch += 1;
     this.cache.clear();
     this.sourceCache.clear();
@@ -594,6 +621,7 @@ export class LatexProjectContextService implements vscode.Disposable {
       files,
       root.uri !== undefined,
     );
+    const bodyExecution = this.buildBodyExecution(state, root.uri, graphRootPathState, root.resolution);
     const workspaceUri = workspaceFolder?.uri;
     const contextId = projectContextId(
       workspaceUri,
@@ -614,6 +642,7 @@ export class LatexProjectContextService implements vscode.Disposable {
       numberingRoot,
       documentClass,
       preambleSource,
+      bodyExecution,
       files,
       labels,
       labelsByKey,
@@ -644,6 +673,7 @@ export class LatexProjectContextService implements vscode.Disposable {
       numberingRoot: "section",
       documentClass: undefined,
       preambleSource: "",
+      bodyExecution: { slices: [], incomplete: true },
       files: [],
       labels: [],
       labelsByKey: new Map(),
@@ -887,9 +917,16 @@ export class LatexProjectContextService implements vscode.Disposable {
     source: SourceRecord,
     include: LatexProjectInclude,
     pathState: ProjectExecutionPathState | undefined,
+    targetRole: LatexProjectFileRole,
   ): Promise<ProjectIncludeResolution> {
     if (pathState === undefined || include.normalizedPath === undefined) {
       return { ok: false, reason: "outside-workspace" };
+    }
+
+    const libraryEligible = targetRole === "preamble" && include.kind === "input";
+    // Explicit package inputs have the same opaque dependency semantics as usepackage.
+    if (libraryEligible && /^[A-Za-z0-9_][A-Za-z0-9_.-]*\.sty$/u.test(include.normalizedPath)) {
+      return { ok: true, library: true };
     }
 
     const selectFirstExisting = async (
@@ -916,6 +953,21 @@ export class LatexProjectContextService implements vscode.Disposable {
         const read = await this.readSource(state, resolved.uri);
         if (read.ok || read.reason !== "missing") {
           return resolved;
+        }
+      }
+      if (
+        first !== undefined && libraryEligible &&
+        isSimpleTexSystemInputName(include.normalizedPath!) &&
+        state.workspaceFolder?.uri !== undefined
+      ) {
+        try {
+          const resolve = this.serviceOptions.systemInputResolver;
+          const confirmed = resolve === undefined
+            ? await this.resolveSystemInput(include.normalizedPath!, source.uri, state.workspaceFolder?.uri, pathState)
+            : await resolve(include.normalizedPath!, source.uri, state.workspaceFolder?.uri);
+          if (confirmed) return { ok: true, library: true };
+        } catch {
+          // A failed optional library lookup leaves the original missing include intact.
         }
       }
       return first ?? { ok: false, reason: "unsafe-path" };
@@ -984,6 +1036,22 @@ export class LatexProjectContextService implements vscode.Disposable {
       importDirectory.projectPath,
     );
     return selectFirstExisting([{ resolution: target, nextPathState }]);
+  }
+
+  private async resolveSystemInput(
+    name: string, source: vscode.Uri, boundary: vscode.Uri,
+    pathState: ProjectExecutionPathState,
+  ): Promise<boolean> {
+    if (boundary.scheme !== "file" || source.scheme !== "file" || vscode.workspace.isTrusted !== true) {
+      return false;
+    }
+    const binPath = vscode.workspace.getConfiguration("texleaf.visualEditor", source).get<string>("texBinPath", "");
+    this.systemInputs ??= new TexSystemInputResolver();
+    return this.systemInputs.isSystemInput(name, {
+      projectDirectory: boundary.fsPath,
+      workingDirectory: vscode.Uri.joinPath(boundary, pathState.rootDirectory).fsPath,
+      binPath,
+    });
   }
 
   private resolveProjectDirectory(
@@ -1331,7 +1399,9 @@ export class LatexProjectContextService implements vscode.Disposable {
           current.record,
           include,
           current.pathState,
+          targetRole,
         );
+        if (resolved.ok && "library" in resolved) continue;
         if (!resolved.ok) {
           complete = false;
           continue;
@@ -1467,7 +1537,7 @@ export class LatexProjectContextService implements vscode.Disposable {
           uri,
           range: diagnostic.range,
           relatedUri: undefined,
-        }, sourceDiagnosticAffectsResolvedProjectGraph(
+        }, read.record.scan.graphIncomplete && sourceDiagnosticAffectsResolvedProjectGraph(
           diagnostic.code,
           state.rootResolution,
         ));
@@ -1604,7 +1674,12 @@ export class LatexProjectContextService implements vscode.Disposable {
         read.record,
         include,
         pathState,
+        targetRole,
       );
+      if (resolved.ok && "library" in resolved) {
+        file.includes.push(projectEdge(uri, role, targetRole, include, undefined, "library"));
+        continue;
+      }
       if (!resolved.ok) {
         const status: LatexProjectIncludeStatus = resolved.reason === "outside-workspace" ||
           resolved.reason === "workspace-escape"
@@ -1846,6 +1921,192 @@ export class LatexProjectContextService implements vscode.Disposable {
       }, true);
     }
     return chunks.join("");
+  }
+
+  private buildBodyExecution(
+    state: BuildState,
+    rootUri: vscode.Uri | undefined,
+    rootPathState: ProjectExecutionPathState | undefined,
+    rootResolution: LatexProjectRootResolution,
+  ): LatexProjectBodyExecution {
+    const slices: LatexProjectBodyExecutionSlice[] = [];
+    let incomplete = state.graphIncomplete ||
+      rootResolution === "ambiguous" ||
+      rootResolution === "unresolved" ||
+      rootResolution === "invalid-configured" ||
+      rootResolution === "invalid-magic";
+    if (rootUri === undefined) {
+      return { slices, incomplete: true };
+    }
+
+    // The unique graph is already bounded, but replaying a DAG can still grow
+    // exponentially when the same node is included through many paths.
+    const maximumOccurrences = this.options.maxEdges + 1;
+    const maximumSlices = this.options.maxFiles + (this.options.maxEdges * 2) + 1;
+    const maximumSourceLength = this.options.maxTotalSourceLength;
+    let occurrenceCount = 0;
+    let sourceLength = 0;
+    let limitReported = false;
+    const markLimited = (message: string): void => {
+      incomplete = true;
+      if (limitReported) {
+        return;
+      }
+      limitReported = true;
+      this.report(state, {
+        code: "body-execution-limit",
+        message,
+        severity: "warning",
+        uri: rootUri,
+        range: undefined,
+        relatedUri: undefined,
+      }, true);
+    };
+    const append = (
+      node: ProjectExecutionNode,
+      role: LatexProjectFileRole,
+      from: number,
+      to: number,
+      executionIndex: number,
+    ): void => {
+      if (from >= to || incomplete && limitReported) {
+        return;
+      }
+      if (slices.length >= maximumSlices) {
+        markLimited(
+          `The document-body execution stream exceeded ${maximumSlices} source slices.`,
+        );
+        return;
+      }
+      const available = maximumSourceLength - sourceLength;
+      if (available <= 0) {
+        markLimited(
+          `The document-body execution stream exceeded ${maximumSourceLength} UTF-16 source code units.`,
+        );
+        return;
+      }
+      const boundedTo = Math.min(to, from + available);
+      slices.push({
+        uri: node.uri,
+        role,
+        from,
+        to: boundedTo,
+        executionIndex,
+      });
+      sourceLength += boundedTo - from;
+      if (boundedTo < to) {
+        markLimited(
+          `The document-body execution stream exceeded ${maximumSourceLength} UTF-16 source code units.`,
+        );
+      }
+    };
+    const expand = (
+      executionKey: string,
+      depth: number,
+      ancestry: readonly string[],
+    ): boolean => {
+      if (limitReported) {
+        return false;
+      }
+      if (depth > this.options.maxDepth) {
+        markLimited(
+          `The document-body execution stream exceeded depth ${this.options.maxDepth}.`,
+        );
+        return false;
+      }
+      if (ancestry.includes(executionKey)) {
+        incomplete = true;
+        return false;
+      }
+      if (occurrenceCount >= maximumOccurrences) {
+        markLimited(
+          `The document-body execution stream exceeded ${maximumOccurrences} execution occurrences.`,
+        );
+        return false;
+      }
+      const node = state.executionNodes.get(executionKey);
+      if (node === undefined) {
+        incomplete = true;
+        return false;
+      }
+      const file = state.files.get(uriKey(node.uri));
+      if (file === undefined || !file.expansionAllowed) {
+        incomplete = true;
+        return false;
+      }
+      const executionIndex = occurrenceCount;
+      occurrenceCount += 1;
+      const scan = file.record.scan;
+      const textLength = file.record.text.length;
+      const executionLimit = Math.max(0, Math.min(
+        textLength,
+        scan.endInput?.start ?? textLength,
+        scan.endDocument?.start ?? textLength,
+      ));
+      const hasDocumentBody = scan.beginDocument !== undefined;
+      const bodyFrom = hasDocumentBody
+        ? Math.min(executionLimit, scan.beginDocument!.end)
+        : node.role === "body"
+          ? 0
+          : undefined;
+      const sliceRole: LatexProjectFileRole = hasDocumentBody
+        ? "standalone"
+        : node.role;
+      const edges = state.executionEdges
+        .filter((candidate) =>
+          candidate.sourceExecutionKey === executionKey &&
+          candidate.edge.range.start < executionLimit
+        )
+        .sort((left, right) =>
+          left.edge.range.start - right.edge.range.start ||
+          left.edge.range.end - right.edge.range.end
+        );
+      let cursor = bodyFrom ?? executionLimit;
+      const nextAncestry = [...ancestry, executionKey];
+      for (const executionEdge of edges) {
+        if (limitReported) {
+          return false;
+        }
+        const edge = executionEdge.edge;
+        if (edge.range.end > executionLimit) {
+          incomplete = true;
+          continue;
+        }
+        const insideBody = bodyFrom !== undefined && edge.range.start >= bodyFrom;
+        if (insideBody) {
+          append(node, sliceRole, cursor, edge.range.start, executionIndex);
+          cursor = Math.max(cursor, edge.range.end);
+        }
+        if (
+          edge.status !== "resolved" ||
+          executionEdge.targetExecutionKey === undefined
+        ) {
+          incomplete = true;
+          continue;
+        }
+        const terminated = expand(
+          executionEdge.targetExecutionKey,
+          depth + 1,
+          nextAncestry,
+        );
+        if (terminated) {
+          return true;
+        }
+      }
+      if (bodyFrom !== undefined) {
+        append(node, sliceRole, cursor, executionLimit, executionIndex);
+      }
+      return scan.endDocument !== undefined;
+    };
+
+    const rootExecutionKey = projectExecutionNodeKey(
+      rootUri,
+      "standalone",
+      rootPathState,
+      false,
+    );
+    expand(rootExecutionKey, 0, []);
+    return { slices, incomplete: incomplete || state.graphIncomplete };
   }
 
   private finishFiles(state: BuildState): readonly LatexProjectFile[] {

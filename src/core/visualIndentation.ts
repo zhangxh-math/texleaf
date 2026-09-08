@@ -35,13 +35,15 @@ export interface VisualLatexIndentationTransportPlan {
 }
 
 export const VISUAL_LATEX_INDENT_UNIT = '  ';
+
 export const VISUAL_LATEX_FORMAT_MAX_TRANSPORT_CHANGES = 256;
+
 export const VISUAL_LATEX_FORMAT_MAX_TRANSPORT_INSERT = 5_000_000;
 
 const DEFAULT_VISUAL_FORMAT_CHANGE_LIMIT = 100_000;
 const DEFAULT_VISUAL_FORMAT_DEPTH_LIMIT = 256;
 
-/** Convert source spaces/tabs to visual columns without interpreting content. */
+/** Convert source spaces/tabs to visual columns for block-widget layout. */
 export function visualSourceIndentationColumns(
   prefix: string,
   tabSize = 4,
@@ -71,20 +73,18 @@ export function visualSourceIndentationColumns(
 }
 
 /**
- * Remove only a visual block's common source indentation.
+ * Keep visual indentation faithful to the physical LaTeX source.
  *
- * Ordinary source indentation is suppressed so a deeply indented document does
- * not drift across the visual canvas. Inside a LaTeX environment, however, the
- * indentation of the outermost active `\\begin` is the baseline: indentation
- * beyond that baseline remains visible. Thus `\\begin`/`\\end` align while the
- * body and nested environments retain their relative indentation. The document
- * wrapper is deliberately ignored because it must not indent the entire paper.
+ * Earlier versions hid a line's common leading whitespace in visual mode. That
+ * made the rendered hierarchy disagree with source mode and made an otherwise
+ * correctly indented paragraph appear to jump left after leaving an environment.
+ * Visual mode now displays every physical indentation character. The formatter
+ * below owns normalization; presentation no longer silently changes columns.
  */
 export function planVisualLeadingIndentation(
   source: string,
 ): readonly VisualLeadingIndentPlan[] {
   const plans: VisualLeadingIndentPlan[] = [];
-  let scanState = createLatexScanState();
   let lineFrom = 0;
 
   while (lineFrom <= source.length) {
@@ -97,29 +97,13 @@ export function planVisualLeadingIndentation(
       : nextLf;
     const lineText = source.slice(lineFrom, contentTo);
     const indentation = /^[\t ]*/u.exec(lineText)?.[0] ?? '';
-    const outerEnvironment = scanState.environments.find(
-      (frame) => normalizeVisualEnvironmentName(frame.name) !== 'document',
-    );
-    const baseline = outerEnvironment === undefined
-      ? indentation
-      : indentationAtOffset(source, outerEnvironment.startOffset);
-    const hideLength = indentation.startsWith(baseline)
-      ? Math.min(indentation.length, baseline.length)
-      : commonPrefixLength(indentation, baseline);
 
     plans.push({
       lineFrom,
       indentationLength: indentation.length,
-      hideLength,
+      hideLength: 0,
     });
 
-    if (segmentTo > lineFrom) {
-      scanState = scanLatexSegment(
-        source.slice(lineFrom, segmentTo),
-        scanState,
-        lineFrom,
-      );
-    }
     if (nextLf < 0) {
       break;
     }
@@ -127,23 +111,6 @@ export function planVisualLeadingIndentation(
   }
 
   return plans;
-}
-
-function indentationAtOffset(source: string, offset: number): string {
-  const bounded = Math.max(0, Math.min(source.length, offset));
-  const previousLf = source.lastIndexOf('\n', Math.max(0, bounded - 1));
-  const lineFrom = previousLf < 0 ? 0 : previousLf + 1;
-  const prefix = source.slice(lineFrom, bounded);
-  return /^[\t ]*/u.exec(prefix)?.[0] ?? '';
-}
-
-function commonPrefixLength(left: string, right: string): number {
-  const limit = Math.min(left.length, right.length);
-  let index = 0;
-  while (index < limit && left[index] === right[index]) {
-    index += 1;
-  }
-  return index;
 }
 
 function normalizeVisualEnvironmentName(name: string): string {
@@ -156,7 +123,7 @@ function normalizeVisualEnvironmentName(name: string): string {
  * Only leading spaces and tabs are changed. Commands, comments, formula text,
  * line endings and every opaque environment body remain byte-for-byte intact.
  * `document` is a wrapper rather than an indentation level; every other real
- * environment adds one level. Block `\[...\]` and `$$...$$` bodies add one
+ * environment adds one level. Block `\\[...\\]` and `$$...$$` bodies add one
  * temporary level, with their closer aligned to the opener.
  */
 export function planVisualLatexIndentationFormat(
@@ -268,9 +235,11 @@ export function planVisualLatexIndentationFormat(
 }
 
 /**
- * Coalesce line-by-line indentation edits into the bounded edit batch accepted
- * by the Extension Host. The fine-grained plan remains authoritative for
- * selection mapping; callers must not map selections through these wider edits.
+ * Coalesce a potentially large line-by-line format plan into the bounded edit
+ * batch accepted by the Extension Host. Choosing the largest unchanged gaps as
+ * group boundaries minimizes the amount of unchanged source copied through the
+ * Webview protocol. The fine-grained plan remains the authority for selection
+ * mapping; callers must not map selections through these wider transport edits.
  */
 export function coalesceVisualLatexIndentationChanges(
   source: string,

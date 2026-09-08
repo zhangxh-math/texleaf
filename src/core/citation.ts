@@ -593,7 +593,7 @@ function findBibEntryClose(
       index += 1;
       continue;
     }
-    if (char === '%') {
+    if (char === '%' && braceDepth === (opening === '{' ? 1 : 0)) {
       inComment = true;
       index += 1;
       continue;
@@ -713,7 +713,7 @@ function findTopLevelComma(text: string, start: number, end: number): number | u
       index += 1;
       continue;
     }
-    if (char === '%') {
+    if (char === '%' && braceDepth === 0) {
       inComment = true;
     } else if (char === '"' && braceDepth === 0) {
       inQuote = true;
@@ -749,23 +749,13 @@ function skipBibTrivia(text: string, start: number, end: number): number {
 function readBracedBibValue(text: string, start: number, end: number): ParsedBibValue {
   let depth = 1;
   let index = start + 1;
-  let inComment = false;
   while (index < end) {
     const char = text[index];
-    if (inComment) {
-      if (char === '\n' || char === '\r') {
-        inComment = false;
-      }
-      index += 1;
-      continue;
-    }
     if (char === '\\') {
       index += Math.min(2, end - index);
       continue;
     }
-    if (char === '%') {
-      inComment = true;
-    } else if (char === '{') {
+    if (char === '{') {
       depth += 1;
     } else if (char === '}') {
       depth -= 1;
@@ -836,30 +826,9 @@ function findNextField(text: string, start: number, end: number): number {
   return comma === undefined ? end : comma + 1;
 }
 
-function removeBibPercentComments(value: string): string {
-  let result = '';
-  let index = 0;
-  while (index < value.length) {
-    const char = value[index];
-    if (char === '\\' && index + 1 < value.length) {
-      result += value.slice(index, index + 2);
-      index += 2;
-      continue;
-    }
-    if (char === '%') {
-      index = skipLineComment(value, index);
-      result += ' ';
-      continue;
-    }
-    result += char ?? '';
-    index += 1;
-  }
-  return result;
-}
-
 /** Convert a BibTeX field value into compact text suitable for UI display. */
 export function bibTeXValueToText(value: string): string {
-  return removeBibPercentComments(value)
+  return value
     // Preserve the letter while dropping common TeX accent commands.
     .replace(/\\["'`^~=.uvHckbdtr]\s*\{?\s*([A-Za-z])\s*\}?/gu, '$1')
     .replace(/\\([%&_#$])/gu, '$1')

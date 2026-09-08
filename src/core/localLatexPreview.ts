@@ -5,6 +5,7 @@
  * See LICENSE and NOTICE in the project root.
  */
 
+import { isMathPreviewMacroName } from "../mathPreviewProtocol";
 import type { MathPreviewRenderInput } from "./mathPreview";
 import type { VisualFormulaAsset } from "./visualFormula";
 
@@ -17,7 +18,6 @@ const YTABLEAU_ENVIRONMENT = /\\begin\s*\{\s*ytableau\s*\}/iu;
 const TIKZPICTURE_ENVIRONMENT = /\\begin\s*\{\s*tikzpicture\s*\}/iu;
 const TIKZCD_ENVIRONMENT = /\\begin\s*\{\s*tikzcd\s*\}/iu;
 const DISPLAY_ENVIRONMENT = /^\s*\\begin\s*\{\s*(?:equation\*?|align\*?|alignat\*?|gather\*?|multline\*?|flalign\*?|displaymath)\s*\}/u;
-const SAFE_MACRO_NAME = /^[A-Za-z@]+$/u;
 
 export type LocalLatexPreviewKind = "ytableau" | "tikzpicture" | "tikzcd";
 
@@ -76,7 +76,7 @@ export function createLocalLatexPreviewDocument(
       const optionalDefault = macro.optionalDefault === undefined
         ? ""
         : `[${macro.optionalDefault}]`;
-      return `\\providecommand{\\${macro.name}}${argumentCount}${optionalDefault}{${macro.replacement}}`;
+      return `\\providecommand{\\${macro.name}}{}\\renewcommand{\\${macro.name}}${argumentCount}${optionalDefault}{${macro.replacement}}`;
     })
     .join("\n");
   const normalizedTex = input.tex.replace(
@@ -171,7 +171,7 @@ export function sanitizeLocalLatexSvg(
 function isSafeLocalLatexInput(input: MathPreviewRenderInput): boolean {
   return isSafeLocalLatexSource(input.tex) &&
     Object.values(input.macros).every((macro) =>
-      SAFE_MACRO_NAME.test(macro.name) &&
+      isMathPreviewMacroName(macro.name) &&
       macro.argumentCount >= 0 &&
       macro.argumentCount <= 9 &&
       isSafeLocalLatexSource(macro.replacement) &&

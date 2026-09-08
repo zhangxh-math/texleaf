@@ -58,6 +58,22 @@ function render(overrides) {
 
 (async () => {
   try {
+    const symbols = await render({ tex: String.raw`\<x\>+\!{y}`,
+      macros: { "<": String.raw`\langle`, ">": String.raw`\rangle`, "!": [String.raw`\mathbf{#1}`, 1] } });
+    assert.equal(symbols.type, "result", symbols.message);
+    const explicitSymbols = await render({ tex: String.raw`\langle x\rangle+\mathbf{y}` });
+    assert.equal(symbols.widthEm, explicitSymbols.widthEm);
+    for (const name of ["two words", "bad-name", "__proto__", "\u0000"]) {
+      const invalid = await render({ macros: { [name]: "x" } });
+      assert.equal(invalid.type, "error", "invalid macro names must still be rejected");
+    }
+    for (const size of ["tiny", "scriptsize", "footnotesize", "small", "normalsize", "large", "Large", "LARGE", "huge", "Huge"]) {
+      const environment = await render({ tex: `x+\\begin{${size}}\\begin{array}{cc}a&b\\\\c&d\\end{array}\\end{${size}}+y` });
+      const declaration = await render({ tex: `x+{\\${size}\\begin{array}{cc}a&b\\\\c&d\\end{array}}+y` });
+      assert.equal(environment.type, "result", `${size}: ${environment.message}`);
+      assert.equal(environment.widthEm, declaration.widthEm, `${size} must preserve grouping and size`);
+      assert.equal(environment.heightEm, declaration.heightEm);
+    }
     const basic = await render({});
     assert.equal(basic.type, "result", basic.message);
     assert.match(basic.svg, /^<svg\b/u);
@@ -186,6 +202,82 @@ function render(overrides) {
         proofEndingEnvironment.message,
     );
     assert.match(proofEndingEnvironment.svg, /^<svg\b/u);
+
+    const paperText = await render({
+      tex: String.raw`Z_{\textsc{fk}}+\mathds{1}+\mathbbmss{1}`,
+      macroFingerprint: "paper-text-and-double-struck",
+    });
+    assert.equal(paperText.type, "result", paperText.message);
+
+    const nestedText = await render({
+      tex: String.raw`\NamedFamily{QMan}`, macros: { NamedFamily: [String.raw`\textnormal{\texttt{#1}}`, 1] },
+      macroFingerprint: "nested-text-fonts",
+    });
+    assert.equal(nestedText.type, "result", nestedText.message);
+    assert.doesNotMatch(nestedText.svg, /data-c=["']5C["']|\\texttt/u,
+      "nested text font commands must render their contents, not a literal command");
+    assert.equal([...nestedText.svg.matchAll(/data-c=["']([A-Fa-f0-9]+)["']/gu)]
+      .map(match => String.fromCodePoint(parseInt(match[1], 16))).join("").normalize("NFKC"), "QMan");
+    const textDeclarations = await render({ tex: String.raw`\text{St{\o}rmer}+\text{\boldmath$\rho$}+\rho` });
+    const explicitText = await render({ tex: String.raw`\text{Størmer}+\boldsymbol{\rho}+\rho` });
+    assert.equal(textDeclarations.type, "result", textDeclarations.message);
+    assert.equal(explicitText.type, "result", explicitText.message);
+    const glyphs = svg => [...svg.matchAll(/data-c=["']([A-Fa-f0-9]+)["']/gu)].map(match => match[1]);
+    assert.deepEqual(glyphs(textDeclarations.svg), glyphs(explicitText.svg),
+      "text symbols and scoped boldmath must match the explicit glyphs without leaking to later math");
+
+    const paperMacros = Object.fromEntries(Array.from({ length: 300 }, (_, index) => [
+      `macro${String.fromCharCode(65 + Math.floor(index / 26))}${String.fromCharCode(65 + index % 26)}`, "x",
+    ]));
+    const largePreamble = await render({
+      tex: String.raw`\macroLN`, macros: paperMacros, macroFingerprint: "large-preamble",
+    });
+    assert.equal(largePreamble.type, "result", largePreamble.message);
+    const overflowingMacros = Object.fromEntries(Array.from({ length: 513 }, (_, index) => [
+      `macro${String.fromCharCode(65 + Math.floor(index / 26))}${String.fromCharCode(65 + index % 26)}`, "x",
+    ]));
+    assert.equal((await render({ macros: overflowingMacros })).type, "error");
+    assert.equal((await render({ macros: Object.fromEntries(
+      Object.keys(paperMacros).slice(0, 40).map((name) => [name, "x".repeat(2048)]),
+    ) })).type, "error");
+
+    for (const tex of [
+      String.raw`\bra{x}\ket{y}+\braket{x|y}+\bm{v}+\dag+\slash`,
+      String.raw`\begin{align}x&=y\\\intertext{Using $x=y$, the next step is}z&=w\end{align}`,
+      String.raw`\tensor{f}{^a_{bc}}`,
+      String.raw`\tensor[_{ab}^c]{R}{^i_j^k_l}`,
+      String.raw`\scalebox{0.7}{$-$}1`,
+      String.raw`x+\vspace{-10pt}y`,
+    ]) {
+      const standardPaperSyntax = await render({ tex, macroFingerprint: "standard-paper-syntax" });
+      assert.equal(standardPaperSyntax.type, "result", standardPaperSyntax.message);
+    }
+
+    const tensorSlots = await render({ tex: String.raw`\tensor{f}{^a_{bc}}` });
+    const ordinaryScripts = await render({ tex: String.raw`f^a_{bc}` });
+    assert.equal(tensorSlots.type, "result", tensorSlots.message);
+    assert.equal(ordinaryScripts.type, "result", ordinaryScripts.message);
+    assert.ok(tensorSlots.widthEm > ordinaryScripts.widthEm,
+      "tensor indices retain their ordered slots instead of collapsing onto one script column");
+    assert.equal((await render({ tex: String.raw`\scalebox{0.7}[2]{x}` })).type, "error");
+
+    for (const tex of [String.raw`\ref{lem:source_key}`, String.raw`\text{See \eqref{eq:source_key}}`]) {
+      const reference = await render({ tex, macroFingerprint: "honest-detached-reference" });
+      assert.equal(reference.type, "result", reference.message);
+      assert.doesNotMatch(reference.svg, /data-c=["']3F["']/iu,
+        "detached references must retain their source label rather than silent question marks");
+      assert.match(reference.svg, /data-c=["']5F["']/iu,
+        "a label underscore must remain literal text, not become a subscript");
+    }
+
+    const literalReference = await render({
+      tex: String.raw`\ref{eq:\alpha_1}`,
+      macros: { ref: ["invented-number", 1], eqref: ["invented-number", 1] },
+      macroFingerprint: "reference-label-is-literal",
+    });
+    assert.equal(literalReference.type, "result", literalReference.message);
+    assert.match(literalReference.svg, /data-c=["']5C["']/iu,
+      "label contents must be literal text, not execute an embedded TeX control sequence");
 
     const unknownCommand = await render({
       tex: String.raw`\texleafDefinitelyUnknown{x}`,

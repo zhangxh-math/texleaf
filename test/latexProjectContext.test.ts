@@ -200,11 +200,123 @@ function resetWorkspace(): void {
   delayedRead = undefined;
 }
 
+test('non-project scanner warnings do not disable otherwise unique reference targets', async () => {
+  resetWorkspace();
+  const main = addFile('main.tex', String.raw`\documentclass{article}\begin{document}
+\begin{equation}x=1\label{eq:known}\end{equation}
+\begin{tikzpicture}\foreach \start/\end in {1/2}{\draw (\start,0)--(\end,0);}\end{tikzpicture}
+\end{document}`);
+  const service = new LatexProjectContextService();
+  try {
+    const context = await service.getContext(main as unknown as VsCode.Uri);
+    assert.ok(context.diagnostics.some(d => d.code === 'source:malformed-document-environment'));
+    assert.equal(context.graphIncomplete, false);
+    assert.equal(uniquelyExecutableLabel(context, 'eq:known'), true);
+  } finally {
+    service.dispose();
+  }
+});
+
+test('ambiguous document boundaries still disable project references', async () => {
+  resetWorkspace();
+  const main = addFile('main.tex', String.raw`\documentclass{article}\begin{document}
+\label{eq:uncertain}\begin{document}\end{document}`);
+  const service = new LatexProjectContextService();
+  try {
+    const context = await service.getContext(main as unknown as VsCode.Uri);
+    assert.ok(context.diagnostics.some(d => d.code === 'source:malformed-document-environment'));
+    assert.equal(context.graphIncomplete, true);
+  } finally {
+    service.dispose();
+  }
+});
+
 function addFile(relativePath: string, source: string): FakeUri {
   const uri = FakeUri.joinPath(workspaceRoot, ...relativePath.split('/'));
   files.set(uri.toString(), source);
   return uri;
 }
+
+test('preamble style inputs and confirmed system inputs preserve executable labels', async () => {
+  resetWorkspace();
+  const main = addFile('main.tex', String.raw`\documentclass{article}
+\input{mathrsfs.sty}\input xy
+\begin{document}\label{known}\end{document}`);
+  const lookedUp: string[] = [];
+  const options = { systemInputResolver: async (name: string) => {
+    lookedUp.push(name);
+    return name === 'xy';
+  } };
+  const service = new LatexProjectContextService({ ...options, maxDepth: 24 });
+  try {
+    const context = await service.getContext(main as unknown as VsCode.Uri);
+    assert.equal(context.graphIncomplete, false);
+    assert.equal(uniquelyExecutableLabel(context, 'known'), true);
+    assert.deepEqual(context.files[0]!.includes.map(edge => edge.status), ['library', 'library']);
+    assert.match(context.preambleSource, /\\input\{mathrsfs\.sty\}/u);
+    assert.match(context.preambleSource, /\\input xy/u);
+    assert.deepEqual(lookedUp, ['xy']);
+  } finally { service.dispose(); }
+});
+
+test('local sources take precedence over a same-named system library', async () => {
+  resetWorkspace();
+  const main = addFile('main.tex', String.raw`\documentclass{article}\input xy
+\begin{document}\label{known}\end{document}`);
+  addFile('xy.tex', String.raw`\newcommand{\localmacro}{local}`);
+  let lookups = 0;
+  const options = { systemInputResolver: async () => { lookups += 1; return true; } };
+  const service = new LatexProjectContextService({ ...options, maxDepth: 24 });
+  try {
+    const context = await service.getContext(main as unknown as VsCode.Uri);
+    assert.equal(context.graphIncomplete, false);
+    assert.equal(context.files[0]!.includes[0]!.status, 'resolved');
+    assert.match(context.preambleSource, /localmacro/u);
+    assert.equal(lookups, 0);
+  } finally { service.dispose(); }
+});
+
+test('unconfirmed inputs, body inputs and body child inputs remain incomplete', async () => {
+  for (const source of [
+    String.raw`\documentclass{article}\input{absent}\begin{document}\label{known}\end{document}`,
+    String.raw`\documentclass{article}\begin{document}\input{xy}\label{known}\end{document}`,
+    String.raw`\documentclass{article}\begin{document}\input{child}\label{known}\end{document}`,
+    String.raw`\documentclass{article}\begin{document}\input{xy.sty}\label{known}\end{document}`,
+    String.raw`\documentclass{article}\input{../xy}\begin{document}\label{known}\end{document}`,
+    String.raw`\documentclass{article}\include{xy}\begin{document}\label{known}\end{document}`,
+  ]) {
+    resetWorkspace();
+    const main = addFile('main.tex', source);
+    addFile('child.tex', String.raw`\input xy`);
+    const lookedUp: string[] = [];
+    const options = { systemInputResolver: async (name: string) => {
+      lookedUp.push(name); return name === 'xy';
+    } };
+    const service = new LatexProjectContextService({ ...options, maxDepth: 24 });
+    try {
+      const context = await service.getContext(main as unknown as VsCode.Uri);
+      assert.equal(context.graphIncomplete, true, source);
+      assert.equal(context.bodyExecution.incomplete, true, source);
+      assert.deepEqual(lookedUp, source.includes('absent') ? ['absent'] : [], source);
+    } finally { service.dispose(); }
+  }
+});
+
+test('system libraries do not prevent reverse include root selection', async () => {
+  resetWorkspace();
+  const main = addFile('main.tex', String.raw`\documentclass{article}\input xy
+\begin{document}\input{child}\end{document}`);
+  const child = addFile('child.tex', String.raw`\label{known}`);
+  const options = { systemInputResolver: async (name: string) => name === 'xy' };
+  const service = new LatexProjectContextService({ ...options, maxDepth: 24 });
+  try {
+    const context = await service.getContext(child as unknown as VsCode.Uri);
+    assert.equal(context.rootUri?.toString(), main.toString());
+    assert.equal(context.rootResolution, 'reverse-include');
+    assert.equal(context.graphIncomplete, false);
+    assert.equal(uniquelyExecutableLabel(context, 'known'), true);
+  } finally { service.dispose(); }
+});
 
 function openDocument(
   relativePath: string,

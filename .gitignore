@@ -20,3 +20,5 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+*.vsix.sha256

@@ -1,3 +1,14 @@
+import { readFileSync } from "node:fs";
+import { StreamLanguage } from "@codemirror/language";
+import { stex } from "@codemirror/legacy-modes/mode/stex";
+import { SearchQuery, replaceAll, search, setSearchQuery } from "@codemirror/search";
+import { NavigationHistoryLanes } from "../src/core/navigationHistory";
+import { VisualBracketColorizationIndex, tokenizeVisualBracketDocument } from "../src/core/visualBracketColorization";
+import { buildVisualSelectionPresentationRangeSet, visualActiveBracketPairs, visualEnvironmentNameTouchesDocumentRange, visualSelectionPresentationKey } from "../src/visualEditorCodeMirror";
+import { findVisualLabeledStructureForLabel, indexVisualStructureReferences, planVisualAutomaticSnippetInput, visualLatexSearchQuerySpec } from "../src/core";
+import { VISUAL_SOURCE_RANGE_CAPPED_MIN_LINE_HEIGHTS, VISUAL_SOURCE_RANGE_COMPACT_MAX_LINE_HEIGHTS, visualBlockReplacementInclusiveEnd, visualSourceLineNumberRange, visualSourceRangeLineNumberLayout } from "../src/core/visualLineNumbers";
+import { resolveVisualPointerPosition, visualPointerTargetsCollapsedSource } from "../src/core/visualPointer";
+import { VISUAL_THEOREM_BORDER_PROPERTY, VISUAL_THEOREM_BORDER_VALUE, VISUAL_THEOREM_FRAME_BORDER, VISUAL_THEOREM_FRAME_RADIUS } from "../src/visualEditorTheoremFrame";
 /*
  * TeXLeaf
  * Copyright (C) 2026 zhangxh-math
@@ -15,7 +26,8 @@ import {
 import { history, isolateHistory, redo, undo } from '@codemirror/commands';
 import { getIndentation, indentUnit } from '@codemirror/language';
 import { EditorSelection, EditorState, Transaction } from '@codemirror/state';
-import type { EditorView } from '@codemirror/view';
+import { EditorView } from '@codemirror/view';
+import * as path from 'node:path';
 import type { VisualTextStyleRecord, VisualTheoremRecord } from '../src/core';
 import {
   applyAtomicCodeMirrorSnippet,
@@ -3266,7 +3278,7 @@ test('visual toolbar colors wrap, replace, and toggle exact selections', () => {
   );
 });
 
-test('visual source keeps environment indentation relative to the outer begin', () => {
+test('visual source shows the physical indentation without collapsing an outer baseline', () => {
   const source = [
     '    ordinary prose',
     String.raw`    \begin{theorem}`,
@@ -3280,7 +3292,8 @@ test('visual source keeps environment indentation relative to the outer begin', 
   const visibleIndentation = planVisualLeadingIndentation(source).map(
     (plan) => plan.indentationLength - plan.hideLength,
   );
-  assert.deepEqual(visibleIndentation, [0, 0, 2, 2, 4, 2, 0, 0]);
+  assert.deepEqual(visibleIndentation, [4, 4, 6, 6, 8, 6, 4, 4]);
+  assert.ok(planVisualLeadingIndentation(source).every((plan) => plan.hideLength === 0));
 });
 
 function applyVisualIndentationChanges(
@@ -3430,7 +3443,7 @@ test('visual list Enter inserts and removes items in the innermost list', () => 
   const descriptionAfterClear = description.slice(0, descriptionClear.range.start) +
     descriptionClear.insert + description.slice(descriptionClear.range.end);
   assert.equal(descriptionAfterClear, String.raw`\begin{description}
-${'  '}
+  
 \end{description}`);
   assert.equal(
     descriptionClear.cursorOffset,
@@ -3453,7 +3466,7 @@ ${'  '}
   const collapsedAfterClear = collapsedMarker.slice(0, collapsedClear.range.start) +
     collapsedClear.insert + collapsedMarker.slice(collapsedClear.range.end);
   assert.equal(collapsedAfterClear, String.raw`\begin{enumerate}[(1)]
-${'  '}
+  
 \end{enumerate}`);
   assert.ok(
     collapsedClear.cursorOffset < collapsedAfterClear.indexOf('\\end{enumerate}'),
@@ -3486,7 +3499,7 @@ ${'  '}
     sharedBoundaryClear.insert +
     sharedBoundary.slice(sharedBoundaryClear.range.end);
   assert.equal(sharedBoundaryAfterClear, String.raw`\begin{enumerate}
-${'  '}
+  
 \end{enumerate}`);
   assert.equal(
     sharedBoundaryClear.cursorOffset,
@@ -3564,7 +3577,7 @@ test('visual list Enter is one undoable transaction for insertion and empty-item
   applyPlan(emptyClear);
   assert.equal(state.doc.toString(), String.raw`\begin{enumerate}
   \item First
-${'  '}
+  
 \end{enumerate}`);
   assert.equal(
     state.selection.main.head,
@@ -3646,7 +3659,6 @@ test('visual Up and Down use sticky LaTeX logical lines rather than wrapped rows
       scopeTo: longLine.to,
     },
   });
-
   const shortLine = document.line(3);
   const clamped = planVisualLogicalLineNavigation(
     source,
@@ -3654,7 +3666,7 @@ test('visual Up and Down use sticky LaTeX logical lines rather than wrapped rows
     12,
   );
   assert.equal(clamped?.cursorOffset, shortLine.to);
-  assert.equal(clamped?.goalColumn, 12, 'the long-line goal column remains sticky');
+  assert.equal(clamped?.goalColumn, 12);
 });
 
 test('visual logical-line navigation exposes only the formula reached at its source column', () => {
@@ -3816,14 +3828,12 @@ Body
       4,
     )?.reveal,
     beginPlan?.reveal,
-    'entering either boundary line exposes the same pair',
   );
 
   const unmatchedSource = String.raw`Before
 \begin{proof}[unfinished]
 Body`;
-  const unmatchedDocument = EditorState.create({ doc: unmatchedSource }).doc;
-  const unmatchedLine = unmatchedDocument.line(2);
+  const unmatchedLine = EditorState.create({ doc: unmatchedSource }).doc.line(2);
   assert.equal(
     planVisualLogicalLineNavigation(
       unmatchedSource,
@@ -3831,7 +3841,6 @@ Body`;
       2,
     )?.reveal.kind,
     'line',
-    'an unpaired boundary remains directly editable instead of revealing an outer pair',
   );
 });
 
@@ -5317,11 +5326,23 @@ According to \citet{wang2025}, the claim follows.
     'Xuhui Zhang',
     'Ada Lovelace',
   ]);
+  assert.deepEqual(makeTitle.authors.map((author) => source.slice(author.from, author.to)), [
+    'Xuhui Zhang',
+    'Ada Lovelace',
+  ]);
   assert.deepEqual(makeTitle.affiliations.map((item) => item.text), [
     'Sun Yat-sen University',
     'Analytical Engine Institute',
   ]);
+  assert.deepEqual(
+    makeTitle.affiliations.map((item) => source.slice(item.from, item.to)),
+    ['Sun Yat-sen University', 'Analytical Engine Institute'],
+  );
   assert.deepEqual(makeTitle.emails.map((item) => item.text), [
+    'xuhui@example.edu',
+    'ada@example.org',
+  ]);
+  assert.deepEqual(makeTitle.emails.map((item) => source.slice(item.from, item.to)), [
     'xuhui@example.edu',
     'ada@example.org',
   ]);
@@ -5472,15 +5493,17 @@ test('visual headings and theorem environments receive document-class-aware numb
 });
 
 test('visual reference labels use structure numbers but preserve formula keys', () => {
-  const source = String.raw`\documentclass{book}
-\newtheorem{theorem}{Theorem}[chapter]
-\begin{document}
-\chapter{First chapter}\label{chap:first}
-\section{Introduction}\label{sec:introduction}
-\begin{theorem}\label{thm:main}Main result.\end{theorem}
-\begin{equation}\label{eq:main}x=1.\end{equation}
-\section*{Unnumbered}\label{sec:starred}
-\end{document}`;
+  const source = [
+    '\\documentclass{book}',
+    '\\newtheorem{theorem}{Theorem}[chapter]',
+    '\\begin{document}',
+    '\\chapter{First chapter}\\label{chap:first}',
+    '\\section{Introduction}\\label{sec:introduction}',
+    '\\begin{theorem}\\label{thm:main}Main result.\\end{theorem}',
+    '\\begin{equation}\\label{eq:main}x=1.\\end{equation}',
+    '\\section*{Unnumbered}\\label{sec:starred}',
+    '\\end{document}',
+  ].join('\n');
   const records = scanVisualDocumentStructure(source).records;
 
   assert.equal(
@@ -5507,6 +5530,22 @@ test('visual reference labels use structure numbers but preserve formula keys', 
     visualReferenceDisplayLabel(source, records, 'missing', 'unknown'),
     'missing',
   );
+
+  const index = indexVisualStructureReferences(source, records);
+  assert.deepEqual(index.get('chap:first'), {
+    targetKind: 'heading',
+    label: '1',
+  });
+  assert.deepEqual(index.get('sec:introduction'), {
+    targetKind: 'heading',
+    label: '1.1',
+  });
+  assert.deepEqual(index.get('thm:main'), {
+    targetKind: 'theorem',
+    label: '1.1',
+  });
+  assert.equal(index.has('eq:main'), false);
+  assert.equal(index.has('missing'), false);
 });
 
 test('visual align and matrix Tab always insert one alignment point without exiting', () => {
@@ -5779,52 +5818,29 @@ Body<CURSOR>
   assert.match(crlfChanged, /\\end\{proof\}\r\n\r\nAfter/u);
 });
 
-test('visual Shift+Enter preserves the closing boundary indentation', () => {
-  const nested = cursorMarked(String.raw`\begin{theorem}
-  \begin{proof}
-    Body<CURSOR>.
-  \end{proof}
-  After.
-\end{theorem}`);
-  const nestedPlan = planVisualEnvironmentExit(nested.text, nested.offset);
-  assert.equal(nestedPlan?.insert, '  \n');
-  const nestedChanged = nested.text.slice(0, nestedPlan!.range.start) +
-    nestedPlan!.insert + nested.text.slice(nestedPlan!.range.end);
-  assert.match(nestedChanged, /  \\end\{proof\}\n  \n  After\./u);
+test('visual Shift+Enter carries the opener indentation into the editable exit line', () => {
+  const nested = cursorMarked([
+    String.raw`  \begin{theorem}`,
+    '    Body<CURSOR>',
+    String.raw`  \end{theorem}`,
+    '  After.',
+  ].join('\n'));
+  const plan = planVisualEnvironmentExit(nested.text, nested.offset);
+  assert.ok(plan);
+  assert.equal(plan.insert, '  \n');
+  const changed = nested.text.slice(0, plan.range.start) + plan.insert +
+    nested.text.slice(plan.range.end);
   assert.equal(
-    nestedChanged.slice(nestedPlan!.cursorOffset - 2, nestedPlan!.cursorOffset),
-    '  ',
+    changed,
+    [
+      String.raw`  \begin{theorem}`,
+      '    Body',
+      String.raw`  \end{theorem}`,
+      '  ',
+      '  After.',
+    ].join('\n'),
   );
-
-  const existingBlank = cursorMarked(String.raw`\begin{theorem}
-  \[
-    x<CURSOR>
-  \]
-
-  After.
-\end{theorem}`);
-  const existingBlankPlan = planVisualEnvironmentExit(existingBlank.text, existingBlank.offset);
-  assert.equal(existingBlankPlan?.boundaryKind, 'display-bracket');
-  assert.equal(existingBlankPlan?.insert, '  ');
-  assert.equal(existingBlankPlan?.range.start, existingBlankPlan?.range.end);
-  const existingBlankChanged = existingBlank.text.slice(0, existingBlankPlan!.range.start) +
-    existingBlankPlan!.insert + existingBlank.text.slice(existingBlankPlan!.range.end);
-  assert.match(existingBlankChanged, /  \\\]\n  \n  After\./u);
-  assert.equal(
-    existingBlankChanged.slice(
-      existingBlankPlan!.cursorOffset - 2,
-      existingBlankPlan!.cursorOffset,
-    ),
-    '  ',
-  );
-
-  const displayDollar = cursorMarked(`\\begin{theorem}\n  $$\n    x<CURSOR>\n  $$\n  After.\n\\end{theorem}`);
-  const displayDollarPlan = planVisualEnvironmentExit(displayDollar.text, displayDollar.offset);
-  assert.equal(displayDollarPlan?.boundaryKind, 'display-dollar');
-  assert.equal(displayDollarPlan?.insert, '  \n');
-  const displayDollarChanged = displayDollar.text.slice(0, displayDollarPlan!.range.start) +
-    displayDollarPlan!.insert + displayDollar.text.slice(displayDollarPlan!.range.end);
-  assert.match(displayDollarChanged, /  \$\$\n  \n  After\./u);
+  assert.equal(plan.cursorOffset, changed.indexOf('\n  \n') + 3);
 });
 
 test('visual Backspace reveals hidden begin and end lines before source can be deleted', () => {
@@ -6872,9 +6888,10 @@ test('visual bibliography discovery reads biblatex resources from the preamble',
 \addbibresource[location=local]{papers/library.bib}
 \begin{document}
 Text \parencite{alpha}.
-\printbibliography[heading=bibintoc,title={Selected works},keyword=geometry]
-\end{document}`);
+  \printbibliography[heading=bibintoc,title={Selected works},keyword=geometry]
+  \end{document}`);
   assert.deepEqual(structure.bibliographyPaths, ['papers/library.bib']);
+  assert.equal(structure.hasBibliographyDeclaration, true);
   assert.deepEqual(structure.citedKeys, ['alpha']);
   const bibliography = structure.records.find(
     (record) => record.kind === 'bibliography',
@@ -7022,4 +7039,2053 @@ test('visual structure scanner creates a collapsible advanced tikzpicture record
   assert.match(record.tex, /\\end\{tikzpicture\}$/u);
   assert.equal(record.replacement.block, true);
   assert.equal(source.slice(record.bodyFrom, record.bodyTo).includes('bend left=25'), true);
+});
+
+test('visual text coordinates normalize mixed native line endings to LF', () => {
+  assert.equal(
+    normalizeVisualText('alpha\r\n\r\n中文\r😀\nomega'),
+    'alpha\n\n中文\n😀\nomega',
+  );
+  assert.equal(normalizeVisualText(''), '');
+  assert.equal(normalizeVisualText('\r\n'), '\n');
+});
+
+test('visual text converts insertions to the document EOL without double conversion', () => {
+  const insertion = '甲\n\n😀\n乙';
+  assert.equal(textForVisualDocumentEol(insertion, '\n'), insertion);
+  assert.equal(
+    textForVisualDocumentEol(insertion, '\r\n'),
+    '甲\r\n\r\n😀\r\n乙',
+  );
+  assert.equal(
+    textForVisualDocumentEol('甲\r\n\r\n乙', '\r\n'),
+    '甲\r\n\r\n乙',
+    'an already-native insertion is normalized before applying the requested EOL',
+  );
+});
+
+test('CRLF document and LF visual offsets round-trip at every representable boundary', () => {
+  const documentText = 'A\r\n\r\n中😀\r\nZ';
+  const documentOffsets = [0, 1, 3, 5, 6, 7, 8, 10, 11];
+  const visualOffsets = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+  for (let index = 0; index < documentOffsets.length; index += 1) {
+    const documentOffset = documentOffsets[index]!;
+    const visualOffset = visualOffsets[index]!;
+    assert.equal(
+      visualOffsetFromDocumentOffset(documentText, documentOffset),
+      visualOffset,
+      `document offset ${documentOffset}`,
+    );
+    assert.equal(
+      documentOffsetFromVisualOffset(documentText, visualOffset),
+      documentOffset,
+      `visual offset ${visualOffset}`,
+    );
+  }
+  assert.equal(
+    visualOffsetFromDocumentOffset(documentText, 2),
+    1,
+    'the non-representable point between CR and LF contracts to before LF',
+  );
+});
+
+test('visual active bracket lookup mirrors CodeMirror adjacency for (), [], and {}', () => {
+  const pairAt = (
+    source: string,
+    anchor: number,
+    head = anchor,
+  ) => visualActiveBracketPairs(EditorState.create({
+    doc: source,
+    selection: EditorSelection.range(anchor, head),
+    extensions: [StreamLanguage.define(stex)],
+  }));
+
+  for (const source of ['(x)', '[x]', '{x}']) {
+    const expected = [{
+      first: { from: 0, to: 1 },
+      second: { from: 2, to: 3 },
+    }];
+    assert.deepEqual(pairAt(source, 0), expected, `${source} matches before its opener`);
+    assert.deepEqual(pairAt(source, 1), expected, `${source} matches after its opener`);
+    assert.deepEqual(pairAt(source, 2), expected, `${source} matches before its closer`);
+    assert.deepEqual(pairAt(source, 3), expected, `${source} matches after its closer`);
+  }
+
+  assert.deepEqual(pairAt('(]', 0), [], 'a mismatched pair is not highlighted as a match');
+  assert.deepEqual(
+    pairAt('(x)', 0, 1),
+    [],
+    'non-empty selections do not receive caret-adjacent bracket highlights',
+  );
+});
+
+test('visual active bracket lookup gives complete semantic ranges to left/right atoms', () => {
+  const pairAt = (source: string, caret: number) =>
+    visualActiveBracketPairs(EditorState.create({
+      doc: source,
+      selection: EditorSelection.cursor(caret),
+      extensions: [StreamLanguage.define(stex)],
+    }));
+
+  for (const [source, opening, closing] of [
+    [String.raw`\left(a+[b]\right)`, String.raw`\left(`, String.raw`\right)`],
+    [String.raw`\left\{a+b\right\}`, String.raw`\left\{`, String.raw`\right\}`],
+    [String.raw`\left\langle a+b\right\rangle`, String.raw`\left\langle`, String.raw`\right\rangle`],
+    [String.raw`\left. a+b\right|`, String.raw`\left.`, String.raw`\right|`],
+    [String.raw`\left(a+b\right]`, String.raw`\left(`, String.raw`\right]`],
+  ] as const) {
+    const openFrom = source.indexOf(opening);
+    const closeFrom = source.indexOf(closing, openFrom + opening.length);
+    const expected = [{
+      first: { from: openFrom, to: openFrom + opening.length },
+      second: { from: closeFrom, to: closeFrom + closing.length },
+    }];
+    for (const caret of [
+      openFrom,
+      openFrom + 2,
+      openFrom + opening.length,
+      closeFrom,
+      closeFrom + 3,
+      closeFrom + closing.length,
+    ]) {
+      assert.deepEqual(
+        pairAt(source, caret),
+        expected,
+        `${source} resolves its complete semantic atoms at caret ${caret}`,
+      );
+    }
+  }
+});
+
+test('visual active bracket lookup handles nested, cross-line, and middle delimiters', () => {
+  const pairAt = (source: string, caret: number) =>
+    visualActiveBracketPairs(EditorState.create({
+      doc: source,
+      selection: EditorSelection.cursor(caret),
+      extensions: [StreamLanguage.define(stex)],
+    }));
+  const source = String.raw`\left\langle
+  a+\bigl[x+\lvert y\rvert\bigr]
+  \middle| z
+\right\rangle`;
+  const range = (token: string) => {
+    const from = source.indexOf(token);
+    return { from, to: from + token.length };
+  };
+  const outer = [{
+    first: range(String.raw`\left\langle`),
+    second: range(String.raw`\right\rangle`),
+  }];
+  const sized = [{
+    first: range(String.raw`\bigl[`),
+    second: range(String.raw`\bigr]`),
+  }];
+  const bare = [{
+    first: range(String.raw`\lvert`),
+    second: range(String.raw`\rvert`),
+  }];
+
+  assert.deepEqual(pairAt(source, source.indexOf(String.raw`\left`) + 2), outer);
+  assert.deepEqual(pairAt(source, source.indexOf(String.raw`\middle`) + 3), outer);
+  assert.deepEqual(pairAt(source, source.indexOf(String.raw`\right`) + 4), outer);
+  assert.deepEqual(pairAt(source, source.indexOf(String.raw`\bigl`) + 2), sized);
+  assert.deepEqual(pairAt(source, source.indexOf(String.raw`\bigr`) + 2), sized);
+  assert.deepEqual(pairAt(source, source.indexOf(String.raw`\lvert`) + 2), bare);
+  assert.deepEqual(pairAt(source, source.indexOf(String.raw`\rvert`) + 2), bare);
+});
+
+test('visual active bracket lookup supports every fixed-size and bare command family', () => {
+  const pairAt = (source: string, caret: number) =>
+    visualActiveBracketPairs(EditorState.create({
+      doc: source,
+      selection: EditorSelection.cursor(caret),
+      extensions: [StreamLanguage.define(stex)],
+    }));
+
+  for (const [opening, closing] of [
+    [String.raw`\bigl(`, String.raw`\bigr)`],
+    [String.raw`\Bigl[`, String.raw`\Bigr]`],
+    [String.raw`\biggl\langle`, String.raw`\biggr\rangle`],
+    [String.raw`\Biggl|`, String.raw`\Biggr|`],
+    [String.raw`\langle`, String.raw`\rangle`],
+    [String.raw`\lvert`, String.raw`\rvert`],
+    [String.raw`\lVert`, String.raw`\rVert`],
+    [String.raw`\lceil`, String.raw`\rceil`],
+    [String.raw`\lfloor`, String.raw`\rfloor`],
+  ] as const) {
+    const separator = ' x ';
+    const source = `${opening}${separator}${closing}`;
+    const expected = [{
+      first: { from: 0, to: opening.length },
+      second: {
+        from: opening.length + separator.length,
+        to: opening.length + separator.length + closing.length,
+      },
+    }];
+    assert.deepEqual(pairAt(source, 1), expected, `${source} matches at its opener`);
+    assert.deepEqual(
+      pairAt(source, source.length - 1),
+      expected,
+      `${source} matches at its closer`,
+    );
+  }
+});
+
+test('visual semantic delimiter matching wins at the screenshot square-to-left boundary', () => {
+  const source = String.raw`&=-2^{2n+3}[\mathbf{z}^{-2\mathbf{\lambda}-1}z_{n+1}^{-2x-1}z_{n+2}^{-2y-1}]\left( \frac{z_{n+1}}{z_{n+2}}-\frac{z_{n+2}}{z_{n+1}} \right)^{2} \left( \sum_{\sigma:(n+2)-\text{cycles}}\prod_{i=1}^{n+2}\xi(z_{i},-z_{\sigma(i)}) \right),`;
+  const stateAt = (caret: number) => EditorState.create({
+    doc: source,
+    selection: EditorSelection.cursor(caret),
+    extensions: [StreamLanguage.define(stex)],
+  });
+  const firstOpen = source.indexOf(String.raw`\left(`);
+  const firstClose = source.indexOf(String.raw`\right)`, firstOpen);
+  const secondOpen = source.indexOf(String.raw`\left(`, firstOpen + 1);
+  const secondClose = source.indexOf(String.raw`\right)`, secondOpen);
+
+  assert.deepEqual(visualActiveBracketPairs(stateAt(firstOpen)), [{
+    first: { from: firstOpen, to: firstOpen + String.raw`\left(`.length },
+    second: { from: firstClose, to: firstClose + String.raw`\right)`.length },
+  }]);
+  assert.deepEqual(
+    visualActiveBracketPairs(stateAt(secondOpen)),
+    [{
+      first: { from: secondOpen, to: secondOpen + String.raw`\left(`.length },
+      second: { from: secondClose, to: secondClose + String.raw`\right)`.length },
+    }],
+    'the backslash at ]\\left( must prefer the right-hand semantic atom',
+  );
+  assert.deepEqual(
+    visualActiveBracketPairs(stateAt(secondClose)),
+    [{
+      first: { from: secondOpen, to: secondOpen + String.raw`\left(`.length },
+      second: { from: secondClose, to: secondClose + String.raw`\right)`.length },
+    }],
+    'the final \\right) backslash must not be stolen by the adjacent xi parenthesis',
+  );
+});
+
+test('visual semantic delimiter lookup skips opaque text and structural boundaries', () => {
+  const pairAt = (source: string, caret: number) =>
+    visualActiveBracketPairs(EditorState.create({
+      doc: source,
+      selection: EditorSelection.cursor(caret),
+      extensions: [StreamLanguage.define(stex)],
+    }));
+  for (const source of [
+    '% \\left(x\\right)\n',
+    String.raw`\verb|\left(x\right)|`,
+    String.raw`\begin{verbatim}\left(x\right)\end{verbatim}`,
+    String.raw`\begin{Verbatim}\left(x\right)\end{Verbatim}`,
+    String.raw`\begin{lstlisting}\left(x\right)\end{lstlisting}`,
+    String.raw`\begin{lstlisting*}\left(x\right)\end{lstlisting*}`,
+    String.raw`\begin{minted}{tex}\left(x\right)\end{minted}`,
+    String.raw`\text{\left(x\right)}`,
+    String.raw`\left(a & b \right)`,
+    String.raw`\left(a \\ b \right)`,
+    String.raw`\left(x)`,
+  ]) {
+    const semantic = source.indexOf(String.raw`\left`);
+    const literalClose = source.lastIndexOf(')');
+    assert.deepEqual(pairAt(source, semantic + 2), [], `${source} has no semantic match`);
+    if (literalClose >= 0) {
+      assert.deepEqual(
+        pairAt(source, literalClose),
+        [],
+        `${source} does not fall through to a misleading literal pair`,
+      );
+    }
+  }
+});
+
+test('visual semantic skips retain ordinary text-command argument brackets', () => {
+  const pairAt = (source: string, caret: number) =>
+    visualActiveBracketPairs(EditorState.create({
+      doc: source,
+      selection: EditorSelection.cursor(caret),
+      extensions: [StreamLanguage.define(stex)],
+    }));
+
+  for (const source of [
+    String.raw`\text{cycles}`,
+    String.raw`\textbf{cycles}`,
+    String.raw`\emph{cycles}`,
+  ]) {
+    const opening = source.indexOf('{');
+    const closing = source.lastIndexOf('}');
+    const expected = [{
+      first: { from: opening, to: opening + 1 },
+      second: { from: closing, to: closing + 1 },
+    }];
+    for (const caret of [opening, opening + 1, closing, closing + 1]) {
+      assert.deepEqual(
+        pairAt(source, caret),
+        expected,
+        `${source} retains its ordinary argument-brace pair at ${caret}`,
+      );
+    }
+  }
+
+  const skipped = String.raw`\text{\left(x\right)}`;
+  assert.deepEqual(
+    pairAt(skipped, skipped.indexOf(String.raw`\left`) + 2),
+    [],
+    'a text argument still does not manufacture a semantic left/right pair',
+  );
+  assert.deepEqual(
+    pairAt(skipped, skipped.indexOf('(')),
+    [],
+    'the literal glyph belonging to skipped left/right syntax cannot fall through',
+  );
+});
+
+test('visual semantic delimiters preserve outer pairs around nested alignment lists', () => {
+  const pairAt = (source: string, caret: number) =>
+    visualActiveBracketPairs(EditorState.create({
+      doc: source,
+      selection: EditorSelection.cursor(caret),
+      extensions: [StreamLanguage.define(stex)],
+    }));
+  const source = String.raw`\left\{\begin{aligned}
+a&=b\\
+c&=d
+\end{aligned}\right.`;
+  const opening = source.indexOf(String.raw`\left\{`);
+  const closing = source.indexOf(String.raw`\right.`);
+  const expected = [{
+    first: { from: opening, to: opening + String.raw`\left\{`.length },
+    second: { from: closing, to: closing + String.raw`\right.`.length },
+  }];
+
+  assert.deepEqual(pairAt(source, opening + 2), expected);
+  assert.deepEqual(pairAt(source, closing + 3), expected);
+  assert.deepEqual(
+    pairAt(String.raw`\left(a&=b\right)`, 2),
+    [],
+    'a pair in the same alignment list still cannot cross its own cell boundary',
+  );
+  assert.deepEqual(
+    pairAt(String.raw`\left(a\end{matrix}b\right)`, 2),
+    [],
+    'a stray environment boundary cannot be crossed by a delimiter pair',
+  );
+});
+
+test('visual sizing trivia never becomes a painted or touchable delimiter range', () => {
+  const comment = `comment with fake ${String.raw`\right)`} ${'x'.repeat(300)}`;
+  const source = `${String.raw`\left`} % ${comment}\n( x ${String.raw`\right)`}`;
+  const openingCommand = source.indexOf(String.raw`\left`);
+  const openingDelimiter = source.indexOf('\n(') + 1;
+  const closing = source.lastIndexOf(String.raw`\right)`);
+  const expected = [{
+    first: {
+      from: openingCommand,
+      to: openingCommand + String.raw`\left`.length,
+    },
+    second: {
+      from: closing,
+      to: closing + String.raw`\right)`.length,
+    },
+  }];
+  const pairAt = (caret: number) => visualActiveBracketPairs(EditorState.create({
+    doc: source,
+    selection: EditorSelection.cursor(caret),
+    extensions: [StreamLanguage.define(stex)],
+  }));
+
+  assert.deepEqual(pairAt(openingCommand + 2), expected);
+  assert.deepEqual(
+    pairAt(openingDelimiter),
+    expected,
+    'the eventual delimiter remains a semantic hit target',
+  );
+  assert.deepEqual(
+    pairAt(source.indexOf('comment') + 2),
+    [],
+    'the skipped comment itself never activates or paints the pair',
+  );
+  assert.ok(
+    expected[0]!.first.to - expected[0]!.first.from < 256,
+    'long trivia cannot leak into the DOM range',
+  );
+});
+
+test('visual semantic delimiter lookup supports complete escaped braces and mixed sizes', () => {
+  const pairAt = (source: string, caret: number) =>
+    visualActiveBracketPairs(EditorState.create({
+      doc: source,
+      selection: EditorSelection.cursor(caret),
+      extensions: [StreamLanguage.define(stex)],
+    }));
+  for (const [source, opening, closing] of [
+    [String.raw`\{x\}`, String.raw`\{`, String.raw`\}`],
+    [String.raw`\bigl(x\Bigr)`, String.raw`\bigl(`, String.raw`\Bigr)`],
+  ] as const) {
+    const closeFrom = source.indexOf(closing);
+    const expected = [{
+      first: { from: 0, to: opening.length },
+      second: { from: closeFrom, to: closeFrom + closing.length },
+    }];
+    assert.deepEqual(pairAt(source, 1), expected, source);
+    assert.deepEqual(pairAt(source, closeFrom + 1), expected, source);
+  }
+});
+
+test('visual semantic delimiter pairs deduplicate across multiple carets', () => {
+  const source = String.raw`\left(x\right)`;
+  const opening = source.indexOf(String.raw`\left(`);
+  const closing = source.indexOf(String.raw`\right)`);
+  const state = EditorState.create({
+    doc: source,
+    selection: EditorSelection.create([
+      EditorSelection.cursor(opening + 2),
+      EditorSelection.cursor(closing + 3),
+    ]),
+    extensions: [
+      StreamLanguage.define(stex),
+      EditorState.allowMultipleSelections.of(true),
+    ],
+  });
+
+  assert.deepEqual(visualActiveBracketPairs(state), [{
+    first: { from: opening, to: opening + String.raw`\left(`.length },
+    second: { from: closing, to: closing + String.raw`\right)`.length },
+  }]);
+});
+
+test('visual semantic tokens win at the closing edge of opaque text', () => {
+  const source = String.raw`\text{x}\left(y\right)`;
+  const opening = source.indexOf(String.raw`\left(`);
+  const closing = source.indexOf(String.raw`\right)`);
+  const pairs = visualActiveBracketPairs(EditorState.create({
+    doc: source,
+    selection: EditorSelection.cursor(opening),
+    extensions: [StreamLanguage.define(stex)],
+  }));
+  assert.deepEqual(pairs, [{
+    first: { from: opening, to: opening + String.raw`\left(`.length },
+    second: { from: closing, to: closing + String.raw`\right)`.length },
+  }]);
+});
+
+test('visual active bracket lookup keeps environment braces local', () => {
+  const pairAt = (source: string, caret: number) =>
+    visualActiveBracketPairs(EditorState.create({
+      doc: source,
+      selection: EditorSelection.cursor(caret),
+      extensions: [StreamLanguage.define(stex)],
+    }));
+
+  const environment = '\\begin{align}\nx=y\n\\end{align}';
+  const beginOpen = environment.indexOf('{');
+  const beginClose = environment.indexOf('}');
+  const endOpen = environment.lastIndexOf('{');
+  assert.deepEqual(pairAt(environment, beginOpen), [{
+    first: { from: beginOpen, to: beginOpen + 1 },
+    second: { from: beginClose, to: beginClose + 1 },
+  }]);
+  assert.notEqual(
+    pairAt(environment, beginOpen)[0]?.second.from,
+    endOpen,
+    '\\begin and \\end remain semantic environment boundaries, not one bracket pair',
+  );
+});
+
+test('navigation history lanes isolate the visual editor and each PDF view', () => {
+  const lanes = new NavigationHistoryLanes<string, string>(
+    (left, right) => left === right,
+  );
+
+  lanes.recordOrigin('visual', 'visual:a');
+  lanes.recordOrigin('pdf:view-1', 'pdf-1:a');
+  lanes.recordOrigin('pdf:view-2', 'pdf-2:a');
+
+  assert.deepEqual(lanes.snapshot('visual'), { back: 1, forward: 0 });
+  assert.deepEqual(lanes.snapshot('pdf:view-1'), { back: 1, forward: 0 });
+  assert.deepEqual(lanes.snapshot('pdf:view-2'), { back: 1, forward: 0 });
+  assert.deepEqual(lanes.aggregateSnapshot(), { back: 3, forward: 0 });
+
+  assert.equal(
+    lanes.commitRestored('pdf:view-1', 'back', 'pdf-1:a', 'pdf-1:b'),
+    true,
+  );
+  assert.deepEqual(lanes.snapshot('pdf:view-1'), { back: 0, forward: 1 });
+  assert.equal(lanes.peek('pdf:view-1', 'forward'), 'pdf-1:b');
+  assert.deepEqual(lanes.snapshot('visual'), { back: 1, forward: 0 });
+  assert.deepEqual(lanes.snapshot('pdf:view-2'), { back: 1, forward: 0 });
+});
+
+test('visual bracket colorization follows six-level LaTeX brace and square nesting', () => {
+  const source = String.raw`\begin{align}\cmd{a[b{c[d{e[f{g}]}]}]z}\end{align}`;
+  const tokens = tokenizeVisualBracketDocument(source).tokens;
+  const decorated = tokens.map((token) => ({
+    character: source.slice(token.from, token.to),
+    depth: token.depth,
+  }));
+
+  assert.deepEqual(decorated, [
+    { character: '{', depth: 0 },
+    { character: '}', depth: 0 },
+    { character: '{', depth: 0 },
+    { character: '[', depth: 1 },
+    { character: '{', depth: 2 },
+    { character: '[', depth: 3 },
+    { character: '{', depth: 4 },
+    { character: '[', depth: 5 },
+    { character: '{', depth: 6 },
+    { character: '}', depth: 6 },
+    { character: ']', depth: 5 },
+    { character: '}', depth: 4 },
+    { character: ']', depth: 3 },
+    { character: '}', depth: 2 },
+    { character: ']', depth: 1 },
+    { character: '}', depth: 0 },
+    { character: '{', depth: 0 },
+    { character: '}', depth: 0 },
+  ]);
+});
+
+test('visual bracket colorization supports round and mixed LaTeX interval pairs', () => {
+  const source = String.raw`[a,b) (c,d] [({x})] \(escaped\)`;
+  const tokens = tokenizeVisualBracketDocument(source).tokens;
+  assert.deepEqual(tokens.map((token) => ({
+    character: source.slice(token.from, token.to),
+    depth: token.depth,
+  })), [
+    { character: '[', depth: 0 },
+    { character: ')', depth: 0 },
+    { character: '(', depth: 0 },
+    { character: ']', depth: 0 },
+    { character: '[', depth: 0 },
+    { character: '(', depth: 1 },
+    { character: '{', depth: 2 },
+    { character: '}', depth: 2 },
+    { character: ')', depth: 1 },
+    { character: ']', depth: 0 },
+  ]);
+});
+
+test('visual bracket colorization skips escapes, comments, and opaque LaTeX literals', () => {
+  const source = [
+    String.raw`\cmd{kept} \{literal\} \[display\] % {commented [out]}`, 
+    String.raw`\verb|{inline [literal]}| \lstinline!{also [literal]}!`,
+    String.raw`\begin{verbatim}`,
+    String.raw`{opaque [body]}`,
+    String.raw`\end{verbatim}`,
+    String.raw`\cmd[kept]{again}`,
+  ].join('\n');
+  const tokens = tokenizeVisualBracketDocument(source).tokens;
+  const decorated = tokens.map((token) => source.slice(token.from, token.to)).join('');
+
+  assert.equal(
+    decorated,
+    '{}{}{}[]{}',
+    'only command/environment argument brackets outside comments and literal regions are decorated',
+  );
+});
+
+test('visual bracket colorization omits an unexpected closer and stabilizes incrementally', () => {
+  const key = 'file:///incremental.tex';
+  const before = String.raw`\cmd{a}` + '\n' + String.raw`text {b}` + '\n' + 'tail';
+  const index = new VisualBracketColorizationIndex();
+  index.tokenize(before, key);
+  assert.deepEqual(
+    tokenizeVisualBracketDocument('}]').tokens,
+    [],
+    'unexpected closing brackets are left to the underlying TextMate layer',
+  );
+
+  const localAfter = String.raw`\cmd{aa}` + '\n' + String.raw`text {b}` + '\n' + 'tail';
+  const localPatch = index.tokenizeIncremental({
+    beforeText: before,
+    afterText: localAfter,
+    startLine: 0,
+    oldEndLine: 0,
+    startOffset: 0,
+    newLines: [{ text: String.raw`\cmd{aa}`, eolLength: 1 }],
+  }, key);
+  assert.ok(localPatch !== undefined);
+  assert.equal(localPatch.complete, true);
+  assert.equal(
+    localPatch.to,
+    localAfter.indexOf('tail'),
+    'state stabilization must be proven on the first unchanged suffix line',
+  );
+
+  const propagatedAfter = String.raw`\cmd{{aa}` + '\n' + String.raw`text {b}` + '\n' + 'tail';
+  const propagatedPatch = index.tokenizeIncremental({
+    beforeText: localAfter,
+    afterText: propagatedAfter,
+    startLine: 0,
+    oldEndLine: 0,
+    startOffset: 0,
+    newLines: [{ text: String.raw`\cmd{{aa}`, eolLength: 1 }],
+  }, key);
+  assert.ok(propagatedPatch !== undefined);
+  assert.equal(propagatedPatch.complete, true);
+  assert.equal(propagatedPatch.to, propagatedAfter.length);
+});
+
+test('visual bracket incremental deletion propagates through a cross-line pair', () => {
+  const key = 'file:///cross-line.tex';
+  const before = '{\n[a]\n}\ntail';
+  const after = '\n[a]\n}\ntail';
+  const index = new VisualBracketColorizationIndex();
+  index.tokenize(before, key);
+  const patch = index.tokenizeIncremental({
+    beforeText: before,
+    afterText: after,
+    startLine: 0,
+    oldEndLine: 0,
+    startOffset: 0,
+    newLines: [{ text: '', eolLength: 1 }],
+  }, key);
+
+  assert.ok(patch !== undefined);
+  assert.equal(patch.complete, true);
+  assert.ok(
+    patch.to >= after.indexOf('tail'),
+    'the re-scan must reach an unchanged suffix whose outgoing stack matches',
+  );
+  assert.deepEqual(
+    patch.tokens.map((token) => ({
+      character: after.slice(token.from, token.to),
+      depth: token.depth,
+    })),
+    [
+      { character: '[', depth: 0 },
+      { character: ']', depth: 0 },
+    ],
+    'removing the cross-line opener re-colours the next line and leaves the old closer unpainted',
+  );
+});
+
+test('visual syntax theme schema follows VS Code by default and exposes the fixed Primer fallback', () => {
+  const packagePath = path.resolve(__dirname, '..', '..', 'package.json');
+  const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as {
+    readonly contributes?: {
+      readonly configuration?: readonly {
+        readonly properties?: Readonly<Record<string, unknown>>;
+      }[];
+    };
+  };
+  const setting = packageJson.contributes?.configuration
+    ?.map((section) => section.properties?.['texleaf.visualEditor.syntaxTheme'])
+    .find((candidate) => candidate !== undefined);
+
+  assert.ok(
+    setting !== undefined &&
+      typeof setting === 'object' &&
+      setting !== null &&
+      !Array.isArray(setting),
+    'package.json must publish texleaf.visualEditor.syntaxTheme',
+  );
+  const schema = setting as Readonly<Record<string, unknown>>;
+  assert.equal(schema.type, 'string');
+  assert.equal(
+    schema.default,
+    'followVsCode',
+    'new and invalid-free profiles must follow the active VS Code theme',
+  );
+  assert.deepEqual(
+    schema.enum,
+    ['followVsCode', 'fixedPrimer'],
+    'the setting must preserve an explicit fixed Primer escape hatch',
+  );
+});
+
+test('visual pointer trusts the painted source line over adjacent collapsed-formula coordinates', () => {
+  const replacement = { from: 1_240, to: 1_270 };
+  const boundaryLineNumbers = [124, 126];
+
+  assert.equal(
+    visualPointerTargetsCollapsedSource(
+      replacement.from,
+      127,
+      boundaryLineNumbers,
+      replacement,
+    ),
+    false,
+    'a click on the following These line must not be reassigned to the adjacent equation even when posAtCoords lands inside it',
+  );
+  assert.equal(
+    visualPointerTargetsCollapsedSource(
+      replacement.from,
+      124,
+      [],
+      replacement,
+    ),
+    false,
+    'a physical line without a collapsed block boundary must not be captured merely because its coordinate overlaps a replacement',
+  );
+  assert.equal(
+    visualPointerTargetsCollapsedSource(
+      replacement.to,
+      124,
+      boundaryLineNumbers,
+      replacement,
+    ),
+    true,
+    'the painted begin boundary line remains authoritative even when its coordinate falls at the replacement end',
+  );
+  assert.equal(
+    visualPointerTargetsCollapsedSource(
+      replacement.from - 1,
+      126,
+      boundaryLineNumbers,
+      replacement,
+    ),
+    true,
+    'the painted end boundary line remains authoritative even when its coordinate falls before the replacement',
+  );
+
+  assert.equal(
+    visualPointerTargetsCollapsedSource(
+      replacement.from,
+      undefined,
+      boundaryLineNumbers,
+      replacement,
+    ),
+    true,
+    'without a physical line, the replacement start belongs to collapsed source',
+  );
+  assert.equal(
+    visualPointerTargetsCollapsedSource(
+      replacement.to - 1,
+      undefined,
+      boundaryLineNumbers,
+      replacement,
+    ),
+    true,
+    'without a physical line, the final offset inside the half-open replacement still belongs to collapsed source',
+  );
+  assert.equal(
+    visualPointerTargetsCollapsedSource(
+      replacement.to,
+      undefined,
+      boundaryLineNumbers,
+      replacement,
+    ),
+    false,
+    'the half-open replacement endpoint belongs to the following source line',
+  );
+});
+
+test('visual pointer position remains on the painted prose line beside a collapsed formula', () => {
+  const source = [
+    ...Array.from({ length: 123 }, (_unused, index) => `Prefix line ${index + 1}`),
+    String.raw`\begin{equation}`,
+    String.raw`  \langle \tau_d \rangle_g = \Theta`,
+    String.raw`\end{equation}`,
+    'These intersection numbers vanish unless',
+  ].join('\n');
+  const document = EditorState.create({ doc: source }).doc;
+  const beginLine = document.line(124);
+  const endLine = document.line(126);
+  const theseLine = document.line(127);
+  const clickedLine = { from: theseLine.from, to: theseLine.to };
+
+  assert.equal(
+    resolveVisualPointerPosition(
+      source.length,
+      beginLine.from,
+      endLine.to - 1,
+      clickedLine,
+    ),
+    theseLine.from,
+    'when both browser candidates drift into the preceding formula, the physical These line clamps the caret to its start',
+  );
+  assert.equal(
+    resolveVisualPointerPosition(
+      source.length,
+      beginLine.from,
+      theseLine.from + 5,
+      clickedLine,
+    ),
+    theseLine.from + 5,
+    'a current coordinate inside the clicked prose line outranks a stale DOM caret',
+  );
+  assert.equal(
+    resolveVisualPointerPosition(
+      source.length,
+      theseLine.from + 2,
+      theseLine.from + 5,
+      clickedLine,
+    ),
+    theseLine.from + 2,
+    'when both candidates belong to the clicked prose line, the live DOM caret remains authoritative',
+  );
+  assert.equal(
+    resolveVisualPointerPosition(
+      source.length,
+      beginLine.from,
+      theseLine.from + 5,
+      undefined,
+    ),
+    beginLine.from,
+    'without a physical line, the existing DOM-to-coordinate precedence is preserved',
+  );
+  assert.equal(
+    resolveVisualPointerPosition(
+      source.length,
+      undefined,
+      theseLine.from + 5,
+      undefined,
+    ),
+    theseLine.from + 5,
+    'without a DOM caret or physical line, the coordinate candidate remains the fallback',
+  );
+});
+
+test('visual source line-number ranges exclude the following line and handle document boundaries', () => {
+  const standaloneSource = [
+    'Before',
+    String.raw`\begin{equation}`,
+    '  x = y',
+    String.raw`\end{equation}`,
+    'After',
+  ].join('\n');
+  const standaloneDocument = EditorState.create({ doc: standaloneSource }).doc;
+  const standaloneBegin = standaloneDocument.line(2);
+  const standaloneAfter = standaloneDocument.line(5);
+  assert.deepEqual(
+    visualSourceLineNumberRange(
+      standaloneDocument,
+      standaloneBegin.from,
+      standaloneAfter.from,
+    ),
+    { fromLine: 2, toLine: 4 },
+    'a standalone replacement ending at After.from owns the preceding newline, not the After line',
+  );
+
+  const crlfSource = [
+    'Before',
+    String.raw`\[`,
+    '  x + y',
+    String.raw`\]`,
+    'After',
+  ].join('\r\n');
+  const crlfDocument = EditorState.create({ doc: crlfSource }).doc;
+  assert.deepEqual(
+    visualSourceLineNumberRange(
+      crlfDocument,
+      crlfDocument.line(2).from,
+      crlfDocument.line(5).from,
+    ),
+    { fromLine: 2, toLine: 4 },
+    'CRLF source uses the same half-open line ownership as LF source',
+  );
+
+  const eofSource = ['Before', String.raw`\[`, '  x + y', String.raw`\]`].join('\n');
+  const eofDocument = EditorState.create({ doc: eofSource }).doc;
+  assert.deepEqual(
+    visualSourceLineNumberRange(
+      eofDocument,
+      eofDocument.line(2).from,
+      eofDocument.length,
+    ),
+    { fromLine: 2, toLine: 4 },
+    'a replacement ending at EOF includes the final source line',
+  );
+
+  const terminalSource = [
+    String.raw`\documentclass{article}`,
+    String.raw`\begin{document}`,
+    ...Array.from({ length: 24 }, (_, index) => `source line ${index + 3}`),
+    String.raw`\end{document}`,
+    '',
+  ].join('\n');
+  const terminalDocument = EditorState.create({ doc: terminalSource }).doc;
+  const documentEnd = scanVisualDocumentStructure(terminalSource).records.find(
+    (record) => record.kind === 'documentEnd',
+  );
+  assert.equal(terminalDocument.lines, 28);
+  assert.ok(documentEnd !== undefined && documentEnd.kind === 'documentEnd');
+  assert.equal(documentEnd.replacement.block, true);
+  assert.equal(documentEnd.replacement.from, terminalDocument.line(27).from);
+  assert.equal(documentEnd.replacement.to, terminalDocument.length);
+  assert.deepEqual(
+    visualSourceLineNumberRange(
+      terminalDocument,
+      documentEnd.replacement.from,
+      documentEnd.replacement.to,
+    ),
+    { fromLine: 27, toLine: 27 },
+    'a folded document-end widget owns exactly line 27 even when its replacement consumes the final LF',
+  );
+
+  const singleLineSource = ['Before', '$$x=y$$', 'After'].join('\n');
+  const singleLineDocument = EditorState.create({ doc: singleLineSource }).doc;
+  assert.deepEqual(
+    visualSourceLineNumberRange(
+      singleLineDocument,
+      singleLineDocument.line(2).from,
+      singleLineDocument.line(3).from,
+    ),
+    { fromLine: 2, toLine: 2 },
+    'a one-line block replacement reports one source line even when it owns the trailing newline',
+  );
+
+  assert.equal(
+    visualSourceLineNumberRange(
+      standaloneDocument,
+      standaloneBegin.from,
+      standaloneBegin.from,
+    ),
+    undefined,
+    'an empty replacement has no line-number range',
+  );
+  assert.equal(
+    visualSourceLineNumberRange(
+      standaloneDocument,
+      standaloneAfter.from,
+      standaloneBegin.from,
+    ),
+    undefined,
+    'a reversed replacement has no line-number range',
+  );
+});
+
+test('terminal visual blocks own the CodeMirror EOF boundary without changing other replacements', () => {
+  assert.equal(
+    visualBlockReplacementInclusiveEnd(true, 722, 722),
+    true,
+    'an EOF block absorbs CodeMirror\'s zero-height terminal text block',
+  );
+  assert.equal(
+    visualBlockReplacementInclusiveEnd(true, 721, 722),
+    false,
+    'a non-terminal block leaves the following native source line intact',
+  );
+  assert.equal(
+    visualBlockReplacementInclusiveEnd(false, 722, 722),
+    false,
+    'an inline replacement stays end-exclusive even when it reaches EOF',
+  );
+  assert.equal(
+    visualBlockReplacementInclusiveEnd(true, 723, 722),
+    false,
+    'an out-of-document endpoint is not a terminal block boundary',
+  );
+  assert.equal(
+    visualBlockReplacementInclusiveEnd(true, -1, -1),
+    false,
+    'invalid negative boundaries are never inclusive',
+  );
+});
+
+test('visual semantic headers retain their exact physical source lines', () => {
+  const lines = Array.from(
+    { length: 170 },
+    (_, index) => `% source line ${index + 1}`,
+  );
+  lines[0] = String.raw`\documentclass{article}`;
+  lines[1] = String.raw`\newtheorem{conjecture}{Conjecture}`;
+  lines[2] = String.raw`\begin{document}`;
+  lines[88] = String.raw`\begin{abstract}`;
+  lines[89] = 'Abstract body.';
+  lines[90] = String.raw`\end{abstract}`;
+  lines[95] = String.raw`\section{Visual heading}`;
+  lines[165] = String.raw`\begin{conjecture}`;
+  lines[166] = 'Conjecture body.';
+  lines[167] = String.raw`\end{conjecture}`;
+  lines[169] = String.raw`\end{document}`;
+
+  const source = lines.join('\n');
+  const document = EditorState.create({ doc: source }).doc;
+  const records = scanVisualDocumentStructure(source).records;
+  const abstract = records.find((record) => record.kind === 'abstract');
+  const heading = records.find((record) => record.kind === 'heading');
+  const conjecture = records.find(
+    (record) => record.kind === 'theorem' && record.environment === 'conjecture',
+  );
+
+  assert.ok(abstract !== undefined && abstract.kind === 'abstract');
+  assert.ok(heading !== undefined && heading.kind === 'heading');
+  assert.ok(conjecture !== undefined && conjecture.kind === 'theorem');
+  assert.deepEqual(
+    visualSourceLineNumberRange(
+      document,
+      abstract.begin.from,
+      abstract.begin.to,
+    ),
+    { fromLine: 89, toLine: 89 },
+    'the visual Abstract header remains owned by its physical begin line',
+  );
+  assert.equal(
+    document.lineAt(heading.from).number,
+    96,
+    'the visual section title retains the native physical source line',
+  );
+  assert.deepEqual(
+    visualSourceLineNumberRange(
+      document,
+      conjecture.begin.from,
+      conjecture.begin.to,
+    ),
+    { fromLine: 166, toLine: 166 },
+    'the visual Conjecture header remains owned by its physical begin line',
+  );
+});
+
+test('visual source line-number ranges keep compact and tall collapsed blocks exact', () => {
+  const source = Array.from({ length: 30 }, (_, index) => `source line ${index + 1}`).join('\n');
+  const document = EditorState.create({ doc: source }).doc;
+
+  assert.deepEqual(
+    visualSourceLineNumberRange(
+      document,
+      document.line(7).from,
+      document.line(10).from,
+    ),
+    { fromLine: 7, toLine: 9 },
+    'a visually compact replacement still reports both endpoints of its complete source range',
+  );
+  assert.deepEqual(
+    visualSourceLineNumberRange(
+      document,
+      document.line(18).from,
+      document.line(26).from,
+    ),
+    { fromLine: 18, toLine: 25 },
+    'capping a tall visual indicator must not shorten or approximate its underlying source range',
+  );
+
+  for (const lineNumber of [7, 8, 9, 18, 19, 20, 21, 22, 23, 24, 25]) {
+    assert.equal(
+      document.line(lineNumber).number,
+      lineNumber,
+      'expanding a collapsed block must leave CodeMirror\'s exact per-line numbering intact',
+    );
+  }
+
+  const fourDigitSource = Array.from(
+    { length: 1_041 },
+    (_, index) => `source line ${index + 1}`,
+  ).join('\n');
+  const fourDigitDocument = EditorState.create({ doc: fourDigitSource }).doc;
+  assert.deepEqual(
+    visualSourceLineNumberRange(
+      fourDigitDocument,
+      fourDigitDocument.line(1_037).from,
+      fourDigitDocument.line(1_040).from,
+    ),
+    { fromLine: 1_037, toLine: 1_039 },
+    'four-digit compact endpoints remain separate values, allowing gutter width to equal the longer single line number rather than their concatenated widths',
+  );
+});
+
+test('visual source range markers classify short, balanced, and tall rendered blocks', () => {
+  const lineHeight = 20;
+  assert.equal(VISUAL_SOURCE_RANGE_COMPACT_MAX_LINE_HEIGHTS, 2.75);
+  assert.equal(VISUAL_SOURCE_RANGE_CAPPED_MIN_LINE_HEIGHTS, 6);
+  assert.equal(
+    visualSourceRangeLineNumberLayout(2.74 * lineHeight, lineHeight),
+    'compact',
+    'a short visual block uses a centered full-size vertical stack so its endpoints remain legible without widening the gutter',
+  );
+  assert.equal(
+    visualSourceRangeLineNumberLayout(2.75 * lineHeight, lineHeight),
+    'balanced',
+    'the compact threshold is exclusive so a block with enough room keeps a vertical range',
+  );
+  assert.equal(
+    visualSourceRangeLineNumberLayout(6 * lineHeight, lineHeight),
+    'balanced',
+    'a six-line block remains a normally proportioned vertical range',
+  );
+  assert.equal(
+    visualSourceRangeLineNumberLayout(6.01 * lineHeight, lineHeight),
+    'capped',
+    'a tall visual block caps and centers the indicator instead of pulling endpoints apart',
+  );
+  assert.equal(
+    visualSourceRangeLineNumberLayout(0, lineHeight),
+    'balanced',
+    'unavailable block geometry falls back to the non-destructive balanced layout',
+  );
+  assert.equal(
+    visualSourceRangeLineNumberLayout(100, Number.NaN),
+    'balanced',
+    'invalid line geometry must not accidentally select an extreme layout',
+  );
+});
+
+test('theorem frame CSS survives CodeMirror style-mod serialization', () => {
+  const extension = EditorView.theme({
+    '&': {
+      [VISUAL_THEOREM_BORDER_PROPERTY]: VISUAL_THEOREM_BORDER_VALUE,
+    },
+    '.theorem-frame-probe': {
+      border: VISUAL_THEOREM_FRAME_BORDER,
+      borderRadius: VISUAL_THEOREM_FRAME_RADIUS,
+    },
+  });
+  const rules = (extension as readonly unknown[]).flatMap((entry) => {
+    const value = typeof entry === 'object' && entry !== null
+      ? (entry as { readonly value?: unknown }).value
+      : undefined;
+    const getRules = typeof value === 'object' && value !== null
+      ? (value as { readonly getRules?: () => string }).getRules
+      : undefined;
+    return typeof getRules === 'function' ? [getRules.call(value)] : [];
+  }).join('\n');
+
+  assert.doesNotMatch(VISUAL_THEOREM_BORDER_PROPERTY, /[A-Z]/u);
+  assert.match(VISUAL_THEOREM_BORDER_VALUE, /--vscode-contrastBorder/u);
+  assert.match(rules, /--texleaf-theorem-border:/u);
+  assert.match(
+    rules,
+    /border: 3px solid var\(--texleaf-theorem-border\);/u,
+  );
+  assert.match(rules, /border-radius: 6px;/u);
+  assert.doesNotMatch(rules, /--texleaf[A-Z]/u);
+});
+
+test('visual search treats ordinary LaTeX backslashes and replacements literally', () => {
+  const source = String.raw`\theta + \rho + \nabla f + \text{x} + \frac{a}{b}`;
+  const state = EditorState.create({ doc: source });
+  for (const command of [String.raw`\theta`, String.raw`\rho`, String.raw`\nabla`, String.raw`\text`]) {
+    const spec = visualLatexSearchQuerySpec({
+      search: command,
+      replace: String.raw`\vartheta`,
+      caseSensitive: false,
+      regexp: false,
+      wholeWord: false,
+    });
+    assert.equal(spec.literal, true);
+    const result = new SearchQuery(spec).getCursor(state).next();
+    assert.equal(result.done, false, `${command} must remain searchable as raw TeX source`);
+    if (!result.done) {
+      assert.equal(state.sliceDoc(result.value.from, result.value.to), command);
+    }
+  }
+
+  assert.deepEqual(
+    visualLatexSearchQuerySpec({
+      search: String.raw`\\(theta|rho)`,
+      replace: String.raw`\\$1`,
+      caseSensitive: true,
+      regexp: true,
+      wholeWord: false,
+    }),
+    {
+      search: String.raw`\\(theta|rho)`,
+      replace: String.raw`\\$1`,
+      caseSensitive: true,
+      regexp: true,
+      wholeWord: false,
+      literal: true,
+    },
+    'regular-expression mode must preserve literal LaTeX replacement text',
+  );
+
+  let replacementState = EditorState.create({
+    doc: 'x_1 x_2',
+    extensions: [search({ literal: true })],
+  });
+  const replacementView = {
+    get state() {
+      return replacementState;
+    },
+    dispatch(spec: Parameters<EditorState['update']>[0]) {
+      replacementState = replacementState.update(spec).state;
+    },
+  } as unknown as EditorView;
+  replacementView.dispatch({
+    effects: setSearchQuery.of(new SearchQuery(visualLatexSearchQuerySpec({
+      search: String.raw`x_(\d)`,
+      replace: String.raw`\theta_{$1}`,
+      caseSensitive: true,
+      regexp: true,
+      wholeWord: false,
+    }))),
+  } as never);
+  assert.equal(replaceAll(replacementView), true);
+  assert.equal(
+    replacementState.doc.toString(),
+    String.raw`\theta_{1} \theta_{2}`,
+    'regexp captures work while LaTeX replacement backslashes stay literal',
+  );
+});
+
+test('CodeMirror atomically consumes an auto-paired closer when lr( expands', () => {
+  const original = 'lr()';
+  let state = EditorState.create({
+    doc: original,
+    selection: { anchor: 3 },
+    extensions: [history()],
+  });
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(transaction: Transaction) {
+      state = transaction.state;
+    },
+  } as unknown as EditorView;
+  const encoding = replacementPartsToCodeMirrorSnippet([
+    { kind: 'text', value: String.raw`\left( ` },
+    { kind: 'tabstop', index: 0 },
+    { kind: 'text', value: String.raw` \right) ` },
+    { kind: 'tabstop', index: 1 },
+  ]);
+  const prefixChanges = [{ from: 3, to: 4, insert: '' }];
+  const modifierChanges = state.changes(prefixChanges);
+  const from = modifierChanges.mapPos(0, 1);
+  const to = modifierChanges.mapPos(3, -1);
+  const applied = applyAtomicCodeMirrorSnippet(view, {
+    template: encoding.template,
+    completion: { label: 'lr(' },
+    from,
+    to,
+    openBraceMarker: encoding.openBraceMarker,
+    closeBraceMarker: encoding.closeBraceMarker,
+    prefixChanges,
+  });
+
+  assert.equal(state.doc.toString(), String.raw`\left(  \right) `);
+  assert.equal(state.doc.toString().endsWith('))'), false, 'the generated closer must not survive');
+  assert.equal(state.selection.main.head, String.raw`\left( `.length);
+  assert.equal(
+    EditorState.create({ doc: original }).update({ changes: applied.changes }).state.doc.toString(),
+    state.doc.toString(),
+    'the extension-host mirror must receive the same composed transaction',
+  );
+  assert.equal(undo(view), true);
+  assert.equal(state.doc.toString(), original);
+  assert.equal(state.selection.main.head, 3, 'Undo restores CodeMirror\'s paired input caret');
+  assert.equal(redo(view), true);
+  assert.equal(state.doc.toString(), String.raw`\left(  \right) `);
+});
+
+test('visual block indentation converts tabs to editor columns safely', () => {
+  assert.equal(visualSourceIndentationColumns('    ', 4), 4);
+  assert.equal(visualSourceIndentationColumns('\t', 4), 4);
+  assert.equal(visualSourceIndentationColumns(' \t', 4), 4);
+  assert.equal(visualSourceIndentationColumns('\t  ', 4), 6);
+  assert.equal(visualSourceIndentationColumns('  text', 4), 0);
+  assert.equal(visualSourceIndentationColumns(' '.repeat(400), 4), 256);
+});
+
+test('visual Enter indents display math and preserves opaque environment indentation', () => {
+  const displaySource = [
+    String.raw`\begin{theorem}`,
+    String.raw`  \[`,
+    '',
+    String.raw`  \]`,
+    '  $$',
+    '',
+    '  $$',
+    String.raw`  \begin{verbatim}`,
+    '      literal',
+    '',
+    String.raw`  \end{verbatim}`,
+    String.raw`\end{theorem}`,
+  ].join('\n');
+  const state = EditorState.create({
+    doc: displaySource,
+    extensions: [
+      indentUnit.of('  '),
+      visualLatexEnvironmentIndentationExtension(),
+    ],
+  });
+  assert.equal(getIndentation(state, state.doc.line(3).from), 4);
+  assert.equal(getIndentation(state, state.doc.line(4).from), 2);
+  assert.equal(getIndentation(state, state.doc.line(6).from), 4);
+  assert.equal(getIndentation(state, state.doc.line(7).from), 2);
+  assert.equal(
+    getIndentation(state, state.doc.line(10).from),
+    6,
+    'a blank line in verbatim keeps the preceding literal indentation',
+  );
+});
+
+test('visual logical-line navigation exposes only the formula reached at its column', () => {
+  const source = 'Prefix text $x_1+y_1$ and suffix.';
+  const line = EditorState.create({ doc: source }).doc.line(1);
+  const formulaFrom = source.indexOf('$');
+  const formulaTo = source.lastIndexOf('$') + 1;
+  const formula = { from: formulaFrom, to: formulaTo, display: false };
+  assert.equal(
+    planVisualLogicalLineNavigation(
+      source,
+      { from: line.from, to: line.to },
+      formulaFrom + 3,
+      [formula],
+    )?.reveal.kind,
+    'formula',
+  );
+  assert.equal(
+    planVisualLogicalLineNavigation(
+      source,
+      { from: line.from, to: line.to },
+      2,
+      [formula],
+    )?.reveal.kind,
+    'line',
+  );
+});
+
+test('visual logical-line navigation keeps a multiline display formula exposed', () => {
+  const source = String.raw`Before
+\begin{align}
+  a &= b \\
+  c &= d
+\end{align}
+After`;
+  const document = EditorState.create({ doc: source }).doc;
+  const formula = {
+    from: source.indexOf(String.raw`\begin{align}`),
+    to: source.indexOf(String.raw`\end{align}`) + String.raw`\end{align}`.length,
+    display: true,
+  };
+  const target = document.line(4);
+  const plan = planVisualLogicalLineNavigation(
+    source,
+    { from: target.from, to: target.to },
+    1,
+    [formula],
+  );
+  assert.deepEqual(plan?.reveal, {
+    kind: 'formula',
+    from: formula.from,
+    to: formula.to,
+  });
+});
+
+test('visual environment guard ignores dense nearby boundaries during prose input', () => {
+  const units = Array.from(
+    { length: 400 },
+    (_, index) => String.raw`\begin{proof}
+Body ${index} remains ordinary editable prose.
+\end{proof}`,
+  );
+  const source = units.join('\n');
+  const document = EditorState.create({ doc: source }).doc;
+  let cursor = 0;
+  for (const unit of units) {
+    const body = source.indexOf('remains ordinary', cursor) + 'remains '.length;
+    assert.equal(
+      visualEnvironmentNameTouchesDocumentRange(document, body, body),
+      false,
+      'a nearby begin/end command must not turn an ordinary prose key into a full scan',
+    );
+    cursor = source.indexOf(unit, cursor) + unit.length;
+  }
+});
+
+test('visual environment guard synchronizes names after long same-line whitespace', () => {
+  const whitespace = ' '.repeat(512);
+  const original = `\\begin${whitespace}{pr}\nBody.\n\\end${whitespace}{pr}`;
+  const insertAt = original.indexOf('pr') + 2;
+  let state = EditorState.create({
+    doc: original,
+    selection: { anchor: insertAt },
+    extensions: [history(), visualEnvironmentNameSyncExtension()],
+  });
+
+  assert.equal(
+    visualEnvironmentNameTouchesDocumentRange(state.doc, insertAt, insertAt),
+    true,
+    'the guard must walk through arbitrary same-line spaces before the opening brace',
+  );
+  state = state.update({
+    changes: { from: insertAt, insert: 'oof' },
+    selection: { anchor: insertAt + 3 },
+    userEvent: 'input.type',
+  }).state;
+
+  assert.equal(
+    state.doc.toString(),
+    `\\begin${whitespace}{proof}\nBody.\n\\end${whitespace}{proof}`,
+  );
+});
+
+test('visual selection presentation key changes only across hidden source ranges', () => {
+  const indexed = buildVisualSelectionPresentationRangeSet([
+    { from: 10, to: 20 },
+    { from: 40, to: 50 },
+  ]);
+  const stateAt = (anchor: number, head = anchor): EditorState =>
+    EditorState.create({
+      doc: 'x'.repeat(80),
+      selection: EditorSelection.single(anchor, head),
+    });
+
+  assert.equal(visualSelectionPresentationKey(stateAt(2), indexed), '');
+  assert.equal(visualSelectionPresentationKey(stateAt(8), indexed), '');
+  assert.equal(visualSelectionPresentationKey(stateAt(10), indexed), '');
+  assert.equal(visualSelectionPresentationKey(stateAt(11), indexed), '0');
+  assert.equal(visualSelectionPresentationKey(stateAt(19), indexed), '0');
+  assert.equal(visualSelectionPresentationKey(stateAt(20), indexed), '');
+  assert.equal(visualSelectionPresentationKey(stateAt(41), indexed), '1');
+  assert.equal(visualSelectionPresentationKey(stateAt(5, 45), indexed), '0,1');
+
+  const inserted = stateAt(11).update({ changes: { from: 0, insert: 'abc' } });
+  assert.equal(
+    visualSelectionPresentationKey(inserted.state, indexed.map(inserted.changes)),
+    '0',
+    'mapping the selection and interval index through the same edit preserves the key',
+  );
+});
+
+test('visual automatic snippets consume only CodeMirror-generated paired closers', () => {
+  assert.deepEqual(
+    planVisualAutomaticSnippetInput(
+      [{ from: 2, to: 2, insert: '()' }],
+      3,
+    ),
+    {
+      matchOffset: 3,
+      generatedCloser: {
+        from: 3,
+        to: 4,
+        expectedText: ')',
+        insert: '',
+      },
+    },
+    'lr( is delivered by CodeMirror as lr() with the caret between the pair',
+  );
+
+  for (const [insert, closer] of [
+    ['[]', ']'],
+    ['{}', '}'],
+    ['""', '"'],
+    ["''", "'"],
+  ] as const) {
+    assert.deepEqual(
+      planVisualAutomaticSnippetInput(
+        [{ from: 7, to: 7, insert }],
+        8,
+      ),
+      {
+        matchOffset: 8,
+        generatedCloser: {
+          from: 8,
+          to: 9,
+          expectedText: closer,
+          insert: '',
+        },
+      },
+      `${insert} must expose exactly its generated closer as a snippet modifier`,
+    );
+  }
+
+  assert.deepEqual(
+    planVisualAutomaticSnippetInput(
+      [{ from: 3, to: 3, insert: '(' }],
+      4,
+    ),
+    { matchOffset: 4 },
+    'ordinary input remains a normal automatic-snippet transaction',
+  );
+  assert.deepEqual(
+    planVisualAutomaticSnippetInput(
+      [{ from: 2, to: 2, insert: '()' }],
+      4,
+    ),
+    { matchOffset: 4 },
+    'a caret after the entire insertion is ordinary text input, never a generated-closer plan',
+  );
+  assert.equal(
+    planVisualAutomaticSnippetInput(
+      [{ from: 2, to: 2, insert: '<>' }],
+      3,
+    ),
+    undefined,
+    'non-CodeMirror pairs are never consumed speculatively',
+  );
+  assert.equal(
+    planVisualAutomaticSnippetInput(
+      [{ from: 2, to: 4, insert: '()' }],
+      3,
+    ),
+    undefined,
+    'selection replacement is not mistaken for a generated closer',
+  );
+  assert.equal(
+    planVisualAutomaticSnippetInput(
+      [
+        { from: 0, to: 0, insert: '(' },
+        { from: 2, to: 2, insert: ')' },
+      ],
+      1,
+    ),
+    undefined,
+    'selection wrapping and multi-cursor edits stay outside auto snippets',
+  );
+});
+
+test('resolved visual literature citations use square brackets while textual citations stay textual', () => {
+  const source = String.raw`\begin{document}
+\cite{gross1980}
+\parencite[see][Lemma~2]{gross1980}
+\textcite{gross1980}
+\end{document}`;
+  const entries = parseBibTeX(String.raw`@article{gross1980,
+  author = {Gross, David and Wilczek, Frank},
+  title = {Ultraviolet Behavior of Non-Abelian Gauge Theories},
+  journal = {Physical Review Letters},
+  year = {1980}
+}`);
+  const resolved = resolveVisualBibliography(
+    scanVisualDocumentStructure(source),
+    entries,
+  );
+  const citations = resolved.records.filter(
+    (record) => record.kind === 'citation',
+  );
+
+  assert.deepEqual(
+    citations.map((record) => record.label),
+    [
+      '[Gross et al., 1980]',
+      '[Gross et al., 1980]',
+      'Gross et al. (1980)',
+    ],
+    'bibliography resolution must not turn ordinary citation brackets into parentheses',
+  );
+});
+
+test('visual structure scanner emits a host-enrichable table of contents placeholder', () => {
+  const source = String.raw`\documentclass{article}
+\tableofcontents
+\begin{document}
+\iffalse\tableofcontents\fi
+\tableofcontents % live project outline
+\end{document}`;
+  const records = scanVisualDocumentStructure(source).records.filter(
+    (record) => record.kind === 'tableOfContents',
+  );
+
+  assert.equal(records.length, 1);
+  const toc = records[0];
+  assert.ok(toc !== undefined && toc.kind === 'tableOfContents');
+  assert.equal(
+    source.slice(toc.replacement.sourceFrom, toc.replacement.sourceTo),
+    String.raw`\tableofcontents`,
+  );
+  assert.equal(toc.replacement.block, true);
+  assert.equal(toc.language, 'en');
+  assert.equal(toc.scope, 'all');
+  assert.equal(toc.template, false);
+  assert.deepEqual(toc.entries, []);
+  assert.equal(toc.incomplete, false);
+  assert.equal(toc.numberingApproximate, false);
+  assert.deepEqual(toc.notices, []);
+});
+
+test('visual structure scanner leaves AtBeginSection frames as preamble source', () => {
+  const source = String.raw`\documentclass{beamer}
+\AtBeginSection[special star text]{
+  \begin{frame}
+    \frametitle{Table of Contents}
+    \tableofcontents[currentsection]
+  \end{frame}
+}
+\begin{document}
+\section{First}
+\begin{frame}{Body outline}
+  \tableofcontents[currentsection]
+\end{frame}
+\end{document}`;
+  const records = scanVisualDocumentStructure(source).records;
+  const frames = records.filter((record) => record.kind === 'frame');
+  const tables = records.filter((record) => record.kind === 'tableOfContents');
+
+  assert.equal(frames.length, 1);
+  const frame = frames[0];
+  assert.ok(frame !== undefined && frame.kind === 'frame');
+  assert.equal(frame.title, 'Body outline');
+  assert.equal(tables.length, 1);
+  const toc = tables[0];
+  assert.ok(toc !== undefined && toc.kind === 'tableOfContents');
+  assert.equal(toc.scope, 'currentSection');
+  assert.equal(toc.template, false);
+  assert.equal(
+    source.slice(toc.replacement.sourceFrom, toc.replacement.sourceTo),
+    String.raw`\tableofcontents[currentsection]`,
+  );
+
+  const conservativelyClassified = scanVisualDocumentStructure(source, {
+    fragmentKind: 'body',
+  }).records;
+  assert.deepEqual(
+    conservativelyClassified
+      .filter((record) => record.kind === 'frame')
+      .map((record) => record.kind === 'frame' ? record.title : undefined),
+    ['Body outline'],
+    'an actual document boundary must fence preamble cards even under a provisional body role',
+  );
+  assert.equal(
+    conservativelyClassified.filter((record) => record.kind === 'tableOfContents').length,
+    1,
+  );
+});
+
+test('visual structure scanner keeps command-style Beamer frames and their title page visual', () => {
+  const source = String.raw`\documentclass{beamer}
+\title{Command Frame Deck}
+\author{Ada Lovelace}
+\begin{document}
+  \frame[plain]{\titlepage}
+\frame{
+  \frametitle{Overview}
+  \framesubtitle{Command shorthand}
+  \begin{itemize}
+    \item One visual item.
+  \end{itemize}
+}
+\end{document}`;
+  const records = scanVisualDocumentStructure(source).records;
+  const frames = records.filter((record) => record.kind === 'frame');
+
+  assert.equal(frames.length, 2);
+  const titleFrame = frames[0];
+  assert.ok(titleFrame !== undefined && titleFrame.kind === 'frame');
+  assert.equal(titleFrame.syntax, 'command');
+  assert.equal(
+    source.slice(titleFrame.begin.sourceFrom, titleFrame.begin.sourceTo),
+    String.raw`\frame[plain]{`,
+  );
+  assert.equal(
+    source.slice(titleFrame.bodyFrom, titleFrame.bodyTo),
+    String.raw`\titlepage`,
+  );
+  assert.equal(
+    source.slice(titleFrame.end.sourceFrom, titleFrame.end.sourceTo),
+    '}',
+  );
+  assert.equal(titleFrame.begin.block, true);
+  assert.equal(titleFrame.end.block, true);
+  assert.equal(
+    source.slice(titleFrame.begin.from, titleFrame.begin.to),
+    String.raw`  \frame[plain]{`,
+    'the block header must absorb indentation that would otherwise render above the slide',
+  );
+  assert.equal(
+    source.slice(titleFrame.end.from, titleFrame.end.to),
+    '}\n',
+    'the block footer must absorb the command line ending instead of leaving a row below the slide',
+  );
+
+  const titlePage = records.find((record) => record.kind === 'maketitle');
+  assert.ok(titlePage !== undefined && titlePage.kind === 'maketitle');
+  assert.equal(
+    source.slice(titlePage.replacement.sourceFrom, titlePage.replacement.sourceTo),
+    String.raw`\titlepage`,
+  );
+  assert.equal(titlePage.title?.text, 'Command Frame Deck');
+  assert.deepEqual(titlePage.authors.map((author) => author.text), ['Ada Lovelace']);
+  assert.ok(
+    titlePage.replacement.sourceFrom >= titleFrame.bodyFrom &&
+      titlePage.replacement.sourceTo <= titleFrame.bodyTo,
+  );
+
+  const overview = frames[1];
+  assert.ok(overview !== undefined && overview.kind === 'frame');
+  assert.equal(overview.syntax, 'command');
+  assert.equal(overview.title, 'Overview');
+  assert.equal(overview.subtitle, 'Command shorthand');
+  assert.equal(overview.titleCommands.length, 2);
+  assert.equal(
+    source.slice(overview.begin.from, overview.begin.to),
+    String.raw`\frame{
+`,
+    'a multiline command frame header must absorb its otherwise-empty opening line',
+  );
+  assert.equal(source.slice(overview.end.from, overview.end.to), '}\n');
+  const list = records.find((record) => record.kind === 'list');
+  assert.ok(list !== undefined && list.kind === 'list');
+  assert.ok(
+    list.begin.sourceFrom >= overview.bodyFrom &&
+      list.end.sourceTo <= overview.bodyTo,
+  );
+
+  const provisionalRecords = scanVisualDocumentStructure(source, {
+    fragmentKind: 'body',
+  }).records;
+  const provisionalTitlePage = provisionalRecords.find(
+    (record) => record.kind === 'maketitle',
+  );
+  assert.ok(
+    provisionalTitlePage !== undefined && provisionalTitlePage.kind === 'maketitle',
+  );
+  assert.equal(provisionalTitlePage.title?.text, 'Command Frame Deck');
+  assert.deepEqual(
+    provisionalTitlePage.authors.map((author) => author.text),
+    ['Ada Lovelace'],
+  );
+});
+
+test('visual headings retain starred state and their optional ToC title', () => {
+  const source = String.raw`\documentclass{article}
+\begin{document}
+\section[Short K\"{a}hler title]{A much longer K\"{a}hler title}
+\section*{Unnumbered interlude}
+\subsection[]{Visible with an intentionally empty ToC title}
+\end{document}`;
+  const headings = scanVisualDocumentStructure(source).records.filter(
+    (record) => record.kind === 'heading',
+  );
+
+  assert.deepEqual(
+    headings.map((record) => ({
+      command: record.command,
+      starred: record.starred,
+      number: record.number,
+      title: record.title,
+      tocTitle: record.tocTitle,
+    })),
+    [
+      {
+        command: 'section',
+        starred: false,
+        number: '1',
+        title: 'A much longer Kähler title',
+        tocTitle: 'Short Kähler title',
+      },
+      {
+        command: 'section',
+        starred: true,
+        number: undefined,
+        title: 'Unnumbered interlude',
+        tocTitle: 'Unnumbered interlude',
+      },
+      {
+        command: 'subsection',
+        starred: false,
+        number: '1.1',
+        title: 'Visible with an intentionally empty ToC title',
+        tocTitle: '',
+      },
+    ],
+  );
+});
+
+test('visual citation records retain safe one- and two-position optional notes', () => {
+  const source = String.raw`\begin{document}
+\cite[p.~7]{alpha}
+\parencite[see][Theorem~2.1]{beta}
+\textcite[][Chapter~3]{gamma}
+\autocite[\S~4]{delta}
+\citep[see][]{epsilon}
+\parencite*[compare][Section~5]{zeta}
+\end{document}`;
+  const citations = scanVisualDocumentStructure(source).records.filter(
+    (record) => record.kind === 'citation',
+  );
+
+  assert.deepEqual(
+    citations.map((record) => [record.command, record.optionalArguments]),
+    [
+      ['cite', ['p. 7']],
+      ['parencite', ['see', 'Theorem 2.1']],
+      ['textcite', ['', 'Chapter 3']],
+      ['autocite', ['§ 4']],
+      ['citep', ['see', '']],
+      ['parencite', ['compare', 'Section 5']],
+    ],
+    'empty brackets remain positional while visible notes become safe plain text',
+  );
+  assert.deepEqual(
+    citations.map((record) => source.slice(record.from, record.to)),
+    [
+      String.raw`\cite[p.~7]{alpha}`,
+      String.raw`\parencite[see][Theorem~2.1]{beta}`,
+      String.raw`\textcite[][Chapter~3]{gamma}`,
+      String.raw`\autocite[\S~4]{delta}`,
+      String.raw`\citep[see][]{epsilon}`,
+      String.raw`\parencite*[compare][Section~5]{zeta}`,
+    ],
+    'each visual chip must still unfold and navigate through the complete citation command',
+  );
+});
+
+test('visual reference index classifies counter-owning tables, images, and unique figure diagrams', () => {
+  const source = String.raw`\documentclass{article}
+\begin{document}
+\begin{table}
+\caption{Values}
+\begin{tabular}{c}
+Value \\
+1 \\
+\end{tabular}
+\label{tab:values}
+\end{table}
+\begin{longtable}{c}
+\caption{Long values}\label{tab:long} \\
+Value \\
+1 \\
+\end{longtable}
+\begin{figure}
+\includegraphics{plot.png}
+\caption{Plot}
+\label{fig:plot}
+\end{figure}
+\begin{figure}
+\begin{tikzcd}
+A \arrow[r] & B
+\end{tikzcd}
+\caption{Commutative square}
+\label{diag:tikzcd}
+\end{figure}
+\begin{figure}
+\begin{tikzpicture}
+\node {A};
+\end{tikzpicture}
+\caption{TikZ picture}
+\label{diag:tikzpicture}
+\end{figure}
+\end{document}`;
+  const records = scanVisualDocumentStructure(source).records;
+  const index = indexVisualStructureReferences(source, records);
+
+  assert.equal(records.some((record) => record.kind === 'heading'), false);
+  assert.deepEqual(index.get('tab:values'), {
+    targetKind: 'table',
+    label: 'tab:values',
+  });
+  assert.deepEqual(index.get('tab:long'), {
+    targetKind: 'table',
+    label: 'tab:long',
+  });
+  assert.deepEqual(index.get('fig:plot'), {
+    targetKind: 'image',
+    label: 'fig:plot',
+  });
+  assert.deepEqual(index.get('diag:tikzcd'), {
+    targetKind: 'diagram',
+    label: 'diag:tikzcd',
+  });
+  assert.deepEqual(index.get('diag:tikzpicture'), {
+    targetKind: 'diagram',
+    label: 'diag:tikzpicture',
+  });
+
+  const table = findVisualLabeledStructureForLabel(source, records, 'tab:values');
+  assert.ok(table?.record.kind === 'table');
+  assert.equal(table.record.containerEnvironment, 'table');
+  assert.ok(table.record.label !== undefined);
+  assert.equal(
+    source.slice(table.record.label.from, table.record.label.to),
+    String.raw`\label{tab:values}`,
+  );
+  const longtable = findVisualLabeledStructureForLabel(source, records, 'tab:long');
+  assert.ok(longtable?.record.kind === 'table');
+  assert.equal(longtable.record.environment, 'longtable');
+  assert.equal(
+    findVisualLabeledStructureForLabel(source, records, 'fig:plot')?.record.kind,
+    'image',
+  );
+  assert.equal(
+    findVisualLabeledStructureForLabel(source, records, 'diag:tikzcd')?.record.kind,
+    'tikzcd',
+  );
+  assert.equal(
+    findVisualLabeledStructureForLabel(source, records, 'diag:tikzpicture')?.record.kind,
+    'tikzpicture',
+  );
+  assert.equal(
+    visualReferenceDisplayLabel(source, records, 'tab:values', 'table'),
+    'tab:values',
+  );
+  assert.equal(
+    visualReferenceDisplayLabel(source, records, 'fig:plot', 'image'),
+    'fig:plot',
+  );
+  assert.equal(
+    visualReferenceDisplayLabel(source, records, 'diag:tikzcd', 'diagram'),
+    'diag:tikzcd',
+  );
+});
+
+test('visual reference index does not assign labels to bare unnumbered structures', () => {
+  const source = String.raw`\documentclass{article}
+\begin{document}
+\begin{tabular}{c}
+A \\
+\label{tab:bare}
+\end{tabular}
+\includegraphics{bare.png}
+\label{fig:bare}
+\begin{tikzcd}
+A \arrow[r] & B
+\label{diag:bare}
+\end{tikzcd}
+\end{document}`;
+  const records = scanVisualDocumentStructure(source).records;
+  const index = indexVisualStructureReferences(source, records);
+
+  assert.ok(records.some((record) =>
+    record.kind === 'table' && record.environment === 'tabular'
+  ));
+  assert.ok(records.some((record) =>
+    record.kind === 'image' && record.path === 'bare.png'
+  ));
+  assert.ok(records.some((record) => record.kind === 'tikzcd'));
+  for (const key of ['tab:bare', 'fig:bare', 'diag:bare']) {
+    assert.equal(index.has(key), false);
+    assert.equal(
+      findVisualLabeledStructureForLabel(source, records, key),
+      undefined,
+    );
+  }
+});
+
+test('visual reference index fails closed for duplicate labels and ambiguous figures', () => {
+  const source = String.raw`\documentclass{article}
+\begin{document}
+\begin{table}
+\begin{tabular}{c}
+A \\
+\end{tabular}
+\label{shared:duplicate}
+\end{table}
+\begin{figure}
+\includegraphics{duplicate.png}
+\label{shared:duplicate}
+\end{figure}
+\begin{figure}
+\includegraphics{mixed.png}
+\begin{tikzcd}
+A \arrow[r] & B
+\end{tikzcd}
+\label{fig:mixed}
+\end{figure}
+\begin{figure}
+\includegraphics{first.png}
+\includegraphics{second.png}
+\label{fig:multiple-images}
+\end{figure}
+\begin{figure}
+\begin{tikzcd}
+A \arrow[r] & B
+\end{tikzcd}
+\begin{tikzpicture}
+\node {C};
+\end{tikzpicture}
+\label{diag:multiple}
+\end{figure}
+\end{document}`;
+  const records = scanVisualDocumentStructure(source).records;
+  const index = indexVisualStructureReferences(source, records);
+
+  assert.equal(
+    findVisualLabelsInRange(source, 0, source.length).filter(
+      (label) => label.key === 'shared:duplicate',
+    ).length,
+    2,
+  );
+  for (const key of [
+    'shared:duplicate',
+    'fig:mixed',
+    'fig:multiple-images',
+    'diag:multiple',
+  ]) {
+    assert.equal(index.has(key), false);
+    assert.equal(
+      findVisualLabeledStructureForLabel(source, records, key),
+      undefined,
+    );
+  }
+});
+
+test('visual structure reference index rejects ambiguous duplicate labels', () => {
+  const source = String.raw`\documentclass{article}
+\begin{document}
+\section{First}\label{sec:duplicate}
+\section{Second}\label{sec:duplicate}
+\end{document}`;
+  const records = scanVisualDocumentStructure(source).records;
+  assert.equal(
+    indexVisualStructureReferences(source, records).has('sec:duplicate'),
+    false,
+  );
+});
+
+test('visual Shift+Enter normalizes an existing blank line and preserves closer comments', () => {
+  const existing = cursorMarked([
+    '\t\\begin{proof}',
+    '\t\tbody<CURSOR>',
+    '\t\\end{proof}',
+    '   ',
+    '\tAfter.',
+  ].join('\r\n'));
+  const existingPlan = planVisualEnvironmentExit(existing.text, existing.offset, {
+    eol: '\r\n',
+  });
+  assert.ok(existingPlan);
+  const existingChanged = existing.text.slice(0, existingPlan.range.start) +
+    existingPlan.insert + existing.text.slice(existingPlan.range.end);
+  assert.match(existingChanged, /\\end\{proof\}\r\n\t\r\n\tAfter\./u);
+  assert.equal(existingChanged[existingPlan.cursorOffset - 1], '\t');
+
+  const commented = cursorMarked([
+    String.raw`  \begin{proof}`,
+    '    body<CURSOR>',
+    String.raw`  \end{proof} % keep this comment`,
+    '  After.',
+  ].join('\n'));
+  const commentPlan = planVisualEnvironmentExit(commented.text, commented.offset);
+  assert.ok(commentPlan);
+  const commentChanged = commented.text.slice(0, commentPlan.range.start) +
+    commentPlan.insert + commented.text.slice(commentPlan.range.end);
+  assert.match(
+    commentChanged,
+    /\\end\{proof\} % keep this comment\n  \n  After\./u,
+  );
+});
+
+test('visual Shift+Enter indentation is one undoable CodeMirror transaction', () => {
+  const fixture = cursorMarked([
+    String.raw`  \begin{proof}`,
+    '    body<CURSOR>',
+    String.raw`  \end{proof}`,
+    '  After.',
+  ].join('\n'));
+  const plan = planVisualEnvironmentExit(fixture.text, fixture.offset)!;
+  let state = EditorState.create({
+    doc: fixture.text,
+    selection: EditorSelection.cursor(fixture.offset),
+    extensions: history(),
+  });
+  const target = {
+    get state() {
+      return state;
+    },
+    dispatch(transaction: Transaction) {
+      state = transaction.state;
+    },
+  };
+  target.dispatch(state.update({
+    changes: { from: plan.range.start, to: plan.range.end, insert: plan.insert },
+    selection: EditorSelection.cursor(plan.cursorOffset),
+    annotations: [
+      Transaction.userEvent.of('input'),
+      isolateHistory.of('full'),
+    ],
+  }));
+  const formatted = state.doc.toString();
+  assert.notEqual(formatted, fixture.text);
+  assert.equal(undo(target), true);
+  assert.equal(state.doc.toString(), fixture.text);
+  assert.equal(redo(target), true);
+  assert.equal(state.doc.toString(), formatted);
+});
+
+test('visual bibliography discovery remembers declarations whose paths fail closed', () => {
+  const unsafe = scanVisualDocumentStructure(String.raw`\documentclass{article}
+\addbibresource{#1}
+\begin{document}
+\printbibliography
+\end{document}`);
+  assert.deepEqual(unsafe.bibliographyPaths, []);
+  assert.equal(unsafe.hasBibliographyDeclaration, true);
+
+  const commented = scanVisualDocumentStructure(String.raw`\documentclass{article}
+% \addbibresource{ignored.bib}
+\begin{document}\end{document}`);
+  assert.equal(commented.hasBibliographyDeclaration, false);
 });

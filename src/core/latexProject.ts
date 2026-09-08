@@ -1520,7 +1520,8 @@ function skipLiteralFalseProjectConditional(
  * the outer branch appear to end early and expose dead `\input` commands.
  */
 function isProjectConditionalControl(name: string): boolean {
-  return PROJECT_CONDITIONAL_PRIMITIVES.has(name) || /^if[A-Za-z@]+$/u.test(name);
+  return name !== "iff" &&
+    (PROJECT_CONDITIONAL_PRIMITIVES.has(name) || /^if[A-Za-z@]+$/u.test(name));
 }
 
 function skipProjectNewIfDeclaration(

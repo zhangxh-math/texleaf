@@ -14,6 +14,7 @@ import {
   getCitationCompletionEdit,
   normalizeReferenceSearchText,
   parseBibTeX,
+  scanVisualDocumentStructure,
   citationSearchMatchSortText,
   compareCitationSearchMatches,
   prepareCitationSearchReference,
@@ -123,6 +124,7 @@ interface CitationCompletionArgument {
 
 interface VisualCitationCompletionOptions {
   readonly requestedBibliographyPath?: string;
+  readonly bibliographyUris?: readonly vscode.Uri[];
 }
 
 interface CitationCompletionTarget {
@@ -153,6 +155,7 @@ interface RankedCompletionCandidateBase {
 interface RankedExistingCompletionCandidate extends RankedCompletionCandidateBase {
   readonly sourceRank: 0;
   readonly entry: BibTeXEntry;
+  readonly bibliographyUri: vscode.Uri;
 }
 
 interface RankedZoteroCompletionCandidate extends RankedCompletionCandidateBase {
@@ -272,6 +275,31 @@ export class CitationController
     };
   }
 
+  /** Read a bounded, host-resolved set. Duplicate keys are not guessed. */
+  public async readProjectBibliographyPreview(uris: readonly vscode.Uri[]): Promise<{
+    readonly entries: readonly BibTeXEntry[];
+    readonly sources: ReadonlyMap<string, vscode.Uri>;
+    readonly duplicateKeys: ReadonlySet<string>;
+  }> {
+    const unique = uniqueBibliographyUris(uris);
+    if (unique.length > MAX_PROJECT_BIBLIOGRAPHY_FILES) throw new Error("参考文献文件超过 64 个安全上限。");
+    const entries: BibTeXEntry[] = [];
+    const sources = new Map<string, vscode.Uri>();
+    let total = 0;
+    for (const uri of unique) {
+      const snapshot = await this.repository.read(uri);
+      total += snapshot.text.length;
+      if (snapshot.text.length > MAX_PROJECT_BIBLIOGRAPHY_CHARACTERS || total > MAX_PROJECT_BIBLIOGRAPHY_TOTAL_CHARACTERS) {
+        throw new Error("参考文献总内容超过安全扫描上限。");
+      }
+      for (const entry of this.prepareBibliographySearch(snapshot).entries) {
+        entries.push(entry); sources.set(entry.key, uri);
+      }
+    }
+    const duplicateKeys = findDuplicateKeys(entries);
+    return { entries: entries.filter((entry) => !duplicateKeys.has(entry.key)), sources, duplicateKeys };
+  }
+
   /** Open the exact bibliography represented by the visual bibliography card. */
   public async openVisualBibliography(
     document: vscode.TextDocument,
@@ -328,82 +356,6 @@ export class CitationController
     return { status: "found", uri };
   }
 
-  /** Resolve a declared bibliography using the repository's safe path rules. */
-  public resolveProjectBibliographyUri(
-    document: vscode.TextDocument,
-    configuredPath: string,
-  ): Promise<vscode.Uri> {
-    return this.repository.resolveBibliographyUri(document, configuredPath);
-  }
-
-  /**
-   * Resolve one key across an explicit, bounded project bibliography set.
-   * Ambiguous keys fail closed instead of opening an arbitrary `.bib` file.
-   */
-  public async revealProjectBibliographyEntry(
-    bibliographyUris: readonly vscode.Uri[],
-    key: string,
-    viewColumn?: vscode.ViewColumn,
-  ): Promise<ProjectBibliographyRevealResult> {
-    const searchedUris = uniqueBibliographyUris(bibliographyUris);
-    if (searchedUris.length > MAX_PROJECT_BIBLIOGRAPHY_FILES) {
-      throw new Error("项目声明的 bibliography 文件过多，已拒绝无界扫描。");
-    }
-    if (!isSafeCitationKey(key)) {
-      return { status: "missing", searchedUris };
-    }
-    const matches: Array<{
-      readonly snapshot: BibliographySnapshot;
-      readonly entry: BibTeXEntry;
-    }> = [];
-    let scannedCharacters = 0;
-    for (const uri of searchedUris) {
-      const snapshot = await this.repository.read(uri);
-      if (!snapshot.exists) {
-        continue;
-      }
-      if (
-        snapshot.text.length > MAX_PROJECT_BIBLIOGRAPHY_CHARACTERS ||
-        scannedCharacters + snapshot.text.length >
-          MAX_PROJECT_BIBLIOGRAPHY_TOTAL_CHARACTERS
-      ) {
-        throw new Error("项目 bibliography 超过安全扫描上限，已停止反向定位。");
-      }
-      scannedCharacters += snapshot.text.length;
-      for (const entry of parseBibTeX(snapshot.text)) {
-        if (entry.key !== key) {
-          continue;
-        }
-        matches.push({ snapshot, entry });
-        if (matches.length > 1) {
-          return { status: "duplicate", searchedUris };
-        }
-      }
-    }
-    const match = matches[0];
-    if (match === undefined) {
-      return { status: "missing", searchedUris };
-    }
-    const bibliography = await this.repository.openForEditing(match.snapshot);
-    const editor = await vscode.window.showTextDocument(bibliography, {
-      preview: false,
-      preserveFocus: false,
-      ...(viewColumn === undefined ? {} : { viewColumn }),
-    });
-    const start = bibliography.positionAt(match.entry.range.start);
-    const end = bibliography.positionAt(match.entry.range.end);
-    editor.selection = new vscode.Selection(start, start);
-    editor.revealRange(
-      new vscode.Range(start, end),
-      vscode.TextEditorRevealType.InCenterIfOutsideViewport,
-    );
-    return {
-      status: "found",
-      matchedUri: match.snapshot.uri,
-      searchedUris,
-    };
-  }
-
   public async provideCompletionItems(
     document: vscode.TextDocument,
     position: vscode.Position,
@@ -439,16 +391,29 @@ export class CitationController
       return undefined;
     }
 
-    let bibliographyUri: vscode.Uri;
+    let defaultBibliographyUri: vscode.Uri | undefined;
     let bibliography: BibliographySearchSnapshot;
+    let bibliographySources: ReadonlyMap<string, vscode.Uri> | undefined;
     try {
-      bibliographyUri = await this.repository.resolveBibliographyUri(
-        document,
-        located.config.bibliographyFile,
-      );
-      bibliography = this.prepareBibliographySearch(
-        await this.repository.read(bibliographyUri),
-      );
+      if (visualOptions?.bibliographyUris !== undefined) {
+        const combined = await this.readProjectBibliographyPreview(visualOptions.bibliographyUris);
+        bibliographySources = combined.sources;
+        bibliography = {
+          uriText: "project-bibliography-set", text: "", entries: combined.entries,
+          duplicateKeys: combined.duplicateKeys, identity: createBibIdentityIndex(combined.entries),
+          searchReferences: combined.entries.map((entry) => prepareCitationSearchReference(entry, {
+            doi: entry.fields.doi ?? "", isbn: entry.fields.isbn ?? "",
+          })),
+        };
+      } else {
+        defaultBibliographyUri = await this.repository.resolveBibliographyUri(
+          document,
+          located.config.bibliographyFile,
+        );
+        bibliography = this.prepareBibliographySearch(
+          await this.repository.read(defaultBibliographyUri),
+        );
+      }
     } catch (error: unknown) {
       this.output.error(`读取 bibliography 失败：${errorMessage(error)}`);
       return undefined;
@@ -469,7 +434,29 @@ export class CitationController
     // noisy, a large Zotero cache can consume the UI cap and make the user's
     // already-collected references appear to be missing. Zotero joins the
     // search only after the user supplies a non-whitespace term.
-    const includeZotero = query.trim().length > 0;
+    // Never import into a default file outside the displayed bibliography set.
+    // Resolving that default is unnecessary for existing project references,
+    // and an invalid global default must not make an explicit multi-file set
+    // disappear. Resolve it lazily only when a non-empty query could surface
+    // a Zotero import candidate.
+    let zoteroBibliographyUri = defaultBibliographyUri;
+    if (query.trim().length > 0 && visualOptions?.bibliographyUris !== undefined) {
+      try {
+        const resolved = await this.repository.resolveBibliographyUri(
+          document,
+          located.config.bibliographyFile,
+        );
+        if (visualOptions.bibliographyUris.some((uri) => uri.toString() === resolved.toString())) {
+          zoteroBibliographyUri = resolved;
+        }
+      } catch (error: unknown) {
+        this.output.warn(`无法解析 Zotero 导入目标；将仅显示项目已收录文献：${errorMessage(error)}`);
+      }
+      if (token.isCancellationRequested) {
+        return undefined;
+      }
+    }
+    const includeZotero = query.trim().length > 0 && zoteroBibliographyUri !== undefined;
     const candidates: RankedCompletionCandidate[] = [];
     const eligibleBibliography = bibliography.searchReferences.filter(({ reference }) =>
       !excludedKeys.has(reference.key) &&
@@ -477,11 +464,18 @@ export class CitationController
       !bibliography.duplicateKeys.has(reference.key)
     );
     for (const ranked of rankCitationReferences(eligibleBibliography, query)) {
+      const sourceUri = bibliographySources?.get(ranked.prepared.reference.key) ?? defaultBibliographyUri;
+      if (sourceUri === undefined) {
+        // readProjectBibliographyPreview records the exact origin for every
+        // retained key. Fail closed if that invariant is ever broken.
+        continue;
+      }
       candidates.push({
         sourceRank: 0,
         match: ranked.match,
         tieBreak: ranked.prepared.tieBreak,
         entry: ranked.prepared.reference,
+        bibliographyUri: sourceUri,
       });
     }
 
@@ -550,7 +544,7 @@ export class CitationController
       if (candidate.sourceRank === 0) {
         return this.createExistingCompletion(
           candidate.entry,
-          bibliographyUri,
+          candidate.bibliographyUri,
           range,
           query,
           sortText,
@@ -562,7 +556,7 @@ export class CitationController
         candidate.zotero,
         candidate.cacheKey,
         candidate.snapshotId,
-        bibliographyUri,
+        zoteroBibliographyUri!,
         range,
         query,
         sortText,
@@ -707,6 +701,77 @@ export class CitationController
     return item;
   }
 
+  /** Resolve the configured project bibliography with the repository's safe path rules. */
+  public resolveProjectBibliographyUri(
+    document: vscode.TextDocument,
+    configuredPath: string,
+  ): Promise<vscode.Uri> {
+    return this.repository.resolveBibliographyUri(document, configuredPath);
+  }
+
+  /** Resolve one key across an explicit, bounded project bibliography set. */
+  public async revealProjectBibliographyEntry(
+    bibliographyUris: readonly vscode.Uri[],
+    key: string,
+    viewColumn?: vscode.ViewColumn,
+  ): Promise<ProjectBibliographyRevealResult> {
+    const searchedUris = uniqueBibliographyUris(bibliographyUris);
+    if (searchedUris.length > MAX_PROJECT_BIBLIOGRAPHY_FILES) {
+      throw new Error("项目声明的 bibliography 文件过多，已拒绝无界扫描。");
+    }
+    if (!isSafeCitationKey(key)) {
+      return { status: "missing", searchedUris };
+    }
+    const matches: Array<{
+      readonly snapshot: BibliographySnapshot;
+      readonly entry: BibTeXEntry;
+    }> = [];
+    let scannedCharacters = 0;
+    for (const uri of searchedUris) {
+      const snapshot = await this.repository.read(uri);
+      if (!snapshot.exists) {
+        continue;
+      }
+      if (
+        snapshot.text.length > MAX_PROJECT_BIBLIOGRAPHY_CHARACTERS ||
+        scannedCharacters + snapshot.text.length > MAX_PROJECT_BIBLIOGRAPHY_TOTAL_CHARACTERS
+      ) {
+        throw new Error("项目 bibliography 超过安全扫描上限，已停止反向定位。");
+      }
+      scannedCharacters += snapshot.text.length;
+      for (const entry of this.prepareBibliographySearch(snapshot).entries) {
+        if (entry.key === key) {
+          matches.push({ snapshot, entry });
+          if (matches.length > 1) {
+            return { status: "duplicate", searchedUris };
+          }
+        }
+      }
+    }
+    const match = matches[0];
+    if (match === undefined) {
+      return { status: "missing", searchedUris };
+    }
+    const bibliography = await this.repository.openForEditing(match.snapshot);
+    const editor = await vscode.window.showTextDocument(bibliography, {
+      preview: false,
+      preserveFocus: false,
+      ...(viewColumn === undefined ? {} : { viewColumn }),
+    });
+    const start = bibliography.positionAt(match.entry.range.start);
+    const end = bibliography.positionAt(match.entry.range.end);
+    editor.selection = new vscode.Selection(start, start);
+    editor.revealRange(
+      new vscode.Range(start, end),
+      vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+    );
+    return {
+      status: "found",
+      matchedUri: match.snapshot.uri,
+      searchedUris,
+    };
+  }
+
   /**
    * Return project-bibliography candidates immediately. Zotero is loaded in
    * the shared background path below, so an unavailable Zotero instance never
@@ -717,6 +782,7 @@ export class CitationController
     position: vscode.Position,
     token: vscode.CancellationToken,
     requestedBibliographyPath?: string,
+    bibliographyUris?: readonly vscode.Uri[],
   ): Promise<vscode.CompletionList<vscode.CompletionItem> | undefined> {
     return this.provideCompletionItems(
       document,
@@ -727,6 +793,7 @@ export class CitationController
         triggerCharacter: undefined,
       },
       {
+        ...(bibliographyUris === undefined ? {} : { bibliographyUris }),
         ...(requestedBibliographyPath === undefined
           ? {}
           : { requestedBibliographyPath }),
@@ -1060,7 +1127,17 @@ export class CitationController
     ) {
       return cached;
     }
-    const entries = parseBibTeX(snapshot.text);
+    const entries = /\.bbl$/iu.test(snapshot.uri.path)
+      ? scanVisualDocumentStructure(snapshot.text, { fragmentKind: "body" }).records.flatMap((record) =>
+          record.kind !== "bibliography" || !record.manual ? [] : record.entries.flatMap((entry): BibTeXEntry[] =>
+            entry.sourceFrom === undefined || entry.sourceTo === undefined ? [] : [{
+              key: entry.key, title: entry.title, authors: entry.authors,
+              author: entry.authors, year: entry.year, container: entry.container,
+              type: "bibitem", entryType: "bibitem", journal: "", fields: {},
+              raw: snapshot.text.slice(entry.sourceFrom, entry.sourceTo),
+              range: { start: entry.sourceFrom, end: entry.sourceTo },
+            }]))
+      : parseBibTeX(snapshot.text);
     const prepared: BibliographySearchSnapshot = {
       uriText,
       text: snapshot.text,
@@ -1571,7 +1648,7 @@ function uniqueBibliographyUris(values: readonly vscode.Uri[]): readonly vscode.
   const seen = new Set<string>();
   const result: vscode.Uri[] = [];
   for (const value of values) {
-    if (value.scheme !== "file" || !/\.bib$/iu.test(value.fsPath)) {
+    if (value.scheme !== "file" || !/\.(?:bib|bbl)$/iu.test(value.fsPath)) {
       continue;
     }
     const key = process.platform === "win32"

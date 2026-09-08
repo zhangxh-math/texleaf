@@ -18,11 +18,13 @@ import {
   LatexSnippetSuppressionFrame,
   LatexTextArgumentCommand,
   LatexTextArgumentFrame,
+  OffsetRange,
 } from './types';
 
 const BLOCK_MATH_ENVIRONMENTS = new Set([
   'displaymath',
   'equation',
+  'eqnarray',
   'align',
   'alignat',
   'aligned',
@@ -702,7 +704,16 @@ function mathEnvironmentMode(name: string): 'inline' | 'block' | undefined {
  * intended for adapters that need to decorate all math spans without rescanning
  * the document once per bracket.
  */
-export function scanLatexRegions(text: string): readonly LatexMathRegion[] {
+export interface LatexEnvironmentAlias {
+  readonly command: "begin" | "end";
+  readonly name: string;
+}
+
+export function scanLatexRegions(
+  text: string,
+  environmentAliases?: ReadonlyMap<number, LatexEnvironmentAlias>,
+  ignoredRanges: readonly OffsetRange[] = [],
+): readonly LatexMathRegion[] {
   const regions: LatexMathRegion[] = [];
   const environments: RegionEnvironmentFrame[] = [];
   let delimiter: RegionDelimiterFrame | undefined;
@@ -714,6 +725,7 @@ export function scanLatexRegions(text: string): readonly LatexMathRegion[] {
   let verbatimDelimiter: string | undefined;
   let verbatimEnvironment: string | undefined;
   let index = 0;
+  let ignoredIndex = 0;
 
   const closeDelimiterRegion = (closeStart: number, closeEnd: number): void => {
     if (delimiter === undefined) {
@@ -778,6 +790,12 @@ export function scanLatexRegions(text: string): readonly LatexMathRegion[] {
   };
 
   while (index < text.length) {
+    const ignored = ignoredRanges[ignoredIndex];
+    if (ignored !== undefined && ignored.start <= index) {
+      index = Math.max(index, ignored.end);
+      ignoredIndex += 1;
+      continue;
+    }
     const char = text[index];
 
     if (verbatimEnvironment !== undefined) {
@@ -905,7 +923,10 @@ export function scanLatexRegions(text: string): readonly LatexMathRegion[] {
     }
 
     if (char === '\\') {
-      const { command, end } = readCommand(text, index);
+      const token = readCommand(text, index);
+      const alias = environmentAliases?.get(index);
+      const command = alias?.command ?? token.command;
+      const end = token.end;
 
       const suppressedCommand = snippetSuppressionCommand(command);
       if (suppressedCommand !== undefined) {
@@ -995,7 +1016,9 @@ export function scanLatexRegions(text: string): readonly LatexMathRegion[] {
       }
 
       if (command === 'begin' || command === 'end') {
-        const braced = readBracedValue(text, end);
+        const braced = alias === undefined
+          ? readBracedValue(text, end)
+          : { value: alias.name, end };
         if (braced !== undefined && braced.value.length > 0) {
           if (command === 'begin') {
             const frame: RegionEnvironmentFrame = {

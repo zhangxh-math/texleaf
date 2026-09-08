@@ -7,8 +7,13 @@
 
 import type {
   VisualHeadingLevel,
+  VisualImageRecord,
+  VisualReferenceTargetKind,
   VisualStructureRecord,
+  VisualTableRecord,
   VisualTheoremStyle,
+  VisualTikzcdRecord,
+  VisualTikzpictureRecord,
 } from "./core/visualStructure";
 import type { VirtualSnippetEncoding } from "./core/visualEditing";
 
@@ -17,20 +22,18 @@ export const VISUAL_EDITOR_REVEAL_RANGE_COMMAND =
   "texleaf.visualEditor.revealRange";
 /**
  * Reveal a range only when that source document already has a visual-editor
- * session.  LaTeX Workshop's reverse SyncTeX bridge uses this for PDF tabs
- * restored from an earlier extension-host session: it must prefer the existing
- * visual tab without converting unrelated native-editor workflows.
+ * session. TeXLeaf's reverse SyncTeX path uses this for PDF tabs restored
+ * from an earlier extension-host session: it must prefer the existing visual
+ * tab without creating an unrelated source editor.
  */
 export const VISUAL_EDITOR_REVEAL_OPEN_RANGE_COMMAND =
   "texleaf.visualEditor.revealOpenRange";
-/**
- * Command-link target attached to TeXLeaf AI diagnostics in VS Code's native
- * Problems panel. Unlike the normal diagnostic open action, this preserves the
- * exact diagnostic range while routing the real `.tex` resource back into the
- * visual editor.
- */
+/** Exact line/column bridge used by Problems diagnostic links and Quick Fixes. */
 export const VISUAL_EDITOR_REVEAL_DIAGNOSTIC_COMMAND =
   "texleaf.visualEditor.revealDiagnostic";
+/** Apply one revalidated Problems suggestion through CodeMirror's own history. */
+export const VISUAL_EDITOR_APPLY_AI_ISSUE_COMMAND =
+  "texleaf.visualEditor.applyAiIssue";
 
 export interface VisualFormulaLabel {
   readonly from: number;
@@ -94,9 +97,44 @@ export interface VisualEditorReferenceHeadingPreview {
   readonly title: string;
 }
 
+export type VisualEditorReferenceStructurePreview =
+  | {
+      readonly kind: "table";
+      readonly key: string;
+      readonly record: VisualTableRecord;
+      /** The hover applies a smaller bound than the full visual table card. */
+      readonly previewTruncated: boolean;
+    }
+  | {
+      readonly kind: "image";
+      readonly key: string;
+      readonly record: VisualImageRecord;
+    }
+  | {
+      readonly kind: "diagram";
+      readonly key: string;
+      readonly record: VisualTikzcdRecord | VisualTikzpictureRecord;
+    };
+
 export interface VisualEditorSelection {
   readonly anchor: number;
   readonly head: number;
+}
+
+/** One sanitized static formula asset produced for the current viewport. */
+export interface VisualFormulaRenderResult {
+  readonly formulaId: string;
+  /** Exact outer LaTeX source represented by this SVG. */
+  readonly formulaSource: string;
+  readonly svg: string;
+  readonly widthEm: number;
+  readonly heightEm: number;
+}
+
+/** A bounded static formula failure delivered with the surrounding batch. */
+export interface VisualFormulaRenderError {
+  readonly formulaId: string;
+  readonly message: string;
 }
 
 export interface VisualEditorFocusOptions {
@@ -113,8 +151,13 @@ export interface VisualEditorChange {
 }
 
 export interface VisualEditorCapabilities {
-  readonly latexWorkshopInstalled: boolean;
-  readonly latexWorkshopCompatibility: boolean;
+  readonly latexWorkshopInstalled?: boolean;
+  readonly latexWorkshopCompatibility?: boolean;
+  readonly localFileSystem: boolean;
+  readonly workspaceTrusted: boolean;
+  readonly buildEnabled: boolean;
+  readonly pdfViewerEnabled: boolean;
+  readonly synctexEnabled: boolean;
 }
 
 export interface VisualEditorInputFeatures {
@@ -123,7 +166,14 @@ export interface VisualEditorInputFeatures {
   readonly matrixShortcuts: boolean;
   readonly matrixEnvironments: readonly string[];
   readonly autoDeleteMathDelimiters: boolean;
-  readonly providerCompletions: boolean;
+  readonly providerCompletions?: boolean;
+  readonly internalCompletions: boolean;
+  readonly mathPreviewEnabled: boolean;
+  readonly mathPreviewDebounceMs: number;
+  /** Monaco-compatible pair colours are active over followVsCode TextMate. */
+  readonly bracketPairColorizationEnabled: boolean;
+  /** Paint the pair adjacent to a focused visual/source caret. */
+  readonly highlightActiveBracketPair: boolean;
   /** Configured citation commands, without depending on native-editor state. */
   readonly citationCommands: readonly string[];
 }
@@ -139,10 +189,9 @@ export interface VisualEditorBackground {
 }
 
 /**
- * TextMate-derived colors for the CodeMirror source presentation. VS Code
- * does not expose syntax-token colors as Webview CSS variables, so the
- * extension host resolves the active color theme and sends this sanitized
- * palette explicitly.
+ * TextMate-derived fallback colors for the CodeMirror source presentation.
+ * In followVsCode mode the host resolves these roles from the active theme;
+ * fixedPrimer supplies the bundled contrast-safe light/dark palette instead.
  */
 export interface VisualEditorSyntaxPalette {
   readonly comment?: string;
@@ -161,9 +210,9 @@ export interface VisualEditorSyntaxPalette {
 }
 
 /**
- * A TextMate token resolved by the extension host with the same grammar and
- * active color theme used by VS Code's native editor. Offsets are UTF-16
- * document offsets, matching VS Code and CodeMirror.
+ * A TextMate token resolved by the extension host with the selected theme and
+ * grammar pair. Offsets are UTF-16 document offsets, matching VS Code and
+ * CodeMirror.
  */
 export interface VisualEditorSyntaxToken {
   readonly from: number;
@@ -171,6 +220,14 @@ export interface VisualEditorSyntaxToken {
   readonly foreground?: string;
   /** TextMate FontStyle bits: italic=1, bold=2, underline=4, strike=8. */
   readonly fontStyle: number;
+}
+
+/** One source delimiter painted with VS Code's editorBracketHighlight palette. */
+export interface VisualEditorBracketToken {
+  readonly from: number;
+  readonly to: number;
+  /** Zero-based nesting depth; the Webview cycles this through six colours. */
+  readonly depth: number;
 }
 
 export interface VisualEditorCompletionItem {
@@ -194,7 +251,7 @@ export interface VisualEditorCompletionItem {
   readonly hasSnippetFields?: boolean;
   /** Lazy detail-pane target for a real document label completion. */
   readonly referencePreviewKey?: string;
-  readonly referencePreviewKind?: "formula" | "theorem" | "heading";
+  readonly referencePreviewKind?: Exclude<VisualReferenceTargetKind, "unknown">;
   /**
    * Opaque, one-shot host token for an allow-listed completion follow-up.
    * The Webview never receives a VS Code command name or its arguments.
@@ -266,20 +323,6 @@ export type VisualEditorInputAction =
   | "enter"
   | "shiftEnter";
 
-export interface VisualFormulaRenderResult {
-  readonly formulaId: string;
-  /** Exact outer LaTeX source represented by this SVG. */
-  readonly formulaSource: string;
-  readonly svg: string;
-  readonly widthEm: number;
-  readonly heightEm: number;
-}
-
-export interface VisualFormulaRenderError {
-  readonly formulaId: string;
-  readonly message: string;
-}
-
 export type VisualEditorHostMessage =
   | {
       readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
@@ -293,12 +336,20 @@ export type VisualEditorHostMessage =
       readonly formulas: readonly VisualFormulaRecord[];
       readonly structures: readonly VisualStructureRecord[];
       readonly selection?: VisualEditorSelection;
+      /**
+       * Present only when the initial selection came from an explicit external
+       * line/range request. The Webview must prefer it over persisted caret and
+       * scroll state, then reveal it as soon as CodeMirror exists.
+       */
+      readonly initialFocus?: VisualEditorFocusOptions;
       readonly mathPreviewPlacement: VisualMathPreviewPlacement;
       readonly capabilities: VisualEditorCapabilities;
       readonly inputFeatures: VisualEditorInputFeatures;
       readonly background?: VisualEditorBackground;
       readonly syntaxPalette?: VisualEditorSyntaxPalette;
       readonly syntaxTokens?: readonly VisualEditorSyntaxToken[];
+      /** Present on initial/config/external refreshes; routine edits use patches. */
+      readonly bracketTokens?: readonly VisualEditorBracketToken[];
       readonly aiIssues: readonly VisualEditorAiIssue[];
       readonly diagnostics: readonly VisualEditorDiagnostic[];
       readonly templates: readonly VisualEditorTemplateMenuItem[];
@@ -322,26 +373,23 @@ export type VisualEditorHostMessage =
     }
   | {
       readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
-      readonly type: "renderResult";
-      readonly version: number;
-      readonly formulaId: string;
-      /** Exact outer LaTeX source represented by this SVG. */
-      readonly formulaSource: string;
-      readonly svg: string;
-      readonly widthEm: number;
-      readonly heightEm: number;
-    }
-  | {
-      readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
-      readonly type: "renderError";
-      readonly version: number;
-      readonly formulaId: string;
-      readonly message: string;
+      readonly type: "bracketTokenPatch";
+      /** Exact optimistic Webview revision this patch was scanned from. */
+      readonly revision: number;
+      readonly from: number;
+      readonly to: number;
+      readonly expectedText: string;
+      readonly tokens: readonly VisualEditorBracketToken[];
     }
   | {
       readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
       readonly type: "renderBatch";
       readonly version: number;
+      /**
+       * Static viewport renders are intentionally coalesced. One host message
+       * must translate to one CodeMirror transaction instead of rebuilding the
+       * complete formula presentation once per SVG.
+       */
       readonly results: readonly VisualFormulaRenderResult[];
       readonly errors: readonly VisualFormulaRenderError[];
     }
@@ -401,6 +449,7 @@ export type VisualEditorHostMessage =
       readonly previews: readonly VisualEditorReferenceFormulaPreview[];
       readonly theorem?: VisualEditorReferenceTheoremPreview;
       readonly heading?: VisualEditorReferenceHeadingPreview;
+      readonly structure?: VisualEditorReferenceStructurePreview;
       readonly unavailableKeys: readonly string[];
     }
   | {
@@ -413,6 +462,7 @@ export type VisualEditorHostMessage =
       readonly previews: readonly VisualEditorReferenceFormulaPreview[];
       readonly theorem?: VisualEditorReferenceTheoremPreview;
       readonly heading?: VisualEditorReferenceHeadingPreview;
+      readonly structure?: VisualEditorReferenceStructurePreview;
       readonly unavailableKeys: readonly string[];
     }
   | {
@@ -425,7 +475,6 @@ export type VisualEditorHostMessage =
   | {
       readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
       readonly type: "focus";
-      /** Correlates a focus request with the Webview acknowledgement. */
       readonly requestId?: number;
       readonly selection: VisualEditorSelection;
       readonly options?: VisualEditorFocusOptions;
@@ -558,8 +607,10 @@ export type VisualEditorHostMessage =
     };
 
 export type VisualEditorWebviewCommand =
-  | "save"
   | "openSource"
+  | "undo"
+  | "redo"
+  | "save"
   | "build"
   | "buildPdfLaTex"
   | "buildXeLaTex"
@@ -577,22 +628,20 @@ export type VisualEditorWebviewCommand =
   | "aiReviewDocument"
   | "aiRewrite"
   | "aiCompletion"
-  | "undo"
-  | "redo"
-  | "navigateBack";
+  | "navigateBack"
+  | "navigateForward";
 
-export type VisualEditorNavigationKind = "reference" | "citation";
+export type VisualEditorNavigationKind =
+  | "reference"
+  | "citation"
+  | "frontMatter"
+  | "tableOfContents";
 
 export type VisualEditorWebviewMessage =
+  | { readonly protocol: typeof VISUAL_EDITOR_PROTOCOL; readonly type: "focusApplied"; readonly requestId: number }
   | {
       readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
       readonly type: "ready";
-    }
-  | {
-      readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
-      /** Confirms that a host focus request reached CodeMirror and was applied. */
-      readonly type: "focusApplied";
-      readonly requestId: number;
     }
   | {
       readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
@@ -615,6 +664,20 @@ export type VisualEditorWebviewMessage =
       readonly version: number;
       readonly from: number;
       readonly to: number;
+      /**
+       * A trailing request emitted after scrolling has remained quiet. The
+       * extension starts a fresh bounded render lane for this request and
+       * spends its budget on the exact visible range instead of prefetch.
+       */
+      readonly settled?: boolean;
+    }
+  | {
+      readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
+      /** Formula SVGs released by the bounded Webview cache. */
+      readonly type: "formulaCacheEvicted";
+      readonly formulaIds: readonly string[];
+      /** At least one released formula intersects the currently visible source range. */
+      readonly refillViewport: boolean;
     }
   | {
       readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
@@ -671,6 +734,13 @@ export type VisualEditorWebviewMessage =
       readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
       readonly type: "command";
       readonly command: VisualEditorWebviewCommand;
+    }
+  | {
+      readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;
+      readonly type: "navigationCommand";
+      readonly direction: "back" | "forward";
+      readonly revision: number;
+      readonly selection: VisualEditorSelection;
     }
   | {
       readonly protocol: typeof VISUAL_EDITOR_PROTOCOL;

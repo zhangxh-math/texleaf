@@ -7,6 +7,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createLocalLatexPreviewDocument, localLatexPreviewKind } from "../src/core/localLatexPreview";
 import {
   createMathPreviewMacroEnvironment,
   createMathPreviewCursorRenderInput,
@@ -17,6 +18,7 @@ import {
   mathPreviewMacroEnvironmentAtOffset,
   toMathJaxMacroOptions,
 } from "../src/core";
+import { MATH_PREVIEW_MAX_MACRO_COUNT, MATH_PREVIEW_MAX_MACRO_SERIALIZED_LENGTH } from "../src/mathPreviewProtocol";
 import { createMathPreviewSvgDataUri } from "../src/mathPreviewDataUri";
 
 test("Math Preview SVG data URIs preserve internal references and Unicode", () => {
@@ -166,7 +168,7 @@ C(\mathbf{d}) & =\sum_{j=1}^{n}\frac{2d_{j}+1}{\chi(\mathbf{d})-1}C(d_{1},\dots,
   assert.ok(plain);
   assert.equal(
     plain.tex,
-    `\\begin{align}${text.slice(formula.bodyRange.start, formula.bodyRange.end).trim()}\\end{align}`,
+    `\\begin{align}${text.slice(formula.bodyRange.start, formula.bodyRange.end).trim()}\n\\end{align}`,
   );
 
   const marker = String.raw`\mathord{\color{#ffb454}\rule[-0.2em]{0.07em}{1.2em}}`;
@@ -403,7 +405,7 @@ $\pair{y}\subset\RR$
 test("macro tables stay within the worker's serialized request budget", () => {
   const replacement = `#1${"x".repeat(2_046)}`;
   const configuredMacros = Object.fromEntries(
-    "abcdefghij".split("").map((suffix) => [`macro${suffix}`, replacement]),
+    Array.from({ length: 40 }, (_, index) => [`macro${String.fromCharCode(65 + Math.floor(index / 26))}${String.fromCharCode(65 + index % 26)}`, replacement]),
   );
   const text = String.raw`\newcommand{\documenthuge}[1]{${replacement}}
 \newcommand{\tail}{ok}
@@ -411,9 +413,9 @@ test("macro tables stay within the worker's serialized request budget", () => {
   const snapshot = scanMathPreviewDocument(text, { configuredMacros });
   const options = toMathJaxMacroOptions(snapshot.macros);
 
-  assert.ok(JSON.stringify(options).length <= 16_384);
-  assert.equal(snapshot.macros.macroa?.replacement, replacement);
-  assert.equal(snapshot.macros.macroh, undefined);
+  assert.ok(JSON.stringify(options).length <= MATH_PREVIEW_MAX_MACRO_SERIALIZED_LENGTH);
+  assert.equal(snapshot.macros.macroAA?.replacement, replacement);
+  assert.equal(snapshot.macros.macroBN, undefined);
   assert.equal(snapshot.macros.documenthuge, undefined);
   assert.equal(snapshot.macros.tail?.replacement, "ok");
 });
@@ -518,14 +520,14 @@ test("project macro environments are canonical, detached, immutable, and bounded
 
   const oversized = createMathPreviewMacroEnvironment(
     Object.fromEntries(
-      Array.from({ length: 160 }, (_, index) => {
+      Array.from({ length: MATH_PREVIEW_MAX_MACRO_COUNT + 20 }, (_, index) => {
         const name = `macro${String.fromCharCode(65 + Math.floor(index / 26))}${String.fromCharCode(65 + index % 26)}`;
         return [name, { name, replacement: "x", argumentCount: 0 }];
       }),
     ),
   );
-  assert.ok(Object.keys(oversized.macros).length <= 128);
-  assert.ok(JSON.stringify(toMathJaxMacroOptions(oversized.macros)).length <= 16_384);
+  assert.ok(Object.keys(oversized.macros).length === MATH_PREVIEW_MAX_MACRO_COUNT);
+  assert.ok(JSON.stringify(toMathJaxMacroOptions(oversized.macros)).length <= MATH_PREVIEW_MAX_MACRO_SERIALIZED_LENGTH);
 });
 
 test("configured, inherited, and local macros merge in project order", () => {
@@ -666,7 +668,7 @@ $\llangle\tau_n(P)\rrangle_0$`;
   assert.equal(input.macros.rrangle?.replacement, String.raw`\rangle\!\rangle`);
 });
 
-test("fragment kinds separate standalone documents, body files, and preambles", () => {
+test("fragment kinds separate explicit documents, bare body files, and preambles", () => {
   const text = String.raw`$before$
 \newcommand{\wrapped}{$hidden-definition$}
 \begin{document}$inside$\end{document}
@@ -677,8 +679,19 @@ $after$`;
     );
 
   assert.deepEqual(bodies("standalone"), ["inside"]);
-  assert.deepEqual(bodies("body"), ["before", "inside", "after"]);
+  assert.deepEqual(bodies("body"), ["inside"]);
   assert.deepEqual(bodies("preamble"), []);
+
+  const bareBody = String.raw`$before$
+\newcommand{\wrapped}{$hidden-definition$}
+$inside$
+$after$`;
+  assert.deepEqual(
+    scanMathPreviewDocument(bareBody, { fragmentKind: "body" }).formulas.map(
+      (formula) => bareBody.slice(formula.bodyRange.start, formula.bodyRange.end),
+    ),
+    ["before", "inside", "after"],
+  );
 });
 
 test("body fragments resolve a bounded macro timeline per formula", () => {
@@ -883,4 +896,194 @@ $\uncertain$`;
       .macros.uncertain,
     undefined,
   );
+});
+
+test("large paper preambles retain late plain definitions and proven legacy font families", () => {
+  const filler = Array.from({ length: 150 }, (_, i) =>
+    `\\newcommand{\\macro${String.fromCharCode(65 + Math.floor(i / 26))}${String.fromCharCode(65 + i % 26)}}{x}`,
+  ).join("\n");
+  const text = String.raw`${filler}
+\font\sanss=cmss10
+\newfam\ssfam
+\textfont\ssfam=\sanss
+\def\sss#1{{\fam\ssfam\relax#1}}
+\def\sT{{\sss T}}
+\def\cO{\mathcal{O}}
+\begin{document}$\cO(\sT)$\end{document}`;
+  const snapshot = scanMathPreviewDocument(text);
+  assert.equal(snapshot.macros.cO?.replacement, String.raw`\mathcal{O}`);
+  assert.equal(snapshot.macros.sT?.replacement, String.raw`{\sss T}`);
+  assert.equal(snapshot.macros.sss?.replacement, String.raw`\mathsf{#1}`);
+});
+
+test("literal equation aliases preserve original offsets, order, and inert source", () => {
+  const text = String.raw`😀 \be before\ee
+\newcommand{\be}{\begin{equation}}
+\newcommand{\ee}{\end{equation}}
+\newcommand{\unused}{\be hidden\ee}
+\begin{document}
+% \be comment\ee
+\verb|\be verb\ee|
+\iffalse\be conditional\ee\fi
+\be x=\begin{aligned}a&=b\\c&=d\end{aligned}\label{eq:x}\ee
+\renewcommand{\be}{ordinary}
+\be after\ee
+\end{document}`;
+  const snapshot = scanMathPreviewDocument(text);
+  assert.equal(snapshot.formulas.length, 1);
+  const formula = snapshot.formulas[0]!;
+  assert.equal(formula.outerRange.start, text.indexOf(String.raw`\be x=`));
+  assert.equal(formula.outerRange.end, text.indexOf(String.raw`\ee`, formula.outerRange.start) + 3);
+  assert.equal(formula.bodyRange.start, formula.outerRange.start + 3);
+  assert.equal(formula.bodyRange.end, formula.outerRange.end - 3);
+  assert.equal(formula.environmentName, "equation");
+  assert.equal(formula.closed, true);
+  assert.match(createMathPreviewRenderInput(text, formula, snapshot)!.tex, /^\\begin\{equation\}x=/u);
+});
+
+test("plain definitions skip dynamic and delimited bodies, comments, and local scope", () => {
+  const text = String.raw`\def\safe#1#2{#1+#2}
+\def\delimited#1x{$hidden$}
+\def\dynamic{\input{private}$hidden$}
+\def\commented{a% } ignored brace
+b}
+{\def\local{bad}}
+\iffalse\def\conditional{bad}\fi
+\begin{document}$\safe{x}{y}$\end{document}`;
+  const snapshot = scanMathPreviewDocument(text);
+  assert.equal(snapshot.macros.safe?.argumentCount, 2);
+  assert.equal(snapshot.macros.commented?.replacement, "ab");
+  for (const name of ["delimited", "dynamic", "local", "conditional"]) {
+    assert.equal(snapshot.macros[name], undefined, name);
+  }
+  assert.equal(snapshot.formulas.length, 1);
+});
+
+test("renamed declared aliases work and familiar undeclared names never create math", () => {
+  const text = String.raw`\newcommand{\startMyDisplay}{\begin{equation}}
+\newcommand{\finishMyDisplay}{\end{equation}}
+\begin{document}
+\be not-an-equation\ee
+\startMyDisplay x=y\finishMyDisplay
+\end{document}`;
+  const snapshot = scanMathPreviewDocument(text);
+  assert.equal(snapshot.formulas.length, 1);
+  const formula = snapshot.formulas[0]!;
+  assert.equal(formula.outerRange.start, text.indexOf(String.raw`\startMyDisplay x=`));
+  assert.equal(text.slice(formula.bodyRange.start, formula.bodyRange.end).trim(), "x=y");
+});
+
+test("ignored definitions and conditional bodies cannot open phantom math environments", () => {
+  const text = String.raw`\begin{document}
+\newcommand{\unused}{\begin{equation}}
+\iffalse\begin{align}\fi
+$x$
+\end{document}`;
+  const snapshot = scanMathPreviewDocument(text);
+  assert.deepEqual(snapshot.formulas.map((formula) =>
+    text.slice(formula.bodyRange.start, formula.bodyRange.end)), ["x"]);
+});
+
+test("legacy font translation follows arbitrary declared names and refuses unknown families", () => {
+  const text = String.raw`\font\mySans=cmss10
+\newfam\myFamily
+\textfont\myFamily=\mySans
+\def\myAlphabet#1{{\fam\myFamily\relax#1}}
+\def\unknownAlphabet#1{{\fam\notDeclared\relax#1}}
+\begin{document}$\myAlphabet{x}$\end{document}`;
+  const snapshot = scanMathPreviewDocument(text);
+  assert.equal(snapshot.macros.myAlphabet?.replacement, String.raw`\mathsf{#1}`);
+  assert.equal(snapshot.macros.unknownAlphabet, undefined);
+});
+
+test("literal mathchardef declarations resolve encoded symbols without trusting custom names", () => {
+  const text = String.raw`\mathchardef\renamedXi="7118
+\mathchardef\myCapital="7008
+\mathchardef\unknownFamily="7418
+\def\xi{not-xi}
+\begin{document}$\renamedXi+\myCapital$\end{document}`;
+  const snapshot = scanMathPreviewDocument(text);
+  assert.equal(snapshot.macros.renamedXi?.replacement, "ξ");
+  assert.equal(snapshot.macros.myCapital?.replacement, "Φ");
+  assert.equal(snapshot.macros.unknownFamily, undefined);
+});
+
+test("environment wrappers terminate a trailing TeX comment before closing", () => {
+  const text = String.raw`\begin{align*}x&=y
+% an excluded alternative
+\end{align*}`;
+  const snapshot = scanMathPreviewDocument(text);
+  const input = createMathPreviewRenderInput(text, snapshot.formulas[0]!, snapshot)!;
+  assert.match(input.tex, /alternative\n\\end\{align\*\}/u);
+});
+
+test("environment declarations do not execute already-defined math aliases", () => {
+  const text = String.raw`\newcommand{\openDisplay}{\begin{equation}}
+\newcommand{\closeDisplay}{\end{equation}}
+\begin{document}
+\newenvironment{futureDisplay}[1][x]{\openDisplay #1}{\closeDisplay}
+$x$
+\end{document}`;
+  const snapshot = scanMathPreviewDocument(text);
+  assert.deepEqual(snapshot.formulas.map((formula) =>
+    text.slice(formula.bodyRange.start, formula.bodyRange.end)), ["x"]);
+});
+
+test("local alias redefinitions cannot turn prose into formulas and restore at scope exit", () => {
+  const text = String.raw`\newcommand{\openDisplay}{\begin{equation}}
+\newcommand{\closeDisplay}{\end{equation}}
+\begin{document}
+{\renewcommand{\openDisplay}{Text}\renewcommand{\closeDisplay}{}
+ {\openDisplay ordinary prose\closeDisplay}}
+\openDisplay x=y\closeDisplay
+\begin{quote}
+\renewcommand{\openDisplay}{\input{unknown}}
+\renewcommand{\closeDisplay}{}
+\openDisplay more prose\closeDisplay
+\end{quote}
+\openDisplay z=w\closeDisplay
+\end{document}`;
+  const snapshot = scanMathPreviewDocument(text);
+  assert.deepEqual(snapshot.formulas.map((formula) =>
+    text.slice(formula.bodyRange.start, formula.bodyRange.end).trim()), ["x=y", "z=w"]);
+});
+
+test("control-symbol macros retain declarations and arguments without leaking local definitions", () => {
+  const text = String.raw`\newcommand{\<}{\langle}
+\renewcommand{\>}{\rangle}
+\newcommand{\!}[1]{\mathbf{#1}}
+\begin{document}$\<\!{x}\>$
+{\renewcommand{\<}{[}$\<x$}$\<y$
+\end{document}`;
+  const snapshot = scanMathPreviewDocument(text);
+  const inputs = snapshot.formulas.map((formula) => createMathPreviewRenderInput(text, formula, snapshot)!);
+  assert.equal(inputs[0]!.macros["<"]?.replacement, String.raw`\langle`);
+  assert.equal(inputs[0]!.macros["!"]?.argumentCount, 1);
+  assert.equal(inputs[1]!.macros["<"]?.replacement, String.raw`\langle`);
+  assert.equal(inputs[2]!.macros["<"]?.replacement, String.raw`\langle`);
+});
+
+test("column declarations cannot create phantom formulas in either document region", () => {
+  const text = String.raw`\newcolumntype{C}[1]{>{\centering\arraybackslash$}m{#1}<{$}}
+\begin{document}
+\newcolumntype{D}{>{$}c<{$}}
+$x$\end{document}`;
+  for (const fragmentKind of ["body", "preamble"] as const) {
+    const snapshot = scanMathPreviewDocument(text, { fragmentKind });
+    assert.deepEqual(snapshot.formulas.map((formula) =>
+      text.slice(formula.bodyRange.start, formula.bodyRange.end)), fragmentKind === "body" ? ["x"] : []);
+  }
+});
+
+test("local diagram rendering accepts the same safe control symbols and preserves overrides", () => {
+  const source = String.raw`\newcommand{\<}{\langle}\renewcommand{\>}{\rangle}
+\begin{document}\[\begin{tikzcd}\<x\>\ar[r]&y\end{tikzcd}\]\end{document}`;
+  const snapshot = scanMathPreviewDocument(source);
+  const input = createMathPreviewRenderInput(source, snapshot.formulas[0]!, snapshot)!;
+  assert.equal(localLatexPreviewKind(input), "tikzcd");
+  const document = createLocalLatexPreviewDocument(input)!;
+  assert.match(document, /\\renewcommand\{\\>\}\{\\rangle\}/u);
+  assert.equal(localLatexPreviewKind({ ...input, macros: {
+    ...input.macros, unsafe: { name: "x}\\input{secret", replacement: "x", argumentCount: 0 },
+  } }), undefined);
 });

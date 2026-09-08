@@ -27,10 +27,58 @@ export interface VisualFormulaViewportRecord {
 }
 
 /**
- * Pick a small nearest-first formula batch from an already source-sorted
- * snapshot. Expanding around a midpoint lower-bound keeps the work
- * proportional to the requested batch instead of filtering and sorting every
- * formula in a large document after each viewport refinement.
+ * Rebind an already-rendered asset to the exact current source represented by
+ * the same content-derived formula ID.
+ *
+ * Formatting can change whitespace around `\\[`/`\\]` or environment
+ * boundaries without changing the normalized MathJax input, macro fingerprint,
+ * display mode, or scale that make up that ID. The SVG is therefore still
+ * valid, but its stale exact-source guard would otherwise keep the formula in
+ * source form while the Host correctly avoids an unnecessary rerender.
+ */
+export function rebindVisualFormulaAssetSource<
+  T extends { readonly source?: string },
+>(asset: T, source: string): T {
+  return asset.source === source ? asset : { ...asset, source };
+}
+
+/**
+ * Check the exact-source guards of the assets retained for an authoritative
+ * formula snapshot. Assets without a source predate that guard and remain
+ * reusable; a source-bearing asset must describe the current outer range.
+ *
+ * This deliberately runs even when mapped formula metadata compares equal.
+ * A formatting acknowledgement can preserve every content-derived formula ID
+ * while changing only delimiter indentation, which would otherwise bypass the
+ * migration that refreshes these guards.
+ */
+export function visualFormulaAssetsHaveCurrentSource<
+  TRecord extends VisualFormulaViewportRecord,
+  TAsset extends { readonly source?: string },
+>(
+  text: string,
+  records: readonly TRecord[],
+  assets: ReadonlyMap<string, TAsset>,
+): boolean {
+  for (const record of records) {
+    const source = assets.get(record.id)?.source;
+    if (
+      source !== undefined &&
+      source !== text.slice(record.from, record.to)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Pick the nearest not-yet-rendered formulae from a source viewport.
+ *
+ * Formula records are emitted in source order and do not overlap.  Expanding
+ * outwards from a midpoint lower-bound makes the cost proportional to the
+ * small visible batch instead of filtering and sorting the complete document
+ * after every MathJax result or scroll geometry refinement.
  */
 export function selectVisualFormulaViewportBatch<
   T extends VisualFormulaViewportRecord,
@@ -101,8 +149,8 @@ export function selectVisualFormulaViewportBatch<
     }
     const useLeft = rightCandidate === undefined ||
       (leftCandidate !== undefined &&
-        Math.abs((leftCandidate.from + leftCandidate.to) / 2 - center) <=
-          Math.abs((rightCandidate.from + rightCandidate.to) / 2 - center));
+        (Math.abs((leftCandidate.from + leftCandidate.to) / 2 - center) <=
+          Math.abs((rightCandidate.from + rightCandidate.to) / 2 - center)));
     if (useLeft) {
       selected.push(leftCandidate!);
       leftCandidate = undefined;
@@ -115,9 +163,9 @@ export function selectVisualFormulaViewportBatch<
 }
 
 /**
- * Overlapping or nearby viewport reports commonly come from CodeMirror's
- * widget-height correction and may share one render lane. A distant scroll
- * must supersede the old backlog immediately.
+ * Decide whether a viewport refinement can stay on the current render lane.
+ * Overlapping/nearby ranges commonly come from CodeMirror height correction;
+ * a distant jump must supersede the old formula backlog immediately.
  */
 export function visualFormulaViewportsKeepPriority(
   previousFrom: number,
@@ -135,6 +183,81 @@ export function visualFormulaViewportsKeepPriority(
     Math.max(previousStart, nextStart) - Math.min(previousEnd, nextEnd),
   );
   return gap <= Math.max(0, maximumGap);
+}
+
+export interface VisualFormulaViewportLaneState {
+  readonly version: number;
+  readonly generation: number;
+  readonly anchorFrom: number;
+  readonly anchorTo: number;
+  readonly settled: boolean;
+}
+
+export interface VisualFormulaViewportLaneRequest {
+  readonly version: number;
+  readonly generation: number;
+  readonly from: number;
+  readonly to: number;
+  readonly settled: boolean;
+}
+
+export interface VisualFormulaViewportLanePlan {
+  readonly reusePreviousLane: boolean;
+  readonly from: number;
+  readonly to: number;
+  readonly anchorFrom: number;
+  readonly anchorTo: number;
+  readonly settled: boolean;
+  readonly candidateFrom: number;
+  readonly candidateTo: number;
+}
+
+/**
+ * Plan a live or trailing viewport lane without coupling the scheduling rules
+ * to VS Code. Live requests may reuse a nearby lane and prefetch around it.
+ * A trailing settled request always starts fresh and limits candidates to the
+ * exact visible source range, so the old lane's budget cannot strand visible
+ * formulae behind transient or off-screen work.
+ */
+export function planVisualFormulaViewportLane(
+  previous: VisualFormulaViewportLaneState | undefined,
+  request: VisualFormulaViewportLaneRequest,
+  sourceLength: number,
+  livePadding = 2_000,
+): VisualFormulaViewportLanePlan {
+  const from = Math.min(request.from, request.to);
+  const to = Math.max(request.from, request.to);
+  const reusePreviousLane = !request.settled &&
+    previous !== undefined &&
+    previous.version === request.version &&
+    previous.generation === request.generation &&
+    visualFormulaViewportsKeepPriority(
+      previous.anchorFrom,
+      previous.anchorTo,
+      from,
+      to,
+    );
+  const settled = request.settled ||
+    (reusePreviousLane && previous?.settled === true);
+  const anchorFrom = reusePreviousLane ? previous!.anchorFrom : from;
+  const anchorTo = reusePreviousLane ? previous!.anchorTo : to;
+  const maximum = Math.max(0, Math.trunc(sourceLength));
+  const padding = settled ? 0 : Math.max(0, Math.trunc(livePadding));
+  const candidateFrom = Math.max(0, Math.min(maximum, from - padding));
+  const candidateTo = Math.max(
+    candidateFrom,
+    Math.min(maximum, to + padding),
+  );
+  return {
+    reusePreviousLane,
+    from,
+    to,
+    anchorFrom,
+    anchorTo,
+    settled,
+    candidateFrom,
+    candidateTo,
+  };
 }
 
 /**

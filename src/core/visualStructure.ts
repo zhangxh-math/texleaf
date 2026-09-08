@@ -7,6 +7,7 @@
 
 import type { BibTeXEntry } from "./citation";
 import { findLatexOpaqueEnvironmentEnd } from "./latexScanner";
+import { scanMathPreviewDocument } from "./mathPreview";
 import type { VisualFormulaAsset } from "./visualFormula";
 
 const MAX_VISUAL_STRUCTURE_RECORDS = 4_000;
@@ -16,6 +17,16 @@ export interface VisualSourceText {
   readonly from: number;
   readonly to: number;
   readonly text: string;
+  readonly markers?: readonly string[];
+  readonly segments?: readonly VisualInlineContentSegment[];
+  readonly navigationId?: string;
+  readonly definition?: { readonly from: number; readonly to: number; readonly navigationId?: string };
+}
+
+export interface VisualFrontMatterSection {
+  readonly role: "abstract" | "keywords" | "classification";
+  readonly label: string;
+  readonly source: VisualSourceText;
 }
 
 export interface VisualReplacementRange {
@@ -35,12 +46,17 @@ export interface VisualPreambleRecord {
 
 export interface VisualMakeTitleRecord {
   readonly kind: "maketitle";
+  readonly metadataReplacements?: readonly VisualReplacementRange[];
   readonly replacement: VisualReplacementRange;
   readonly title: VisualSourceText | undefined;
   readonly authors: readonly VisualSourceText[];
   readonly affiliations: readonly VisualSourceText[];
   readonly emails: readonly VisualSourceText[];
   readonly date: VisualSourceText | undefined;
+  readonly frontMatter?: {
+    readonly replacement: VisualReplacementRange;
+    readonly sections: readonly VisualFrontMatterSection[];
+  };
 }
 
 export type VisualHeadingLevel =
@@ -56,6 +72,7 @@ export interface VisualHeadingRecord {
   readonly kind: "heading";
   readonly command: VisualHeadingLevel;
   readonly level: number;
+  readonly starred: boolean;
   readonly number: string | undefined;
   readonly from: number;
   readonly to: number;
@@ -66,6 +83,54 @@ export interface VisualHeadingRecord {
   readonly suffixFrom: number;
   readonly suffixTo: number;
   readonly title: string;
+  /** A standard zero-argument command supplies this title instead of a source argument. */
+  readonly generatedTitle?: boolean;
+  /** The optional short title written to the ToC, or the visible title when omitted. */
+  readonly tocTitle: string;
+}
+
+export interface VisualTableOfContentsEntry {
+  readonly id: string;
+  readonly command: VisualHeadingLevel;
+  readonly level: number;
+  readonly number?: string;
+  readonly title: string;
+}
+
+/**
+ * Why a source-derived table of contents cannot exactly mirror the compiled
+ * `.toc` artifact.  These values are safe to serialize to the Webview; source
+ * paths, offsets, and project diagnostics remain host-only.
+ */
+export type VisualTableOfContentsNotice =
+  | "projectGraph"
+  | "conditionalHeadings"
+  | "sourceLimit"
+  | "includeOnly"
+  | "manualContents"
+  | "tocDepth"
+  | "counterControl"
+  | "frontMatter"
+  | "mainMatter"
+  | "backMatter"
+  | "appendix";
+
+/** A local \tableofcontents placeholder enriched with project entries by the host. */
+export interface VisualTableOfContentsRecord {
+  readonly kind: "tableOfContents";
+  readonly replacement: VisualReplacementRange;
+  readonly language: VisualDocumentLanguage;
+  /** The Beamer scope requested by the command's optional arguments. */
+  readonly scope: "all" | "currentSection" | "currentSubsection";
+  /** True when the command lives in a preamble-defined frame template. */
+  readonly template: boolean;
+  readonly entries: readonly VisualTableOfContentsEntry[];
+  /** True only when verified entries may be missing or extra. */
+  readonly incomplete: boolean;
+  /** True when entries are usable but source-only numbering may differ. */
+  readonly numberingApproximate: boolean;
+  /** Exact, bounded reasons for incomplete content or approximate numbering. */
+  readonly notices: readonly VisualTableOfContentsNotice[];
 }
 
 export type VisualTheoremStyle = "plain" | "definition" | "remark" | "proof";
@@ -118,6 +183,7 @@ export interface VisualTheoremRecord {
   readonly optionalTitle: string | undefined;
   /** Exact optional-title source retained for reference-number resolution. */
   readonly optionalTitleLatex: string | undefined;
+  readonly optionalTitleSegments?: readonly VisualInlineContentSegment[];
   readonly labels: readonly VisualLabelRecord[];
   readonly begin: VisualReplacementRange;
   readonly end: VisualReplacementRange;
@@ -127,6 +193,8 @@ export interface VisualTheoremRecord {
 
 export interface VisualFrameRecord {
   readonly kind: "frame";
+  /** Whether the slide uses a frame environment or Beamer's command shorthand. */
+  readonly syntax: "environment" | "command";
   readonly language: VisualDocumentLanguage;
   readonly title: string | undefined;
   readonly subtitle: string | undefined;
@@ -191,6 +259,12 @@ export interface VisualCitationRecord {
   readonly from: number;
   readonly to: number;
   readonly command: string;
+  /**
+   * Plain-text forms of the citation command's optional arguments, in source
+   * order. Empty entries are retained because `[prenote][]` and `[postnote]`
+   * have different citation semantics even though only one note is visible.
+   */
+  readonly optionalArguments: readonly string[];
   readonly keys: readonly string[];
   readonly label: string;
   /** Resolved, serializable bibliography metadata used by the hover card. */
@@ -223,7 +297,9 @@ export type VisualInlineContentSegment =
   | {
       readonly kind: "math";
       readonly math: VisualMathFragment;
-    };
+    }
+  | { readonly kind: "citation"; readonly citation: VisualCitationRecord }
+  | { readonly kind: "reference"; readonly reference: VisualReferenceRecord };
 
 export interface VisualTableCell {
   /** Exact bounded LaTeX source retained for safe visual round-tripping. */
@@ -326,6 +402,7 @@ export interface VisualImageRecord {
   readonly replacement: VisualReplacementRange;
   readonly path: string;
   readonly caption: string | undefined;
+  readonly captionSegments?: readonly VisualInlineContentSegment[];
   readonly label: VisualLabelRecord | undefined;
   readonly previewUri: string | undefined;
 }
@@ -383,6 +460,11 @@ export interface VisualBibliographyRecord {
   readonly manual: boolean;
 }
 
+export interface VisualCommentRecord {
+  readonly kind: "comment";
+  readonly replacement: VisualReplacementRange;
+}
+
 export interface VisualDocumentEndRecord {
   readonly kind: "documentEnd";
   readonly language: VisualDocumentLanguage;
@@ -429,6 +511,7 @@ export type VisualStructureRecord =
   | VisualPreambleRecord
   | VisualMakeTitleRecord
   | VisualHeadingRecord
+  | VisualTableOfContentsRecord
   | VisualFrameRecord
   | VisualAbstractRecord
   | VisualKeywordsRecord
@@ -444,11 +527,16 @@ export type VisualStructureRecord =
   | VisualBibliographyRecord
   | VisualTextStyleRecord
   | VisualAccentRecord
-  | VisualDocumentEndRecord;
+  | VisualDocumentEndRecord
+  | VisualCommentRecord;
 
 export interface VisualDocumentStructure {
   readonly records: readonly VisualStructureRecord[];
+  /** Executable standard appendix switches, replayed in project include order. */
+  readonly appendixOffsets?: readonly number[];
   readonly bibliographyPaths: readonly string[];
+  /** True when an executable bibliography resource command was parsed, even if its path is unsafe. */
+  readonly hasBibliographyDeclaration: boolean;
   readonly citedKeys: readonly string[];
 }
 
@@ -466,6 +554,7 @@ interface ParsedArgument {
 }
 
 interface TheoremDefinition {
+  readonly optionalHeading?: boolean;
   readonly label: string;
   readonly style: VisualTheoremStyle;
   readonly numbered?: boolean;
@@ -480,6 +569,7 @@ interface OpenTheorem {
   readonly number: string | undefined;
   readonly optionalTitle: string | undefined;
   readonly optionalTitleLatex: string | undefined;
+  readonly optionalTitleSegments?: readonly VisualInlineContentSegment[];
   readonly labels: VisualLabelRecord[];
   readonly begin: VisualReplacementRange;
   readonly bodyFrom: number;
@@ -488,12 +578,16 @@ interface OpenTheorem {
 interface OpenFrame {
   readonly kind: "frame";
   readonly environment: "frame";
+  readonly syntax: "environment" | "command";
   readonly language: VisualDocumentLanguage;
   title: string | undefined;
   subtitle: string | undefined;
   readonly begin: VisualReplacementRange;
   readonly titleCommands: VisualReplacementRange[];
   readonly bodyFrom: number;
+  /** Closing brace offsets are present only for `\\frame[...]{...}`. */
+  readonly commandBodyTo?: number;
+  readonly commandEnd?: number;
 }
 
 interface OpenAbstract {
@@ -646,8 +740,10 @@ const MATH_ENVIRONMENTS = new Set([
   "Vmatrix",
   "smallmatrix",
 ]);
-const TRANSPARENT_VISUAL_ENVIRONMENTS = new Set(["subequations"]);
+const TRANSPARENT_VISUAL_ENVIRONMENTS = new Set(["subequations", "multicols"]);
 const TRANSPARENT_VISUAL_SIZE_DECLARATIONS = new Set([
+  "noindent",
+  "rm",
   "tiny",
   "scriptsize",
   "footnotesize",
@@ -719,6 +815,7 @@ const TITLE_AFFILIATION_COMMANDS = new Set([
 ]);
 const TITLE_EMAIL_COMMANDS = new Set([
   "email",
+  "emailAdd",
   "ead",
   "corremail",
 ]);
@@ -733,7 +830,11 @@ export function scanVisualDocumentStructure(
   options: VisualDocumentStructureScanOptions = {},
 ): VisualDocumentStructure {
   const records: VisualStructureRecord[] = [];
+  // Share the formula scanner so declared aliases hide mathematical conditionals too.
+  const formulaRanges = scanMathPreviewDocument(text).formulas.map(formula => formula.outerRange);
+  let formulaIndex = 0;
   const bibliographyPaths: string[] = [];
+  let hasBibliographyDeclaration = false;
   const bibliographySettings: VisualBibliographySetting[] = [];
   const citedKeys: string[] = [];
   const documentLanguage = options.documentLanguage ?? detectVisualDocumentLanguage(text);
@@ -744,6 +845,8 @@ export function scanVisualDocumentStructure(
   const numberingKnown = options.numberingMode !== "unknown";
   const headingCounters = new Map<VisualHeadingLevel, number>();
   const headingNumbers = new Map<string, string>();
+  const appendixOffsets: number[] = [];
+  let appendix = false;
   const theoremCounters = new Map<string, VisualTheoremCounterState>();
   const stack: OpenEnvironment[] = [];
   let theoremStyle: VisualTheoremStyle = "plain";
@@ -753,7 +856,25 @@ export function scanVisualDocumentStructure(
   let affiliations: readonly VisualSourceText[] = [];
   let emails: readonly VisualSourceText[] = [];
   let date: VisualSourceText | undefined;
-  let inDocument = options.fragmentKind === "body";
+  const titleMacros = new Map<string, ParsedArgument>();
+  const redefinedCommands = new Set<string>();
+  const frontMatterCommands: VisualReplacementRange[] = [];
+  const preambleSections: VisualFrontMatterSection[] = [];
+  let authblk = false;
+  let jhep = false;
+  let documentClass = "";
+  let affiliationGroupFrom = 0;
+  let hadAffiliation = false;
+  let affiliationOrdinal = 0;
+  // A root file can be conservatively labelled as a body fragment while the
+  // project graph is still resolving. When that physical file has its own
+  // document boundary, retain standalone semantics from the first byte: this
+  // keeps preamble commands as source, while still collecting title metadata
+  // for a later `\frame{\titlepage}`. A genuine included body file has no such
+  // boundary and remains executable from offset zero.
+  const bodyFragmentHasDocumentBoundary = options.fragmentKind === "body" &&
+    hasExplicitVisualDocumentStart(text);
+  let inDocument = options.fragmentKind === "body" && !bodyFragmentHasDocumentBoundary;
   let index = 0;
   // Some presentation commands contain a visible TeX branch followed by a
   // non-visual fallback branch. Keep scanning the visible branch so nested
@@ -767,6 +888,43 @@ export function scanVisualDocumentStructure(
   };
 
   while (index < text.length) {
+    while (formulaIndex < formulaRanges.length && formulaRanges[formulaIndex]!.end <= index) formulaIndex += 1;
+    const formulaRange = formulaRanges[formulaIndex];
+    if (formulaRange !== undefined && index >= formulaRange.start && index < formulaRange.end) {
+      index = formulaRange.end;
+      continue;
+    }
+    const closingCommandFrameIndex = findClosingCommandFrame(stack, index);
+    if (closingCommandFrameIndex >= 0) {
+      const open = stack.splice(closingCommandFrameIndex, 1)[0];
+      if (
+        open?.kind === "frame" &&
+        open.syntax === "command" &&
+        open.commandBodyTo !== undefined &&
+        open.commandEnd !== undefined
+      ) {
+        const end = commandFrameBoundaryReplacement(
+          text,
+          open.commandBodyTo,
+          open.commandEnd,
+          "end",
+        );
+        pushRecord({
+          kind: "frame",
+          syntax: "command",
+          language: open.language,
+          title: open.title,
+          subtitle: open.subtitle,
+          begin: open.begin,
+          end: { ...end, block: true },
+          titleCommands: open.titleCommands,
+          bodyFrom: open.bodyFrom,
+          bodyTo: open.commandBodyTo,
+        });
+        index = Math.max(index, open.commandEnd);
+        continue;
+      }
+    }
     const scanJump = scanJumps.get(index);
     if (scanJump !== undefined && scanJump > index) {
       index = scanJump;
@@ -832,6 +990,20 @@ export function scanVisualDocumentStructure(
 
       if (environment === "document") {
         const replacement = lineAwareReplacement(text, index, commandEnd);
+        // A project role can be temporarily conservative while the root graph
+        // is being resolved, so a physical standalone file may arrive as a
+        // `body` fragment. If it contains a real document boundary, discard
+        // every presentation record tentatively scanned before that boundary.
+        // Preamble metadata and macro/theorem declarations remain available,
+        // but preamble frame/ToC/list/formula-like source never becomes cards.
+        records.length = 0;
+        citedKeys.length = 0;
+        stack.length = 0;
+        headingCounters.clear();
+        headingNumbers.clear();
+        appendixOffsets.length = 0;
+        appendix = false;
+        theoremCounters.clear();
         preamble = {
           kind: "preamble",
           from: 0,
@@ -843,9 +1015,18 @@ export function scanVisualDocumentStructure(
         continue;
       }
 
+      // The preamble is configuration source, including callbacks such as
+      // `\AtBeginSection{...}` that merely contain frame-looking templates.
+      // Do not create nested structure cards until the executable document
+      // body has started.
+      if (!inDocument) {
+        index = commandEnd;
+        continue;
+      }
+
       const abstractMetadata = ABSTRACT_ENVIRONMENTS.get(environment);
       if (abstractMetadata !== undefined) {
-        const begin = lineAwareReplacement(text, index, commandEnd);
+        const begin = { ...lineAwareReplacement(text, index, commandEnd), block: true };
         stack.push({
           kind: "abstract",
           environment,
@@ -874,6 +1055,7 @@ export function scanVisualDocumentStructure(
         stack.push({
           kind: "frame",
           environment: "frame",
+          syntax: "environment",
           language: documentLanguage,
           title: titleArgument === undefined
             ? undefined
@@ -948,7 +1130,11 @@ export function scanVisualDocumentStructure(
       }
 
       if (VERBATIM_ENVIRONMENTS.has(environment)) {
-        index = skipOpaqueEnvironment(text, commandEnd, environment);
+        const end = skipOpaqueEnvironment(text, commandEnd, environment);
+        if (environment === "comment") {
+          pushRecord({ kind: "comment", replacement: lineAwareReplacement(text, index, end) });
+        }
+        index = end;
         continue;
       }
       if (TRANSPARENT_VISUAL_ENVIRONMENTS.has(environment)) {
@@ -963,7 +1149,7 @@ export function scanVisualDocumentStructure(
         }
         // Keep scanning the body so nested formulas, labels and references
         // remain independent visual records.
-        index = commandEnd;
+        index = wrapper?.contentFrom ?? commandEnd;
         continue;
       }
       if (MATH_ENVIRONMENTS.has(environment)) {
@@ -986,7 +1172,8 @@ export function scanVisualDocumentStructure(
         stack.push({
           kind: "theorem",
           environment,
-          definition: theorem,
+          definition: theorem.optionalHeading && optionalTitleLatex !== undefined
+            ? { ...theorem, label: latexToPlainText(optionalTitleLatex) } : theorem,
           number: numberingKnown
             ? nextVisualTheoremNumber(
                 environment,
@@ -995,10 +1182,12 @@ export function scanVisualDocumentStructure(
                 headingNumbers,
               )
             : undefined,
-          optionalTitle: optional === undefined
+          optionalTitle: optional === undefined || theorem.optionalHeading
             ? undefined
             : latexToPlainText(optionalTitleLatex ?? ""),
-          optionalTitleLatex,
+          optionalTitleLatex: theorem.optionalHeading ? undefined : optionalTitleLatex,
+          optionalTitleSegments: optional === undefined || theorem.optionalHeading ? []
+            : visualInlineContentSegments(optionalTitleLatex ?? "", optional.contentFrom),
           labels: [...immediateLabels],
           begin,
           bodyFrom: begin.to,
@@ -1095,6 +1284,7 @@ export function scanVisualDocumentStructure(
           number: open.number,
           optionalTitle: open.optionalTitle,
           optionalTitleLatex: open.optionalTitleLatex,
+          optionalTitleSegments: open.optionalTitleSegments ?? [],
           labels: open.labels,
           begin: open.begin,
           end: replacement,
@@ -1116,6 +1306,7 @@ export function scanVisualDocumentStructure(
       } else if (open?.kind === "frame") {
         pushRecord({
           kind: "frame",
+          syntax: open.syntax,
           language: open.language,
           title: open.title,
           subtitle: open.subtitle,
@@ -1181,6 +1372,11 @@ export function scanVisualDocumentStructure(
       }
     }
 
+    if (control.name === "newenvironment" || control.name === "renewenvironment") {
+      const parsed = parseTrivlistStatement(text, control.end);
+      if (parsed !== undefined) theoremDefinitions.set(parsed.environment, parsed.definition);
+    }
+
     if (control.name === "newtheorem") {
       const parsed = parseNewTheorem(text, control.end, theoremStyle);
       if (parsed !== undefined) {
@@ -1197,6 +1393,16 @@ export function scanVisualDocumentStructure(
       }
     }
 
+    if (!inDocument && control.name === "documentclass") {
+      const optional = readOptionalArgument(text, control.end);
+      const argument = readRequiredArgument(text, optional?.end ?? control.end);
+      if (argument !== undefined) {
+        documentClass = text.slice(argument.contentFrom, argument.contentTo).trim();
+        index = argument.end;
+        continue;
+      }
+    }
+
     if (!inDocument && control.name === "usepackage") {
       const optional = readOptionalArgument(text, control.end);
       const argument = readRequiredArgument(text, optional?.end ?? control.end);
@@ -1206,6 +1412,8 @@ export function scanVisualDocumentStructure(
           .split(",")
           .map((value) => value.trim().toLowerCase())
           .filter((value) => value.length > 0);
+        authblk ||= packages.includes("authblk");
+        jhep ||= packages.includes("jheppub");
         const bibliographyPackage = packages.includes("biblatex")
           ? "biblatex"
           : packages.includes("natbib")
@@ -1313,6 +1521,13 @@ export function scanVisualDocumentStructure(
       }
     }
 
+    if (isVisualLabelDefinitionCommand(control.name)) {
+      const target = collectSimpleTitleMacro(text, control, titleMacros);
+      if (target !== undefined) redefinedCommands.add(target);
+      index = skipVisualLabelDefinition(text, control, text.length) ?? control.end;
+      continue;
+    }
+
     if (control.name === "nocite") {
       const argument = readRequiredArgument(text, control.end);
       if (argument !== undefined) {
@@ -1332,6 +1547,7 @@ export function scanVisualDocumentStructure(
       const optional = readOptionalArgument(text, control.end);
       const argument = readRequiredArgument(text, optional?.end ?? control.end);
       if (argument !== undefined) {
+        hasBibliographyDeclaration = true;
         const paths = parseBibliographyPaths(
           text.slice(argument.contentFrom, argument.contentTo),
         );
@@ -1356,68 +1572,100 @@ export function scanVisualDocumentStructure(
       }
     }
 
+    // REVTeX front matter can follow \begin{document}; collect it in source
+    // order so a later \maketitle receives the same metadata as other classes.
+    if (control.name === "title" || control.name === "author" || control.name === "date") {
+      const optional = readOptionalArgument(text, control.end);
+      const argument = readRequiredArgument(text, optional?.end ?? control.end);
+      if (argument !== undefined) {
+        const source: VisualSourceText = {
+          from: argument.contentFrom,
+          to: argument.contentTo,
+          text: latexToPlainText(text.slice(argument.contentFrom, argument.contentTo)),
+          segments: visualInlineContentSegments(text.slice(argument.contentFrom, argument.contentTo), argument.contentFrom),
+        };
+        if (control.name === "title") {
+          title = source;
+        } else if (control.name === "date") {
+          date = source;
+        } else {
+          if (hadAffiliation) {
+            affiliationGroupFrom = authors.length;
+            hadAffiliation = false;
+          }
+          const markers = (authblk || jhep) && optional !== undefined
+            ? titleMarkerIds(text.slice(optional.contentFrom, optional.contentTo))
+            : [];
+          authors = [...authors, ...splitTitleMetadata(text, argument, markers)];
+          emails = [
+            ...emails,
+            ...extractEmailMetadata(text, argument),
+          ];
+        }
+        if (inDocument && !redefinedCommands.has(control.name) && canFoldTitleMetadata(
+          text, argument, control.name === "author" ? undefined : titleMacros,
+          control.name === "date" && !redefinedCommands.has("today"),
+          control.name !== "date",
+        )) frontMatterCommands.push(lineAwareReplacement(text, index, argument.end));
+        // Body commands may be redefined as visible wrappers; still scan
+        // their contents for nested styles and references.
+        if (!inDocument) {
+          index = argument.end;
+          continue;
+        }
+      }
+    }
+    if (
+      TITLE_AFFILIATION_COMMANDS.has(control.name) ||
+      TITLE_EMAIL_COMMANDS.has(control.name)
+    ) {
+      const optional = readOptionalArgument(text, control.end);
+      const argument = readRequiredArgument(text, optional?.end ?? control.end);
+      if (argument !== undefined) {
+        const markers = (authblk || jhep) && optional !== undefined
+          ? titleMarkerIds(text.slice(optional.contentFrom, optional.contentTo))
+          : [];
+        let values = splitTitleMetadata(text, argument, markers);
+        if (TITLE_AFFILIATION_COMMANDS.has(control.name)) {
+          if (control.name === "affiliation" && optional === undefined &&
+              (documentClass.startsWith("revtex") || documentClass.length === 0) &&
+              authors.length > affiliationGroupFrom && values.length > 0) {
+            const marker = String(++affiliationOrdinal);
+            values = values.map(value => ({ ...value, markers: [marker] }));
+            authors = authors.map((author, authorIndex) => authorIndex < affiliationGroupFrom
+              ? author : { ...author, markers: [...(author.markers ?? []), marker] });
+            hadAffiliation = true;
+          }
+          affiliations = [...affiliations, ...values];
+        } else {
+          emails = [...emails, ...values];
+        }
+        if (inDocument && !redefinedCommands.has(control.name) && canFoldTitleMetadata(text, argument, undefined, false, !TITLE_EMAIL_COMMANDS.has(control.name))) frontMatterCommands.push(lineAwareReplacement(text, index, argument.end));
+        if (!inDocument) {
+          index = argument.end;
+          continue;
+        }
+      }
+    }
+    if (!inDocument && jhep && control.name === "abstract") {
+      const argument = readRequiredArgument(text, control.end);
+      if (argument !== undefined) {
+        const source = frontMatterAbstractSource(text, argument.contentFrom, argument.contentTo);
+        if (source !== undefined) preambleSections.push({ role: "abstract", label: documentLanguage === "zh" ? "摘要" : "Abstract", source });
+        index = argument.end;
+        continue;
+      }
+    }
+    if (!inDocument && (documentClass === "amsart" || jhep)) {
+      const keyword = parseVisualKeywordsCommand(text, index, control, documentLanguage);
+      if (keyword !== undefined) {
+        preambleSections.push(frontMatterKeywordSection(text, keyword));
+        index = keyword.replacement.sourceTo;
+        continue;
+      }
+    }
     if (!inDocument) {
-      if (control.name === "title" || control.name === "author" || control.name === "date") {
-        const optional = readOptionalArgument(text, control.end);
-        const argument = readRequiredArgument(text, optional?.end ?? control.end);
-        if (argument !== undefined) {
-          const source: VisualSourceText = {
-            from: argument.contentFrom,
-            to: argument.contentTo,
-            text: latexToPlainText(text.slice(argument.contentFrom, argument.contentTo)),
-          };
-          if (control.name === "title") {
-            title = source;
-          } else if (control.name === "date") {
-            date = source;
-          } else {
-            authors = [...authors, ...splitAuthors(text, argument)];
-            emails = [
-              ...emails,
-              ...extractEmailMetadata(text, argument),
-            ];
-          }
-          index = argument.end;
-          continue;
-        }
-      }
-      if (
-        TITLE_AFFILIATION_COMMANDS.has(control.name) ||
-        TITLE_EMAIL_COMMANDS.has(control.name)
-      ) {
-        const optional = readOptionalArgument(text, control.end);
-        const argument = readRequiredArgument(text, optional?.end ?? control.end);
-        if (argument !== undefined) {
-          const values = splitTitleMetadata(text, argument);
-          if (TITLE_AFFILIATION_COMMANDS.has(control.name)) {
-            affiliations = [...affiliations, ...values];
-          } else {
-            emails = [...emails, ...values];
-          }
-          index = argument.end;
-          continue;
-        }
-      }
       index = control.end;
-      continue;
-    }
-
-    const keywordLine = parseVisualKeywordLine(text, index, documentLanguage);
-    if (keywordLine !== undefined) {
-      pushRecord(keywordLine);
-      index = keywordLine.replacement.sourceTo;
-      continue;
-    }
-
-    const keywordCommand = parseVisualKeywordsCommand(
-      text,
-      index,
-      control,
-      documentLanguage,
-    );
-    if (keywordCommand !== undefined) {
-      pushRecord(keywordCommand);
-      index = keywordCommand.replacement.sourceTo;
       continue;
     }
 
@@ -1440,6 +1688,46 @@ export function scanVisualDocumentStructure(
         index = argument.end;
         continue;
       }
+    }
+
+    if (control.name === "tableofcontents") {
+      const optional = readOptionalArgument(text, control.end);
+      pushRecord({
+        kind: "tableOfContents",
+        replacement: lineAwareReplacement(text, index, optional?.end ?? control.end),
+        language: documentLanguage,
+        scope: visualTableOfContentsScope(
+          optional === undefined
+            ? ""
+            : text.slice(optional.contentFrom, optional.contentTo),
+        ),
+        template: false,
+        entries: [],
+        incomplete: false,
+        numberingApproximate: false,
+        notices: [],
+      });
+      index = optional?.end ?? control.end;
+      continue;
+    }
+
+    const keywordLine = parseVisualKeywordLine(text, index, documentLanguage);
+    if (keywordLine !== undefined) {
+      pushRecord(keywordLine);
+      index = keywordLine.replacement.sourceTo;
+      continue;
+    }
+
+    const keywordCommand = parseVisualKeywordsCommand(
+      text,
+      index,
+      control,
+      documentLanguage,
+    );
+    if (keywordCommand !== undefined) {
+      pushRecord(keywordCommand);
+      index = keywordCommand.replacement.sourceTo;
+      continue;
     }
 
     if (control.name === "label") {
@@ -1487,17 +1775,72 @@ export function scanVisualDocumentStructure(
       continue;
     }
 
+    if (control.name === "frame") {
+      const options = readOptionalArgument(text, control.end);
+      const body = readRequiredArgument(text, options?.end ?? control.end);
+      if (body !== undefined) {
+        const begin = commandFrameBoundaryReplacement(
+          text,
+          index,
+          body.contentFrom,
+          "begin",
+        );
+        stack.push({
+          kind: "frame",
+          environment: "frame",
+          syntax: "command",
+          language: documentLanguage,
+          title: undefined,
+          subtitle: undefined,
+          begin: { ...begin, block: true },
+          titleCommands: [],
+          bodyFrom: body.contentFrom,
+          commandBodyTo: body.contentTo,
+          commandEnd: body.end,
+        });
+        // Keep scanning the argument. This is what lets a shorthand such as
+        // `\\frame{\\titlepage}` retain the same title preview and lets richer
+        // frame bodies reuse the ordinary formula/list/structure pipeline.
+        index = body.contentFrom;
+        continue;
+      }
+    }
+
     const textStyle = parseVisualTextStyle(text, index, control);
     if (textStyle !== undefined) {
       pushRecord(textStyle);
       // Continue scanning inside the argument so nested styles, references and
       // inline formulas remain independent visual records.
-      if (textStyle.command === "texorpdfstring") {
+      if (textStyle.command === "texorpdfstring" || textStyle.command === "href") {
         scanJumps.set(textStyle.contentTo, textStyle.to);
         index = textStyle.contentFrom;
       } else {
         index = control.end;
       }
+      continue;
+    }
+
+    if (["noindent", "par", "smallskip", "medskip", "bigskip", "hfill", "newpage", "clearpage"].includes(control.name)) {
+      pushRecord({ kind: "accent", from: index, to: control.end, text: "" });
+      index = control.end;
+      continue;
+    }
+
+    if (control.name === "vspace" || control.name === "hspace") {
+      const argument = readRequiredArgument(text, text[control.end] === "*" ? control.end + 1 : control.end);
+      if (argument !== undefined) {
+        pushRecord({ kind: "accent", from: index, to: argument.end, text: "" });
+        index = argument.end;
+        continue;
+      }
+    }
+
+    const layoutEnd = redefinedCommands.has(control.name)
+      ? undefined
+      : staticVisualLayoutCommandEnd(text, control);
+    if (layoutEnd !== undefined) {
+      pushRecord({ kind: "accent", from: index, to: layoutEnd, text: "" });
+      index = layoutEnd;
       continue;
     }
 
@@ -1508,16 +1851,43 @@ export function scanVisualDocumentStructure(
       continue;
     }
 
-    if (control.name === "maketitle") {
+    if (control.name === "maketitle" || control.name === "titlepage") {
       pushRecord({
         kind: "maketitle",
         replacement: lineAwareReplacement(text, index, control.end),
-        title,
-        authors: uniqueVisualSourceTexts(authors),
-        affiliations: uniqueVisualSourceTexts(affiliations),
+        title: resolveSimpleTitleMacro(text, title, titleMacros),
+        metadataReplacements: [...frontMatterCommands],
+        authors,
+        affiliations,
         emails: uniqueVisualSourceTexts(emails),
-        date,
+        date: resolveVisualDate(text, date, titleMacros, redefinedCommands, documentLanguage),
+        ...(preambleSections.length === 0 ? {} : { frontMatter: {
+          replacement: lineAwareReplacement(text, index, control.end),
+          sections: [...preambleSections],
+        } }),
       });
+      index = control.end;
+      continue;
+    }
+
+    if (jhep && control.name === "acknowledgments" && !redefinedCommands.has(control.name)) {
+      pushRecord({
+        kind: "heading", command: "section", level: HEADING_LEVELS.section,
+        starred: true, number: undefined, generatedTitle: true,
+        from: index, to: control.end, prefixFrom: index, prefixTo: control.end,
+        contentFrom: control.end, contentTo: control.end,
+        suffixFrom: control.end, suffixTo: control.end,
+        title: "Acknowledgments", tocTitle: "Acknowledgments",
+      });
+      index = control.end;
+      continue;
+    }
+
+    if (control.name === "appendix" && !redefinedCommands.has("appendix")) {
+      appendix = true;
+      appendixOffsets.push(index);
+      resetVisualHeadingCounters(headingCounters, headingNumbers, numberingRootLevel);
+      pushRecord({ kind: "accent", from: index, to: control.end, text: "" });
       index = control.end;
       continue;
     }
@@ -1528,10 +1898,14 @@ export function scanVisualDocumentStructure(
       const shortTitle = readOptionalArgument(text, starEnd);
       const argument = readRequiredArgument(text, shortTitle?.end ?? starEnd);
       if (argument !== undefined) {
+        const title = latexToPlainText(
+          text.slice(argument.contentFrom, argument.contentTo),
+        );
         pushRecord({
           kind: "heading",
           command: control.name,
           level: HEADING_LEVELS[control.name],
+          starred,
           number: starred || !numberingKnown
             ? undefined
             : nextVisualHeadingNumber(
@@ -1539,6 +1913,7 @@ export function scanVisualDocumentStructure(
                 numberingRootLevel,
                 headingCounters,
                 headingNumbers,
+                appendix,
               ),
           from: index,
           to: argument.end,
@@ -1548,9 +1923,12 @@ export function scanVisualDocumentStructure(
           contentTo: argument.contentTo,
           suffixFrom: argument.contentTo,
           suffixTo: argument.end,
-          title: latexToPlainText(
-            text.slice(argument.contentFrom, argument.contentTo),
-          ),
+          title,
+          tocTitle: shortTitle === undefined
+            ? title
+            : latexToPlainText(
+                text.slice(shortTitle.contentFrom, shortTitle.contentTo),
+              ),
         });
         // Keep scanning inside the visible title. The heading decoration only
         // hides the command/braces, so nested text accents/symbols (for example
@@ -1597,65 +1975,14 @@ export function scanVisualDocumentStructure(
       }
     }
 
-    if (CITATION_COMMANDS.has(control.name)) {
-      let argumentOffset = control.end;
-      for (let optionalIndex = 0; optionalIndex < 2; optionalIndex += 1) {
-        const optional = readOptionalArgument(text, argumentOffset);
-        if (optional === undefined) {
-          break;
-        }
-        argumentOffset = optional.end;
+    const inlineReference = parseVisualInlineReference(text, index, control);
+    if (inlineReference !== undefined) {
+      if (inlineReference.keys.length > 0) {
+        if (inlineReference.kind === "citation") citedKeys.push(...inlineReference.keys);
+        pushRecord(inlineReference);
       }
-      const argument = readRequiredArgument(text, argumentOffset);
-      if (argument !== undefined) {
-        const keys = text
-          .slice(argument.contentFrom, argument.contentTo)
-          .split(",")
-          .map((key) => key.trim())
-          .filter((key) => key.length > 0)
-          .slice(0, 64);
-        if (keys.length > 0) {
-          citedKeys.push(...keys);
-          pushRecord({
-            kind: "citation",
-            from: index,
-            to: argument.end,
-            command: control.name,
-            keys,
-            label: citationFallbackLabel(control.name, keys),
-            previews: [],
-          });
-        }
-        index = argument.end;
-        continue;
-      }
-    }
-
-    if (REFERENCE_COMMANDS.has(control.name)) {
-      const afterStar = text[control.end] === "*" ? control.end + 1 : control.end;
-      const argument = readRequiredArgument(text, afterStar);
-      if (argument !== undefined) {
-        const keys = text
-          .slice(argument.contentFrom, argument.contentTo)
-          .split(",")
-          .map((key) => key.trim())
-          .filter(
-            (key) => key.length > 0 && key.length <= MAX_VISUAL_LABEL_KEY_LENGTH,
-          )
-          .slice(0, 64);
-        if (keys.length > 0) {
-          pushRecord({
-            kind: "reference",
-            from: index,
-            to: argument.end,
-            command: control.name,
-            keys,
-            label: referenceFallbackLabel(control.name, keys),
-          });
-        }
-        index = argument.end;
-        continue;
-      }
+      index = inlineReference.to;
+      continue;
     }
 
     if (control.name === "bibliography" || control.name === "addbibresource") {
@@ -1664,6 +1991,7 @@ export function scanVisualDocumentStructure(
         : undefined;
       const argument = readRequiredArgument(text, optional?.end ?? control.end);
       if (argument !== undefined) {
+        hasBibliographyDeclaration = true;
         const requestedPaths = parseBibliographyPaths(
           text.slice(argument.contentFrom, argument.contentTo),
         );
@@ -1746,12 +2074,249 @@ export function scanVisualDocumentStructure(
     records.unshift(preamble);
   }
   records.sort((left, right) => structureRecordStart(left) - structureRecordStart(right));
-  const resolvedRecords = resolveVisualTheoremOptionalTitles(records);
+  const resolvedRecords = resolveVisualTheoremOptionalTitles(
+    groupVisualFrontMatter(text, records, frontMatterCommands),
+  );
   return {
     records: resolvedRecords,
+    ...(appendixOffsets.length === 0 ? {} : { appendixOffsets }),
     bibliographyPaths: uniqueStrings(bibliographyPaths),
-    citedKeys: uniqueStrings(citedKeys),
+    hasBibliographyDeclaration,
+    citedKeys: uniqueStrings([...citedKeys, ...visualInlineReferenceRecords({ records: resolvedRecords })
+      .flatMap(record => record.kind === "citation" ? record.keys : [])]),
   };
+}
+
+function frontMatterKeywordSection(text: string, record: VisualKeywordsRecord): VisualFrontMatterSection {
+  const control = readControl(text, record.replacement.sourceFrom);
+  const optional = control === undefined ? undefined : readOptionalArgument(text, control.end);
+  const argument = control === undefined || (!KEYWORDS_COMMANDS.has(control.name) && !CLASSIFICATION_COMMANDS.has(control.name))
+    ? undefined : readRequiredArgument(text, optional?.end ?? control.end);
+  return {
+    role: record.role,
+    label: record.label,
+    source: {
+      from: argument?.contentFrom ?? record.replacement.sourceFrom,
+      to: argument?.contentTo ?? record.replacement.sourceTo,
+      text: record.value,
+    },
+  };
+}
+
+function groupVisualFrontMatter(
+  text: string,
+  records: readonly VisualStructureRecord[],
+  commands: readonly VisualReplacementRange[],
+): readonly VisualStructureRecord[] {
+  // ponytail: interval scans are quadratic within the 4,000-record cap;
+  // index ranges if large-document profiling makes this significant.
+  const candidates: { replacement: VisualReplacementRange; sections?: readonly VisualFrontMatterSection[] }[] = commands.map(replacement => ({ replacement }));
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]!;
+    if (record.kind === "abstract") {
+      const tail = records.filter((nested): nested is VisualKeywordsRecord => nested.kind === "keywords" && nested.replacement.sourceFrom >= record.bodyFrom && nested.replacement.sourceTo <= record.bodyTo);
+      let from = record.bodyFrom;
+      let to = frontMatterProseEnd(text, from, tail[0]?.replacement.sourceFrom ?? record.bodyTo);
+      while (from < to && /\s/u.test(text[from]!)) from += 1;
+      const source = frontMatterAbstractSource(text, from, to);
+      if (source === undefined) continue;
+      let cursor = to;
+      let validTail = true;
+      for (const keyword of tail) {
+        if (!frontMatterLayoutOnly(text.slice(cursor, keyword.replacement.sourceFrom))) {
+          validTail = false;
+          break;
+        }
+        cursor = keyword.replacement.sourceTo;
+      }
+      if (!validTail || !frontMatterLayoutOnly(text.slice(cursor, record.bodyTo))) continue;
+      candidates.push({
+        replacement: lineAwareReplacement(text, record.begin.sourceFrom, record.end.sourceTo),
+        sections: [
+          ...(from === to ? [] : [{ role: record.role, label: record.label, source }]),
+          ...tail.map(keyword => frontMatterKeywordSection(text, keyword)),
+        ],
+      });
+    } else if (record.kind === "keywords") {
+      candidates.push({ replacement: record.replacement, sections: [frontMatterKeywordSection(text, record)] });
+    } else if (record.kind === "heading" && record.command === "section" && record.starred && /^(?:Abstract|摘要)$/iu.test(record.title)) {
+      const boundary = records.slice(index + 1).find(next => next.kind === "heading" || next.kind === "keywords" || next.kind === "maketitle" || next.kind === "documentEnd");
+      const to = boundary === undefined ? undefined : structureRecordStart(boundary);
+      // ponytail: only plain section-style abstracts have an unambiguous body;
+      // retain richer/custom layouts as source until an explicit parser exists.
+      if (to !== undefined && !/[\\{}$%]/u.test(text.slice(record.to, to))) {
+        let from = record.to;
+        let bodyTo = to;
+        while (from < bodyTo && /\s/u.test(text[from]!)) from += 1;
+        while (bodyTo > from && /\s/u.test(text[bodyTo - 1]!)) bodyTo -= 1;
+        if (bodyTo > from) candidates.push({
+          replacement: lineAwareReplacement(text, record.from, bodyTo),
+          sections: [{ role: "abstract", label: record.title, source: { from, to: bodyTo, text: latexMetadataToPlainText(text.slice(from, bodyTo)) } }],
+        });
+      }
+    }
+  }
+  const before = [...candidates].sort((left, right) => right.replacement.sourceTo - left.replacement.sourceTo);
+  const after = [...candidates].sort((left, right) => left.replacement.sourceFrom - right.replacement.sourceFrom);
+  const claimed = new Set<typeof candidates[number]>();
+  return records.map(record => {
+    if (record.kind !== "maketitle" || records.some(other => other.kind === "frame" && other.bodyFrom <= record.replacement.sourceFrom && other.bodyTo >= record.replacement.sourceTo)) return record;
+    let from = record.replacement.sourceFrom;
+    let to = record.replacement.sourceTo;
+    const sections: VisualFrontMatterSection[] = [];
+    for (const candidate of before) {
+      if (candidate.replacement.sourceTo > from) continue;
+      if (claimed.has(candidate) || skipTrivia(text, candidate.replacement.sourceTo) !== from) break;
+      from = candidate.replacement.sourceFrom;
+      claimed.add(candidate);
+      if (candidate.sections !== undefined) sections.unshift(...candidate.sections);
+    }
+    for (const candidate of after) {
+      if (candidate.replacement.sourceFrom < to) continue;
+      if (candidate.sections === undefined || claimed.has(candidate) || skipTrivia(text, to) !== candidate.replacement.sourceFrom) break;
+      to = candidate.replacement.sourceTo;
+      claimed.add(candidate);
+      sections.push(...candidate.sections);
+    }
+    sections.unshift(...(record.frontMatter?.sections ?? []));
+    return from === record.replacement.sourceFrom && to === record.replacement.sourceTo && sections.length === 0
+      ? record : { ...record, frontMatter: { replacement: lineAwareReplacement(text, from, to), sections } };
+  });
+}
+
+const FRONT_MATTER_LAYOUT_COMMANDS = new Set(["par", "smallskip", "medskip", "bigskip", "noindent"]);
+
+function frontMatterLayoutOnly(source: string): boolean {
+  let index = skipTrivia(source, 0);
+  while (index < source.length) {
+    const control = source[index] === "\\" ? readControl(source, index) : undefined;
+    if (control === undefined || !FRONT_MATTER_LAYOUT_COMMANDS.has(control.name)) return false;
+    index = skipTrivia(source, control.end);
+  }
+  return true;
+}
+
+function frontMatterProseEnd(text: string, from: number, to: number): number {
+  const source = text.slice(from, to);
+  let index = 0;
+  let end = 0;
+  while (index < source.length) {
+    index = skipTrivia(source, index);
+    if (index >= source.length) break;
+    const control = source[index] === "\\" ? readControl(source, index) : undefined;
+    index = control?.end ?? index + 1;
+    if (control === undefined || !FRONT_MATTER_LAYOUT_COMMANDS.has(control.name)) end = index;
+  }
+  return from + end;
+}
+
+function frontMatterAbstractSource(text: string, from: number, to: number): VisualSourceText | undefined {
+  const body = text.slice(from, to);
+  if ([...body.matchAll(/\\([A-Za-z@]+)/gu)].some(match => match[1] === "label" || REFERENCE_COMMANDS.has(match[1]!) || CITATION_COMMANDS.has(match[1]!))) return undefined;
+  const ranges = explicitMathContentRanges(body);
+  if (ranges.some(range => range.to - range.from > MAX_VISUAL_TABLE_CELL_LENGTH)) return undefined;
+  let ordinary = "";
+  let offset = 0;
+  for (const range of ranges) {
+    ordinary += body.slice(offset, range.from);
+    offset = range.to;
+  }
+  ordinary += body.slice(offset);
+  if (ordinary.includes("$") || !simpleFrontMatterText(ordinary)) return undefined;
+  return { from, to, text: latexMetadataToPlainText(body), segments: visualInlineContentSegments(body, from) };
+}
+
+function simpleFrontMatterText(body: string): boolean {
+  for (const command of body.matchAll(/\\([A-Za-z@]+|[^A-Za-z@])/gu)) {
+    const name = command[1]!;
+    if (!/^(?:textbf|textit|textrm|textsf|texttt|textsc|textnormal|emph|underline|LaTeX|TeX|quad|qquad|and)$/u.test(name) &&
+        LATEX_NAMED_TEXT_GLYPHS[name] === undefined && LATEX_COMBINING_ACCENTS[name] === undefined &&
+        !(name.length === 1 && "&%#${}_\\".includes(name))) return false;
+  }
+  return true;
+}
+
+function canFoldTitleMetadata(
+  text: string,
+  argument: ParsedArgument,
+  macros?: ReadonlyMap<string, ParsedArgument>,
+  allowToday = false,
+  allowMath = true,
+): boolean {
+  const raw = text.slice(argument.contentFrom, argument.contentTo);
+  if (allowToday && /^\s*\\today(?:\{\})?\s*$/u.test(raw)) return true;
+  const resolved = macros === undefined ? undefined : resolveSimpleTitleMacro(text, {
+    from: argument.contentFrom, to: argument.contentTo, text: raw,
+  }, macros);
+  const body = resolved?.definition === undefined ? raw : text.slice(resolved.definition.from, resolved.definition.to);
+  let prose = "";
+  let index = 0;
+  const mathRanges = explicitMathContentRanges(body);
+  if (!allowMath && mathRanges.length > 0) return false;
+  while (index < body.length) {
+    const math = mathRanges.find(range => range.from === index);
+    if (math !== undefined) { index = math.to; continue; }
+    if (body[index] === "$" && !isEscapedAt(body, index)) return false;
+    const control = body[index] === "\\" ? readControl(body, index) : undefined;
+    if (control?.name === "inst") {
+      const marker = readRequiredArgument(body, control.end);
+      if (marker === undefined) return false;
+      const ids = body.slice(marker.contentFrom, marker.contentTo);
+      if (titleMarkerIds(ids).length !== uniqueStrings(ids.split(",").map(id => id.trim())).length) return false;
+      index = marker.end;
+      continue;
+    }
+    const end = control?.end ?? index + 1;
+    prose += body.slice(index, end);
+    index = end;
+  }
+  return simpleFrontMatterText(prose);
+}
+
+function resolveVisualDate(
+  text: string,
+  source: VisualSourceText | undefined,
+  macros: ReadonlyMap<string, ParsedArgument>,
+  redefinedCommands: ReadonlySet<string>,
+  language: VisualDocumentLanguage,
+): VisualSourceText | undefined {
+  if (source !== undefined && !redefinedCommands.has("today") && /^\s*\\today(?:\{\})?\s*$/u.test(text.slice(source.from, source.to))) {
+    return { ...source, text: new Intl.DateTimeFormat(language === "zh" ? "zh-CN" : "en-US", {
+      year: "numeric", month: "long", day: "numeric",
+    }).format(new Date()) };
+  }
+  return resolveSimpleTitleMacro(text, source, macros);
+}
+
+function collectSimpleTitleMacro(text: string, control: ParsedControl, macros: Map<string, ParsedArgument>): string | undefined {
+  const afterStar = text[control.end] === "*" ? control.end + 1 : control.end;
+  const targetFrom = skipTrivia(text, afterStar);
+  const grouped = readRequiredArgument(text, targetFrom);
+  const target = readControl(text, grouped === undefined ? targetFrom : skipTrivia(text, grouped.contentFrom));
+  if (target === undefined) return;
+  if (control.name === "providecommand" && macros.has(target.name)) return target.name;
+  macros.delete(target.name);
+  if (!["newcommand", "renewcommand", "providecommand", "def", "gdef"].includes(control.name)) return target.name;
+  if (grouped !== undefined && skipTrivia(text, target.end) !== grouped.contentTo) return target.name;
+  const optional = readOptionalArgument(text, grouped?.end ?? target.end);
+  if (optional !== undefined && text.slice(optional.contentFrom, optional.contentTo).trim() !== "0") return target.name;
+  const body = readRequiredArgument(text, optional?.end ?? grouped?.end ?? target.end);
+  if (body !== undefined && !text.slice(body.contentFrom, body.contentTo).includes("#")) macros.set(target.name, body);
+  return target.name;
+}
+
+function resolveSimpleTitleMacro(text: string, source: VisualSourceText | undefined, macros: ReadonlyMap<string, ParsedArgument>): VisualSourceText | undefined {
+  if (source === undefined) return source;
+  const value = text.slice(source.from, source.to).trim();
+  const match = /^\\([A-Za-z@]+)(?:\{\})?$/u.exec(value);
+  const definition = match === null ? undefined : macros.get(match[1]!);
+  const unresolved = match === null ? source : { ...source, text: value, segments: [{ kind: "text" as const, text: value }] };
+  if (definition === undefined) return unresolved;
+  const body = text.slice(definition.contentFrom, definition.contentTo);
+  // Resolve one literal definition only; arbitrary commands and macro chains
+  // need TeX execution and remain available in the source declaration.
+  if (!simpleFrontMatterText(body)) return unresolved;
+  return { ...source, text: latexMetadataToPlainText(body), segments: visualInlineContentSegments(body, definition.contentFrom), definition: { from: definition.contentFrom, to: definition.contentTo } };
 }
 
 function resolveVisualTheoremOptionalTitles(
@@ -1847,7 +2412,134 @@ export type VisualReferenceTargetKind =
   | "formula"
   | "theorem"
   | "heading"
+  | "table"
+  | "image"
+  | "diagram"
   | "unknown";
+
+export interface VisualStructureReferencePresentation {
+  readonly targetKind: Exclude<VisualReferenceTargetKind, "formula" | "unknown">;
+  readonly label: string;
+}
+
+export type VisualLabeledStructureRecord =
+  | VisualTableRecord
+  | VisualImageRecord
+  | VisualTikzcdRecord
+  | VisualTikzpictureRecord;
+
+export interface VisualLabeledStructureTarget {
+  readonly targetKind: "table" | "image" | "diagram";
+  readonly record: VisualLabeledStructureRecord;
+}
+
+/**
+ * Resolve a unique label to a structure which already has a safe visual
+ * representation.  Tables and images own their labels directly.  tikz-cd and
+ * TikZ pictures normally inherit a figure counter, so they are associated only
+ * when one figure contains exactly one real label and exactly one diagram.
+ * Ambiguous figures deliberately remain unresolved instead of guessing from a
+ * key prefix such as `fig:` or `diag:`.
+ */
+export function findVisualLabeledStructureForLabel(
+  text: string,
+  records: readonly VisualStructureRecord[],
+  requestedKey: string,
+): VisualLabeledStructureTarget | undefined {
+  const key = requestedKey.trim();
+  if (key.length === 0 || key.length > MAX_VISUAL_LABEL_KEY_LENGTH) {
+    return undefined;
+  }
+  const labelsByKey = indexVisualLabelTargetsByKey(text);
+  return indexVisualLabeledStructures(text, records, labelsByKey).get(key);
+}
+
+/**
+ * Resolve every local theorem, heading, table, image, and diagram reference in
+ * one pass.
+ *
+ * The visual editor rebuilds its structure decorations after an idle parser
+ * snapshot and when the caret crosses a hidden structure boundary. Calling
+ * `findVisualHeadingForLabel` for every rendered `\\ref` used to rescan the
+ * complete document once (and, for headings, twice) per key. This index keeps
+ * the same uniqueness rules while scanning LaTeX labels only once.
+ */
+export function indexVisualStructureReferences(
+  text: string,
+  records: readonly VisualStructureRecord[],
+): ReadonlyMap<string, VisualStructureReferencePresentation> {
+  const presentations = new Map<string, VisualStructureReferencePresentation>();
+  const labelTargetsByKey = indexVisualLabelTargetsByKey(text);
+  const theoremsByLabel = new Map<string, VisualTheoremRecord[]>();
+  for (const record of records) {
+    if (record.kind !== "theorem") {
+      continue;
+    }
+    for (const label of record.labels) {
+      const key = label.key.trim();
+      if (key.length === 0) {
+        continue;
+      }
+      const matches = theoremsByLabel.get(key);
+      if (matches === undefined) {
+        theoremsByLabel.set(key, [record]);
+      } else {
+        matches.push(record);
+      }
+    }
+  }
+
+  for (const [key, matches] of theoremsByLabel) {
+    const theorem = matches.length === 1 ? matches[0] : undefined;
+    if (theorem !== undefined) {
+      presentations.set(key, {
+        targetKind: "theorem",
+        label: theorem.number ?? key,
+      });
+    }
+  }
+
+  for (const [key, target] of indexVisualLabeledStructures(
+    text,
+    records,
+    labelTargetsByKey,
+  )) {
+    if (!presentations.has(key)) {
+      presentations.set(key, {
+        targetKind: target.targetKind,
+        label: key,
+      });
+    }
+  }
+
+  const headings = records.filter(
+    (record): record is VisualHeadingRecord => record.kind === "heading",
+  );
+  for (const [key, targets] of labelTargetsByKey) {
+    // A unique theorem keeps the same precedence as the single-key helpers.
+    if (presentations.has(key) || targets.length !== 1) {
+      continue;
+    }
+    const target = targets[0]!;
+    const matchingHeadings = headings.filter((record) =>
+      (target.from >= record.from && target.to <= record.to) ||
+      (
+        target.from >= record.to &&
+        visualHeadingLabelGapIsIgnorable(text, record.to, target.from)
+      )
+    );
+    const heading = matchingHeadings.length === 1
+      ? matchingHeadings[0]
+      : undefined;
+    if (heading !== undefined) {
+      presentations.set(key, {
+        targetKind: "heading",
+        label: heading.number ?? key,
+      });
+    }
+  }
+  return presentations;
+}
 
 /**
  * Choose the compact text shown by a visual reference chip. Equations keep
@@ -1862,7 +2554,14 @@ export function visualReferenceDisplayLabel(
   targetKind: VisualReferenceTargetKind,
 ): string {
   const key = requestedKey.trim();
-  if (key.length === 0 || targetKind === "formula" || targetKind === "unknown") {
+  if (
+    key.length === 0 ||
+    targetKind === "formula" ||
+    targetKind === "table" ||
+    targetKind === "image" ||
+    targetKind === "diagram" ||
+    targetKind === "unknown"
+  ) {
     return key;
   }
   if (targetKind === "theorem") {
@@ -1876,6 +2575,202 @@ export function visualReferenceDisplayLabel(
       : key;
   }
   return findVisualHeadingForLabel(text, records, key)?.number ?? key;
+}
+
+function indexVisualLabelTargetsByKey(
+  text: string,
+): ReadonlyMap<string, readonly VisualLabelTarget[]> {
+  const labelsByKey = new Map<string, VisualLabelTarget[]>();
+  for (const target of findVisualLabelsInRange(text, 0, text.length)) {
+    const matches = labelsByKey.get(target.key);
+    if (matches === undefined) {
+      labelsByKey.set(target.key, [target]);
+    } else {
+      matches.push(target);
+    }
+  }
+  return labelsByKey;
+}
+
+function indexVisualLabeledStructures(
+  text: string,
+  records: readonly VisualStructureRecord[],
+  labelsByKey: ReadonlyMap<string, readonly VisualLabelTarget[]>,
+): ReadonlyMap<string, VisualLabeledStructureTarget> {
+  const candidates = new Map<string, VisualLabeledStructureTarget[]>();
+  const append = (key: string, target: VisualLabeledStructureTarget): void => {
+    if ((labelsByKey.get(key) ?? []).length !== 1) {
+      return;
+    }
+    const existing = candidates.get(key) ?? [];
+    if (!existing.some((candidate) =>
+      candidate.record.kind === target.record.kind &&
+      candidate.record.replacement.sourceFrom === target.record.replacement.sourceFrom &&
+      candidate.record.replacement.sourceTo === target.record.replacement.sourceTo
+    )) {
+      existing.push(target);
+    }
+    candidates.set(key, existing);
+  };
+
+  for (const record of records) {
+    if (record.kind !== "table" && record.kind !== "image") {
+      continue;
+    }
+    if (
+      record.kind === "table" &&
+      record.containerEnvironment === undefined &&
+      record.environment !== "longtable"
+    ) {
+      // A bare tabular does not step the table counter.  A nearby label refers
+      // to whichever counter happened to be active before it, not to this grid.
+      continue;
+    }
+    if (
+      record.kind === "image" &&
+      countVisualFigureObjects(
+          text,
+          record.replacement.sourceFrom,
+          record.replacement.sourceTo,
+        ) !== 1
+    ) {
+      // The image parser intentionally keeps only one bounded preview card.
+      // A figure containing several images or an image plus a diagram does not
+      // provide enough subfigure ownership information for a correct hover.
+      continue;
+    }
+    const key = record.label?.key.trim() ?? "";
+    if (key.length > 0) {
+      append(key, {
+        targetKind: record.kind,
+        record,
+      });
+    }
+  }
+
+  const diagrams = records.filter(
+    (record): record is VisualTikzcdRecord | VisualTikzpictureRecord =>
+      record.kind === "tikzcd" || record.kind === "tikzpicture",
+  );
+  if (diagrams.length > 0) {
+    for (const range of findVisualFigureRanges(text)) {
+      const labels = findVisualLabelsInRange(text, range.bodyFrom, range.bodyTo);
+      const contained = diagrams.filter((record) =>
+        record.replacement.sourceFrom >= range.bodyFrom &&
+        record.replacement.sourceTo <= range.bodyTo
+      );
+      const only = contained.length === 1 ? contained[0] : undefined;
+      if (labels.length === 1 && only !== undefined &&
+        countVisualFigureObjects(text, range.bodyFrom, only.replacement.sourceFrom) === 0 &&
+        countVisualFigureObjects(text, only.replacement.sourceTo, range.bodyTo) === 0) {
+        append(labels[0]!.key, {
+          targetKind: "diagram",
+          record: contained[0]!,
+        });
+      }
+    }
+  }
+
+  const resolved = new Map<string, VisualLabeledStructureTarget>();
+  for (const [key, matches] of candidates) {
+    if (matches.length === 1) {
+      resolved.set(key, matches[0]!);
+    }
+  }
+  return resolved;
+}
+
+interface VisualFigureRange {
+  readonly bodyFrom: number;
+  readonly bodyTo: number;
+}
+
+function findVisualFigureRanges(text: string): readonly VisualFigureRange[] {
+  const ranges: VisualFigureRange[] = [];
+  let index = 0;
+  while (index < text.length && ranges.length < 128) {
+    const character = text[index];
+    if (character === "%" && !isEscapedAt(text, index)) {
+      index = skipComment(text, index);
+      continue;
+    }
+    if (character !== "\\") {
+      index += 1;
+      continue;
+    }
+    const control = readControl(text, index);
+    if (control?.name !== "begin") {
+      index = Math.max(index + 1, control?.end ?? index + 1);
+      continue;
+    }
+    const argument = readRequiredArgument(text, control.end);
+    if (argument === undefined) {
+      index = control.end;
+      continue;
+    }
+    const environment = text.slice(argument.contentFrom, argument.contentTo).trim();
+    if (environment !== "figure" && environment !== "figure*") {
+      index = argument.end;
+      continue;
+    }
+    const bounds = findEnvironmentBounds(text, argument.end, environment);
+    if (bounds === undefined) {
+      index = argument.end;
+      continue;
+    }
+    ranges.push({ bodyFrom: argument.end, bodyTo: bounds.endFrom });
+    index = bounds.endTo;
+  }
+  return ranges;
+}
+
+function countVisualFigureObjects(
+  text: string,
+  requestedFrom: number,
+  requestedTo: number,
+): number {
+  const from = Math.max(0, Math.min(text.length, requestedFrom));
+  const to = Math.max(from, Math.min(text.length, requestedTo));
+  let count = 0;
+  let index = from;
+  while (index < to && count <= 1) {
+    const character = text[index];
+    if (character === "%" && !isEscapedAt(text, index)) {
+      index = skipComment(text, index);
+      continue;
+    }
+    if (character !== "\\") {
+      index += 1;
+      continue;
+    }
+    const control = readControl(text, index);
+    if (control === undefined) {
+      index += 1;
+      continue;
+    }
+    if (control.name === "verb" || control.name === "verb*") {
+      index = skipVerb(text, control.end);
+      continue;
+    }
+    if (control.name === "includegraphics") {
+      count += 1;
+      index = control.end;
+      continue;
+    }
+    if (control.name === "begin") {
+      const argument = readRequiredArgument(text, control.end);
+      if (argument !== undefined) {
+        const environment = text.slice(argument.contentFrom, argument.contentTo).trim();
+        if (environment === "tikzcd" || environment === "tikzpicture") {
+          count += 1;
+        }
+        index = argument.end;
+        continue;
+      }
+    }
+    index = Math.max(index + 1, control.end);
+  }
+  return count;
 }
 
 function visualHeadingLabelGapIsIgnorable(
@@ -2148,7 +3043,8 @@ const VISUAL_LABEL_CONDITIONAL_PRIMITIVES = new Set([
 ]);
 
 function isVisualLabelConditionalControl(name: string): boolean {
-  return VISUAL_LABEL_CONDITIONAL_PRIMITIVES.has(name) || /^if[A-Za-z@]+$/u.test(name);
+  return name !== "iff" &&
+    (VISUAL_LABEL_CONDITIONAL_PRIMITIVES.has(name) || /^if[A-Za-z@]+$/u.test(name));
 }
 
 function skipVisualNewIfDeclaration(
@@ -2253,43 +3149,128 @@ function skipLiteralFalseConditional(text: string, requestedOffset: number, limi
   return limit;
 }
 
+/** One parser for body chips and references inside folded source ranges. */
+function parseVisualInlineReference(
+  text: string,
+  from: number,
+  control: ParsedControl,
+): VisualCitationRecord | VisualReferenceRecord | undefined {
+  const citation = CITATION_COMMANDS.has(control.name);
+  if (!citation && !REFERENCE_COMMANDS.has(control.name)) return undefined;
+  let cursor = text[control.end] === "*" ? control.end + 1 : control.end;
+  const optionalArguments: string[] = [];
+  if (citation) {
+    for (let count = 0; count < 2; count += 1) {
+      const optional = readOptionalArgument(text, cursor);
+      if (optional === undefined) break;
+      optionalArguments.push(latexToPlainText(text.slice(optional.contentFrom, optional.contentTo))
+        .slice(0, MAX_VISUAL_LABEL_KEY_LENGTH));
+      cursor = optional.end;
+    }
+  }
+  const argument = readRequiredArgument(text, cursor);
+  if (argument === undefined) return undefined;
+  const keys = text.slice(argument.contentFrom, argument.contentTo).split(",")
+    .map(key => key.trim()).filter(key => key.length > 0 && (citation || key.length <= MAX_VISUAL_LABEL_KEY_LENGTH)).slice(0, 64);
+  return citation ? {
+    kind: "citation", from, to: argument.end, command: control.name, keys,
+    optionalArguments, label: citationFallbackLabel(control.name, keys), previews: [],
+  } : {
+    kind: "reference", from, to: argument.end, command: control.name, keys,
+    label: referenceFallbackLabel(control.name, keys),
+  };
+}
+
+function mapVisualRecordInlineSegments(
+  record: VisualStructureRecord,
+  map: (segments: readonly VisualInlineContentSegment[]) => readonly VisualInlineContentSegment[],
+): VisualStructureRecord {
+  const source = (value: VisualSourceText | undefined): VisualSourceText | undefined =>
+    value?.segments === undefined ? value : { ...value, segments: map(value.segments) };
+  if (record.kind === "image" && record.captionSegments !== undefined) {
+    return { ...record, captionSegments: map(record.captionSegments) };
+  }
+  if (record.kind === "theorem" && record.optionalTitleSegments !== undefined) {
+    return { ...record, optionalTitleSegments: map(record.optionalTitleSegments) };
+  }
+  if (record.kind === "table") {
+    return { ...record, captionSegments: map(record.captionSegments),
+      rows: record.rows.map(row => row.map(cell => ({ ...cell, segments: map(cell.segments) }))) };
+  }
+  if (record.kind === "maketitle") {
+    return { ...record, title: source(record.title), date: source(record.date),
+      authors: record.authors.map(value => source(value)!), affiliations: record.affiliations.map(value => source(value)!),
+      emails: record.emails.map(value => source(value)!),
+      ...(record.frontMatter === undefined ? {} : { frontMatter: { ...record.frontMatter,
+        sections: record.frontMatter.sections.map(section => ({ ...section, source: source(section.source)! })) } }),
+    };
+  }
+  return record;
+}
+
+/** Physical-source references, including those rendered inside folded widgets. */
+export function visualInlineReferenceRecords(
+  structure: Pick<VisualDocumentStructure, "records">,
+): readonly (VisualCitationRecord | VisualReferenceRecord)[] {
+  const references = new Map<string, VisualCitationRecord | VisualReferenceRecord>();
+  const add = (record: VisualCitationRecord | VisualReferenceRecord): void => {
+    references.set(`${record.kind}:${record.from}:${record.to}`, record);
+  };
+  for (const record of structure.records) {
+    if (record.kind === "citation" || record.kind === "reference") add(record);
+    mapVisualRecordInlineSegments(record, segments => {
+      for (const segment of segments) {
+        if (segment.kind === "citation") add(segment.citation);
+        else if (segment.kind === "reference") add(segment.reference);
+      }
+      return segments;
+    });
+  }
+  return [...references.values()].sort((left, right) => left.from - right.from || left.to - right.to);
+}
+
 /** Attach serializable .bib metadata to citation chips and bibliography cards. */
 export function resolveVisualBibliography(
   structure: VisualDocumentStructure,
   entries: readonly BibTeXEntry[],
   sourceName = "reference.bib",
 ): VisualDocumentStructure {
-  const byKey = new Map(entries.map((entry) => [entry.key, entry]));
+  const manualByKey = new Map<string, VisualBibliographyEntry | undefined>();
+  for (const record of structure.records) {
+    if (record.kind !== "bibliography" || !record.manual) continue;
+    for (const entry of record.entries) {
+      // Duplicate manual keys are ambiguous; do not fall back to another source.
+      manualByKey.set(entry.key, manualByKey.has(entry.key) ? undefined : entry);
+    }
+  }
+  const byKey = new Map(entries.filter((entry) => !manualByKey.has(entry.key)).map((entry) => [entry.key, entry]));
   const normalizedSourceName = sourceName.trim() || "reference.bib";
   const previewEntries = entries
     .slice(0, MAX_BIBLIOGRAPHY_PREVIEW_ENTRIES)
     .map(toVisualBibliographyEntry);
+  const resolveCitation = (record: VisualCitationRecord): VisualCitationRecord => ({
+    ...record,
+    label: resolvedCitationLabel(record.command, record.keys, byKey),
+    previews: record.keys.flatMap((key) => {
+      if (manualByKey.has(key)) {
+        const manual = manualByKey.get(key);
+        return manual === undefined ? [] : [{ ...manual, source: "thebibliography · 已收录" }];
+      }
+      const entry = byKey.get(key);
+      return entry === undefined ? [] : [{
+        ...toVisualBibliographyEntry(entry), source: `${normalizedSourceName} · 已收录`,
+      }];
+    }),
+  });
   return {
     ...structure,
     records: structure.records.map((record) => {
-      if (record.kind === "citation") {
-        return {
-          ...record,
-          label: resolvedCitationLabel(record.command, record.keys, byKey),
-          previews: record.keys.flatMap((key) => {
-            const entry = byKey.get(key);
-            return entry === undefined
-              ? []
-              : [{
-                  ...toVisualBibliographyEntry(entry),
-                  source: `${normalizedSourceName} · 已收录`,
-                }];
-          }),
-        };
-      }
+      if (record.kind === "citation") return resolveCitation(record);
       if (record.kind === "bibliography" && !record.manual) {
-        return {
-          ...record,
-          entries: previewEntries,
-          totalEntries: entries.length,
-        };
+        return { ...record, entries: previewEntries, totalEntries: entries.length };
       }
-      return record;
+      return mapVisualRecordInlineSegments(record, segments => segments.map(segment =>
+        segment.kind === "citation" ? { ...segment, citation: resolveCitation(segment.citation) } : segment));
     }),
   };
 }
@@ -2340,11 +3321,55 @@ function visualHeadingNumberingRootLevel(text: string): number {
     : HEADING_LEVELS.section;
 }
 
+/**
+ * Number a project-wide heading stream after include expansion has established
+ * its execution order. Starred headings retain their position in the returned
+ * array but do not advance or reset any structural counter.
+ */
+export function numberVisualHeadingSequence(
+  headings: readonly (Pick<VisualHeadingRecord, "command" | "starred"> & { readonly appendixStart?: boolean })[],
+  numberingRoot: "chapter" | "section",
+): readonly (string | undefined)[] {
+  const counters = new Map<VisualHeadingLevel, number>();
+  const currentNumbers = new Map<string, string>();
+  const numberingRootLevel = HEADING_LEVELS[numberingRoot];
+  let appendix = false;
+  return headings.map((heading) => {
+    if (heading.appendixStart) {
+      appendix = true;
+      resetVisualHeadingCounters(counters, currentNumbers, numberingRootLevel);
+    }
+    return heading.starred
+      ? undefined
+      : nextVisualHeadingNumber(
+          heading.command,
+          numberingRootLevel,
+          counters,
+          currentNumbers,
+          appendix,
+        );
+  });
+}
+
+function resetVisualHeadingCounters(
+  counters: Map<VisualHeadingLevel, number>,
+  currentNumbers: Map<string, string>,
+  rootLevel: number,
+): void {
+  for (const command of HEADING_COMMANDS_BY_LEVEL) {
+    if (HEADING_LEVELS[command] >= rootLevel) {
+      counters.delete(command);
+      currentNumbers.delete(command);
+    }
+  }
+}
+
 function nextVisualHeadingNumber(
   command: VisualHeadingLevel,
   numberingRootLevel: number,
   counters: Map<VisualHeadingLevel, number>,
   currentNumbers: Map<string, string>,
+  appendix = false,
 ): string {
   const level = HEADING_LEVELS[command];
   counters.set(command, (counters.get(command) ?? 0) + 1);
@@ -2358,7 +3383,9 @@ function nextVisualHeadingNumber(
     ? romanOrdinal(counters.get(command) ?? 1)
     : HEADING_COMMANDS_BY_LEVEL
         .slice(Math.min(level, numberingRootLevel), level + 1)
-        .map((name) => String(counters.get(name) ?? 0))
+        .map((name) => appendix && HEADING_LEVELS[name] === numberingRootLevel
+          ? (counters.get(name) ?? 0) > 0 ? alphabeticOrdinal(counters.get(name)!, true) : ""
+          : String(counters.get(name) ?? 0))
         .join(".");
   currentNumbers.set(command, number);
   return number;
@@ -2577,6 +3604,32 @@ function romanOrdinal(value: number): string {
   return result;
 }
 
+function parseTrivlistStatement(
+  text: string,
+  offset: number,
+): { readonly environment: string; readonly definition: TheoremDefinition } | undefined {
+  const name = readRequiredArgument(text, offset);
+  const count = name === undefined ? undefined : readOptionalArgument(text, name.end);
+  const heading = count === undefined ? undefined : readOptionalArgument(text, count.end);
+  const begin = heading === undefined ? undefined : readRequiredArgument(text, heading.end);
+  const end = begin === undefined ? undefined : readRequiredArgument(text, begin.end);
+  if (name === undefined || count === undefined || heading === undefined || begin === undefined || end === undefined ||
+    text.slice(count.contentFrom, count.contentTo).trim() !== "1") return undefined;
+  const environment = text.slice(name.contentFrom, name.contentTo).trim();
+  if (!/^[A-Za-z@][A-Za-z0-9@*:-]{0,63}$/u.test(environment)) return undefined;
+  const opening = text.slice(begin.contentFrom, begin.contentTo).trim();
+  const closing = text.slice(end.contentFrom, end.contentTo).trim();
+  // ponytail: recognize literal trivlist headings; retain source for dynamic environment programs.
+  if (!/^\\begin\s*\{trivlist\}\s*\\item\s*\[\s*\\hskip\s*\\labelsep\s*\{\s*\\bfseries\s+#1\s*\}\s*\]\s*(?:\\(?:it|itshape)\s*)?$/u.test(opening) ||
+    !/^\\end\s*\{trivlist\}$/u.test(closing)) return undefined;
+  return { environment, definition: {
+    label: latexToPlainText(text.slice(heading.contentFrom, heading.contentTo)),
+    style: /\\(?:it|itshape)\b/u.test(opening) ? "plain" : "remark",
+    numbered: false,
+    optionalHeading: true,
+  } };
+}
+
 function parseNewTheorem(
   text: string,
   offset: number,
@@ -2625,6 +3678,47 @@ function parseNewTheorem(
     },
     end: within?.end ?? label.end,
   };
+}
+
+function hasExplicitVisualDocumentStart(text: string): boolean {
+  let index = 0;
+  while (index < text.length) {
+    const character = text[index];
+    if (character === "%" && !isEscapedAt(text, index)) {
+      index = skipComment(text, index);
+      continue;
+    }
+    if (character === "$" && !isEscapedAt(text, index)) {
+      index = skipDollarMath(text, index);
+      continue;
+    }
+    if (character !== "\\") {
+      index += 1;
+      continue;
+    }
+    const control = readControl(text, index);
+    if (control === undefined) {
+      index += 1;
+      continue;
+    }
+    if (control.name === "verb" || control.name === "verb*") {
+      index = skipVerb(text, control.end);
+      continue;
+    }
+    if (control.name === "begin") {
+      const environment = readRequiredArgument(text, control.end);
+      if (
+        environment !== undefined &&
+        text.slice(environment.contentFrom, environment.contentTo).trim() === "document"
+      ) {
+        return true;
+      }
+      index = environment?.end ?? control.end;
+      continue;
+    }
+    index = control.end;
+  }
+  return false;
 }
 
 function readControl(text: string, offset: number): ParsedControl | undefined {
@@ -2956,6 +4050,51 @@ function lineAwareReplacement(
   };
 }
 
+/**
+ * A command-style Beamer frame may put its opening command, body and closing
+ * brace on the same physical source line. Block widgets split that line into
+ * separate CodeMirror rows. If the indentation before `\\frame` or the
+ * trailing whitespace after its closing brace is left outside the block
+ * replacement, CodeMirror renders a blank source row beyond the visible slide
+ * header/footer and attaches the frame line rail to it. Consume only those
+ * whitespace-only outer fragments while preserving the body byte-for-byte.
+ */
+function commandFrameBoundaryReplacement(
+  text: string,
+  sourceFrom: number,
+  sourceTo: number,
+  boundary: "begin" | "end",
+): VisualReplacementRange {
+  const replacement = lineAwareReplacement(text, sourceFrom, sourceTo);
+  const lineStart = text.lastIndexOf("\n", Math.max(0, sourceFrom - 1)) + 1;
+  const newline = text.indexOf("\n", sourceTo);
+  const lineEnd = newline < 0 ? text.length : newline;
+
+  if (boundary === "begin") {
+    const prefix = text.slice(lineStart, sourceFrom);
+    const suffix = text.slice(sourceTo, lineEnd);
+    const suffixWithoutComment = suffix.replace(/%[\s\S]*$/u, "");
+    return {
+      ...replacement,
+      from: prefix.trim().length === 0 ? lineStart : replacement.from,
+      to: suffixWithoutComment.trim().length === 0
+        ? newline < 0 ? lineEnd : newline + 1
+        : replacement.to,
+      block: true,
+    };
+  }
+
+  const suffix = text.slice(sourceTo, lineEnd);
+  const suffixWithoutComment = suffix.replace(/%[\s\S]*$/u, "");
+  return {
+    ...replacement,
+    to: suffixWithoutComment.trim().length === 0
+      ? newline < 0 ? lineEnd : newline + 1
+      : replacement.to,
+    block: true,
+  };
+}
+
 function readImmediateLabelsOnLine(
   text: string,
   offset: number,
@@ -3041,7 +4180,17 @@ function parseVisualTransparentEnvironment(
   beginTo: number,
   environment: string,
 ): VisualTextStyleRecord | undefined {
-  const end = findMatchingEnvironmentEnd(text, beginTo, environment);
+  let contentFrom = beginTo;
+  if (environment === "multicols") {
+    const columns = readRequiredArgument(text, beginTo);
+    const count = columns === undefined ? "" : text.slice(columns.contentFrom, columns.contentTo).trim();
+    if (columns === undefined || !/^\d+$/u.test(count) || !Number.isSafeInteger(Number(count)) || Number(count) < 2 ||
+      readOptionalArgument(text, columns.end) !== undefined) {
+      return undefined;
+    }
+    contentFrom = columns.end;
+  }
+  const end = findMatchingEnvironmentEnd(text, contentFrom, environment);
   return end === undefined
     ? undefined
     : transparentVisualTextStyle(
@@ -3049,13 +4198,31 @@ function parseVisualTransparentEnvironment(
         from,
         end.to,
         from,
-        beginTo,
-        beginTo,
+        contentFrom,
+        contentFrom,
         end.from,
         end.from,
         end.to,
         `编辑 ${environment}`,
       );
+}
+
+function staticVisualLayoutCommandEnd(text: string, control: ParsedControl): number | undefined {
+  if (control.name !== "setlength" && control.name !== "setcounter") return undefined;
+  const target = readRequiredArgument(text, control.end);
+  const value = target === undefined ? undefined : readRequiredArgument(text, target.end);
+  if (target === undefined || value === undefined) return undefined;
+  const name = text.slice(target.contentFrom, target.contentTo).trim();
+  const literal = text.slice(value.contentFrom, value.contentTo).trim();
+  if (control.name === "setcounter") {
+    // Page numbers do not change the continuous prose view. Structural and
+    // dynamic counters remain source because they affect visible numbering.
+    return name === "page" && /^[+-]?\d+$/u.test(literal) && Number.isSafeInteger(Number(literal))
+      ? value.end : undefined;
+  }
+  return /^\\(?:itemsep|parsep|topsep|partopsep|parskip|parindent|columnsep)$/u.test(name) &&
+      /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*(?:pt|pc|in|bp|cm|mm|dd|cc|sp|em|ex)$/u.test(literal)
+    ? value.end : undefined;
 }
 
 function parseVisualTransparentSizeDeclaration(
@@ -3100,27 +4267,29 @@ function parseVisualTextStyle(
   from: number,
   control: ParsedControl,
 ): VisualTextStyleRecord | undefined {
-  if (control.name === "texorpdfstring") {
-    const visual = readRequiredArgument(text, control.end);
-    const fallback = visual === undefined
+  if (control.name === "texorpdfstring" || control.name === "href") {
+    const optional = control.name === "href" ? readOptionalArgument(text, control.end) : undefined;
+    const first = readRequiredArgument(text, optional?.end ?? control.end);
+    const second = first === undefined
       ? undefined
-      : readRequiredArgument(text, visual.end);
-    if (visual === undefined || fallback === undefined) {
+      : readRequiredArgument(text, first.end);
+    if (first === undefined || second === undefined) {
       return undefined;
     }
+    const visual = control.name === "href" ? second : first;
     return {
       kind: "textStyle",
       command: control.name,
       from,
-      to: fallback.end,
+      to: second.end,
       prefixFrom: from,
       prefixTo: visual.contentFrom,
       contentFrom: visual.contentFrom,
       contentTo: visual.contentTo,
-      // Hide the first closing brace together with the complete PDF-string
-      // fallback. The visible TeX branch remains normal editable content.
+      // Only the visible argument participates in prose scanning: PDF-string
+      // alternatives and hyperlink destinations are metadata, not body text.
       suffixFrom: visual.contentTo,
-      suffixTo: fallback.end,
+      suffixTo: second.end,
       bold: false,
       italic: false,
       underline: false,
@@ -3141,13 +4310,16 @@ function parseVisualTextStyle(
     ["emph", { bold: false, italic: true, underline: false, strike: false, smallCaps: false }],
     ["underline", { bold: false, italic: false, underline: true, strike: false, smallCaps: false }],
     ["uline", { bold: false, italic: false, underline: true, strike: false, smallCaps: false }],
+    ["ul", { bold: false, italic: false, underline: true, strike: false, smallCaps: false }],
     ["sout", { bold: false, italic: false, underline: false, strike: true, smallCaps: false }],
     ["st", { bold: false, italic: false, underline: false, strike: true, smallCaps: false }],
     ["textsc", { bold: false, italic: false, underline: false, strike: false, smallCaps: true }],
   ]);
-  const simpleStyle = simple.get(control.name);
+  const simpleStyle = simple.get(control.name) ?? (["text", "textrm", "textsf", "texttt", "textnormal", "footnote"].includes(control.name)
+    ? { bold: false, italic: false, underline: false, strike: false, smallCaps: false } : undefined);
   if (simpleStyle !== undefined) {
-    const content = readRequiredArgument(text, control.end);
+    const optional = control.name === "footnote" ? readOptionalArgument(text, control.end) : undefined;
+    const content = readRequiredArgument(text, optional?.end ?? control.end);
     return content === undefined
       ? undefined
       : {
@@ -3353,13 +4525,8 @@ function parseVisualTableEnvironment(
     ? longtablePreviewBody(bodySource)
     : undefined;
   const editableBodySource = longtableBody?.rowsSource ?? bodySource;
-  const parsedRows = parseTabularRows(
-    editableBodySource,
-    longtableBody === undefined ? bodyFrom : 0,
-  );
-  const rows = longtableBody === undefined
-    ? parsedRows.rows
-    : reanchorVisualTableRows(parsedRows.rows, bodySource, bodyFrom);
+  const parsedRows = parseTabularRows(editableBodySource, bodyFrom);
+  const rows = parsedRows.rows;
   if (parsedRows.rows.length === 0) {
     return undefined;
   }
@@ -3779,6 +4946,10 @@ function parseVisualImageEnvironment(
   if (bounds === undefined) {
     return undefined;
   }
+  // A single image cannot represent a composite figure or a TikZ composition.
+  if (countVisualFigureObjects(text, commandEnd, bounds.endFrom) !== 1) {
+    return undefined;
+  }
   const graphics = findIncludeGraphics(text, commandEnd, bounds.endFrom);
   if (graphics === undefined) {
     return undefined;
@@ -3797,6 +4968,8 @@ function parseVisualImageEnvironment(
       : latexToPlainText(
           text.slice(caption.contentFrom, caption.contentTo),
         ),
+    captionSegments: caption === undefined ? []
+      : visualInlineContentSegments(text.slice(caption.contentFrom, caption.contentTo), caption.contentFrom),
     label: findLabelRecord(text, commandEnd, bounds.endFrom),
     previewUri: undefined,
   };
@@ -4069,7 +5242,9 @@ function longtablePreviewBody(source: string): {
       source.slice(dataFrom),
     );
     return {
-      rowsSource: [header, data].filter((part) => part.trim().length > 0).join("\n"),
+      // Mask discarded slices without moving physical source offsets. Repeated
+      // headers and body cells may contain identical text and citation keys.
+      rowsSource: header + maskSourceMatch(source.slice(firstHead, dataFrom)) + data,
       repeatHeader: true,
     };
   }
@@ -4097,11 +5272,10 @@ function stripLongtableMetadata(source: string): string {
   }
   let result = source;
   for (const removal of removals.sort((left, right) => right.from - left.from)) {
-    result = `${result.slice(0, removal.from)}${result.slice(removal.to)}`;
+    result = `${result.slice(0, removal.from)}${maskSourceMatch(result.slice(removal.from, removal.to))}${result.slice(removal.to)}`;
   }
   return result
-    .replace(/^\s*\\\\(?:\s*\[[^\]]{0,200}\])?/u, "")
-    .trim();
+    .replace(/^\s*\\\\(?:\s*\[[^\]]{0,200}\])?/u, maskSourceMatch);
 }
 
 interface AbsoluteSourceSlice {
@@ -4305,46 +5479,6 @@ function maskSourceMatch(match: string): string {
   return " ".repeat(match.length);
 }
 
-/**
- * longtable preview rows are assembled from non-contiguous header/data slices.
- * Re-find each exact retained cell monotonically in the physical body so math
- * anchors still point at the real document rather than the assembled preview.
- */
-function reanchorVisualTableRows(
-  rows: readonly (readonly VisualTableCell[])[],
-  bodySource: string,
-  bodyFrom: number,
-): readonly (readonly VisualTableCell[])[] {
-  let cursor = 0;
-  return rows.map((row) => row.map((cell) => {
-    let found = bodySource.indexOf(cell.source, cursor);
-    if (found < 0) {
-      found = bodySource.indexOf(cell.source);
-    }
-    if (found < 0) {
-      found = 0;
-    }
-    cursor = Math.min(bodySource.length, found + Math.max(1, cell.source.length));
-    const delta = bodyFrom + found - cell.sourceFrom;
-    const shiftMath = (math: VisualMathFragment): VisualMathFragment => ({
-      ...math,
-      sourceFrom: math.sourceFrom + delta,
-      sourceTo: math.sourceTo + delta,
-    });
-    return {
-      ...cell,
-      sourceFrom: cell.sourceFrom + delta,
-      sourceTo: cell.sourceTo + delta,
-      math: cell.math === undefined ? undefined : shiftMath(cell.math),
-      segments: cell.segments.map((segment) =>
-        segment.kind === "text"
-          ? segment
-          : { ...segment, math: shiftMath(segment.math) }
-      ),
-    };
-  }));
-}
-
 function latexTableCell(value: AbsoluteSourceSlice): VisualTableCell {
   const trimmed = trimmedAbsoluteSourceSlice(
     value.source,
@@ -4390,6 +5524,9 @@ function visualInlineContentSegments(
 ): readonly VisualInlineContentSegment[] {
   const ranges = explicitMathContentRanges(source);
   if (ranges.length === 0) {
+    const inline: VisualInlineContentSegment[] = [];
+    appendVisualTextSegment(inline, source, sourceFrom);
+    if (inline.some(segment => segment.kind === "citation" || segment.kind === "reference")) return inline;
     const math = tableCellMathSource(source);
     return math === undefined
       ? [{ kind: "text", text: latexToPlainText(source) }]
@@ -4398,7 +5535,7 @@ function visualInlineContentSegments(
   const segments: VisualInlineContentSegment[] = [];
   let offset = 0;
   for (const range of ranges) {
-    appendVisualTextSegment(segments, source.slice(offset, range.from));
+    appendVisualTextSegment(segments, source.slice(offset, range.from), sourceFrom + offset);
     const mathSource = source.slice(range.innerFrom, range.innerTo).trim();
     if (mathSource.length > 0) {
       segments.push({
@@ -4411,11 +5548,66 @@ function visualInlineContentSegments(
     }
     offset = range.to;
   }
-  appendVisualTextSegment(segments, source.slice(offset));
+  appendVisualTextSegment(segments, source.slice(offset), sourceFrom + offset);
   return segments;
 }
 
 function appendVisualTextSegment(
+  segments: VisualInlineContentSegment[],
+  source: string,
+  sourceFrom: number,
+): void {
+  let plainFrom = 0;
+  let index = 0;
+  while (index < source.length) {
+    if (source[index] === "%" && !isEscapedAt(source, index)) {
+      index = skipComment(source, index);
+      continue;
+    }
+    if (source[index] !== "\\") { index += 1; continue; }
+    const control = readControl(source, index);
+    if (control === undefined) { index += 1; continue; }
+    if (control.name === "verb" || control.name === "verb*") {
+      index = skipVerb(source, control.end); continue;
+    }
+    if (control.name === "newif") {
+      index = skipVisualNewIfDeclaration(source, control.end, source.length) ?? control.end; continue;
+    }
+    const conditionalArguments = visualFunctionalConditionalArgumentCount(control.name);
+    if (conditionalArguments !== undefined) {
+      index = skipVisualFunctionalConditional(source, control.end, source.length, conditionalArguments) ?? source.length;
+      continue;
+    }
+    if (isVisualLabelConditionalControl(control.name)) {
+      index = skipLiteralFalseConditional(source, control.end, source.length); continue;
+    }
+    if (isVisualLabelDefinitionCommand(control.name)) {
+      index = skipVisualLabelDefinition(source, control, source.length) ?? control.end; continue;
+    }
+    if (control.name === "begin") {
+      const environment = readRequiredArgument(source, control.end);
+      if (environment !== undefined && VERBATIM_ENVIRONMENTS.has(source.slice(environment.contentFrom, environment.contentTo))) {
+        index = skipOpaqueEnvironment(source, environment.end, source.slice(environment.contentFrom, environment.contentTo));
+        continue;
+      }
+    }
+    const record = parseVisualInlineReference(source, index, control);
+    if (record !== undefined && record.keys.length > 0) {
+      appendPlainTextSegment(segments, source.slice(plainFrom, index));
+      const range = { from: sourceFrom + record.from, to: sourceFrom + record.to };
+      segments.push(record.kind === "citation"
+        ? { kind: "citation", citation: { ...record, ...range } }
+        : { kind: "reference", reference: { ...record, ...range } });
+      plainFrom = record.to;
+      index = record.to;
+      continue;
+    }
+    index = record?.to ?? control.end;
+  }
+  appendPlainTextSegment(segments, source.slice(plainFrom));
+}
+
+function appendPlainTextSegment(
   segments: VisualInlineContentSegment[],
   source: string,
 ): void {
@@ -4538,7 +5730,29 @@ function unwrapMathDelimiters(source: string): string {
 
 function findOpenEnvironment(stack: readonly OpenEnvironment[], environment: string): number {
   for (let index = stack.length - 1; index >= 0; index -= 1) {
-    if (stack[index]?.environment === environment) {
+    const open = stack[index];
+    if (
+      open?.environment === environment &&
+      !(open.kind === "frame" && open.syntax === "command")
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function findClosingCommandFrame(
+  stack: readonly OpenEnvironment[],
+  offset: number,
+): number {
+  for (let index = stack.length - 1; index >= 0; index -= 1) {
+    const open = stack[index];
+    if (
+      open?.kind === "frame" &&
+      open.syntax === "command" &&
+      open.commandBodyTo !== undefined &&
+      offset >= open.commandBodyTo
+    ) {
       return index;
     }
   }
@@ -4579,6 +5793,24 @@ function findLastOpenFrame(
   return undefined;
 }
 
+function visualTableOfContentsScope(
+  options: string,
+): VisualTableOfContentsRecord["scope"] {
+  const names = new Set(
+    options
+      .split(",")
+      .map((option) => option.trim().split("=", 1)[0]?.toLowerCase())
+      .filter((option): option is string => option !== undefined && option.length > 0),
+  );
+  if (names.has("currentsubsection")) {
+    return "currentSubsection";
+  }
+  if (names.has("currentsection")) {
+    return "currentSection";
+  }
+  return "all";
+}
+
 function findLastManualBibliography(
   stack: readonly OpenEnvironment[],
 ): OpenManualBibliography | undefined {
@@ -4596,7 +5828,7 @@ function manualBibliographyEntries(
   open: OpenManualBibliography,
   end: number,
 ): readonly VisualBibliographyEntry[] {
-  return open.items.slice(0, MAX_BIBLIOGRAPHY_PREVIEW_ENTRIES).map((item, index) => {
+  return open.items.map((item, index) => {
     const next = open.items[index + 1];
     const contentTo = next?.commandFrom ?? end;
     const plain = latexToPlainText(text.slice(item.contentFrom, contentTo));
@@ -4613,39 +5845,108 @@ function manualBibliographyEntries(
   });
 }
 
-function splitAuthors(text: string, argument: ParsedArgument): readonly VisualSourceText[] {
-  const raw = stripTitleMetadataMarkers(
-    text.slice(argument.contentFrom, argument.contentTo),
-  );
-  const pieces = raw
-    .split(/\\\\|\\and\b/gu)
-    .map((piece) => latexToPlainText(piece))
-    .filter((piece) => piece.length > 0);
-  return (pieces.length > 0 ? pieces : [latexToPlainText(raw)]).map((author) => ({
-    from: argument.contentFrom,
-    to: argument.contentTo,
-    text: author,
-  }));
-}
-
 function splitTitleMetadata(
   text: string,
   argument: ParsedArgument,
+  inheritedMarkers: readonly string[] = [],
 ): readonly VisualSourceText[] {
-  const raw = stripTitleMetadataMarkers(
-    text.slice(argument.contentFrom, argument.contentTo),
-  );
-  const pieces = raw
-    .split(/\\\\|\\and\b/gu)
-    .map((piece) => latexToPlainText(piece))
-    .filter((piece) => piece.length > 0);
-  return (pieces.length > 0 ? pieces : [latexToPlainText(raw)])
-    .filter((value) => value.length > 0)
-    .map((value) => ({
-      from: argument.contentFrom,
-      to: argument.contentTo,
+  const raw = text.slice(argument.contentFrom, argument.contentTo);
+  const ranges: { readonly from: number; readonly to: number }[] = [];
+  let segmentFrom = 0;
+  let depth = 0;
+  let index = 0;
+  while (index < raw.length) {
+    const character = raw[index];
+    if (character === "\\") {
+      const control = readControl(raw, index);
+      if (control === undefined) {
+        index += 1;
+        continue;
+      }
+      if (depth === 0 && (control.name === "\\" || control.name === "and")) {
+        ranges.push({ from: segmentFrom, to: index });
+        const optional = control.name === "\\"
+          ? readOptionalArgument(raw, control.end)
+          : undefined;
+        segmentFrom = optional?.end ?? control.end;
+        index = segmentFrom;
+        continue;
+      }
+      index = control.end;
+      continue;
+    }
+    if (character === "{" && !isEscapedAt(raw, index)) {
+      depth += 1;
+    } else if (character === "}" && !isEscapedAt(raw, index) && depth > 0) {
+      depth -= 1;
+    }
+    index += 1;
+  }
+  ranges.push({ from: segmentFrom, to: raw.length });
+
+  const pieces: VisualSourceText[] = [];
+  for (const range of ranges) {
+    let from = range.from;
+    let to = range.to;
+    while (from < to && /\s/u.test(raw[from] ?? "")) {
+      from += 1;
+    }
+    while (to > from && /\s/u.test(raw[to - 1] ?? "")) {
+      to -= 1;
+    }
+    if (from >= to) {
+      continue;
+    }
+    const value = latexToPlainText(stripTitleMetadataMarkers(raw.slice(from, to)));
+    if (value.length === 0) {
+      continue;
+    }
+    pieces.push({
+      from: argument.contentFrom + from,
+      to: argument.contentFrom + to,
       text: value,
-    }));
+      ...(explicitMathContentRanges(raw.slice(from, to)).length === 0 ? {} : { segments: visualInlineContentSegments(raw.slice(from, to), argument.contentFrom + from) }),
+      ...titleSourceMarkers(raw.slice(from, to), inheritedMarkers),
+    });
+  }
+  if (pieces.length > 0) {
+    return pieces;
+  }
+  const fallback = latexToPlainText(stripTitleMetadataMarkers(raw));
+  return fallback.length === 0
+    ? []
+    : [{
+        from: argument.contentFrom,
+        to: argument.contentTo,
+        text: fallback,
+        ...titleSourceMarkers(raw, inheritedMarkers),
+      }];
+}
+
+function titleMarkerIds(value: string): readonly string[] {
+  return uniqueStrings(value.split(",").map(marker => marker.trim()).filter(marker => /^[\p{L}\p{N}*†‡_-]+$/u.test(marker)));
+}
+
+function titleSourceMarkers(value: string, inherited: readonly string[]): { readonly markers?: readonly string[] } {
+  const markers = [...inherited];
+  let index = 0;
+  while (index < value.length) {
+    if (value[index] === "%" && !isEscapedAt(value, index)) {
+      index = skipComment(value, index);
+      continue;
+    }
+    const control = value[index] === "\\" ? readControl(value, index) : undefined;
+    if (control?.name === "inst") {
+      const argument = readRequiredArgument(value, control.end);
+      if (argument !== undefined) {
+        markers.push(...titleMarkerIds(value.slice(argument.contentFrom, argument.contentTo)));
+        index = argument.end;
+        continue;
+      }
+    }
+    index = control?.end ?? index + 1;
+  }
+  return markers.length === 0 ? {} : { markers: uniqueStrings(markers) };
 }
 
 const HIDDEN_TITLE_METADATA_COMMANDS = new Set([
@@ -4933,7 +6234,10 @@ function resolvedCitationLabel(
     const [author = "", year = ""] = labels[0]?.split(/,\s*/u) ?? [];
     return year.length > 0 ? `${author} (${year})` : labels[0] ?? keys[0] ?? "";
   }
-  return `(${labels.join("; ")})`;
+  // Keep the resolved author/year presentation aligned with the unresolved
+  // fallback (`[citation-key]`): non-textual literature citations use square
+  // brackets even after bibliography metadata becomes available.
+  return `[${labels.join("; ")}]`;
 }
 
 function citationAuthor(value: string): string {
@@ -5112,6 +6416,27 @@ function latexToPlainText(value: string): string {
       index = accent.to;
       continue;
     }
+    if (control.name === "hspace" || control.name === "vspace") {
+      const spacing = readRequiredArgument(value, value[control.end] === "*" ? control.end + 1 : control.end);
+      if (spacing !== undefined) {
+        result += " ";
+        index = spacing.end;
+        continue;
+      }
+    }
+    if (control.name === "bibinfo" || control.name === "bibfield" || control.name === "href") {
+      const metadata = readRequiredArgument(value, control.end);
+      const visible = metadata === undefined ? undefined : readRequiredArgument(value, metadata.end);
+      if (visible !== undefined) {
+        result += latexToPlainText(value.slice(visible.contentFrom, visible.contentTo));
+        index = visible.end;
+        continue;
+      }
+    }
+    if (control.name === "BibitemShut") {
+      index = readRequiredArgument(value, control.end)?.end ?? control.end;
+      continue;
+    }
     if (control.name === "texorpdfstring") {
       const visual = readRequiredArgument(value, control.end);
       const fallback = visual === undefined
@@ -5148,6 +6473,7 @@ function structureRecordStart(record: VisualStructureRecord): number {
     case "accent":
       return record.from;
     case "maketitle":
+    case "tableOfContents":
     case "keywords":
     case "table":
     case "tikzcd":
@@ -5155,6 +6481,7 @@ function structureRecordStart(record: VisualStructureRecord): number {
     case "image":
     case "bibliography":
     case "documentEnd":
+    case "comment":
       return record.replacement.from;
     case "theorem":
     case "frame":

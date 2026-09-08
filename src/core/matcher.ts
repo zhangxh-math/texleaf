@@ -119,7 +119,10 @@ function matchesMode(options: ParsedSnippetOptions, context: LatexContext): bool
   );
 }
 
-function matchesActivation(snippet: CompiledSnippet, request: SnippetMatchRequest): boolean {
+function matchesActivation(
+  snippet: CompiledSnippet,
+  request: Pick<SnippetMatchRequest, 'activation' | 'visualText'>,
+): boolean {
   const activation = request.activation ?? 'manual';
   if (activation === 'auto') {
     return snippet.options.automatic && !snippet.options.visual;
@@ -319,6 +322,55 @@ export class SnippetMatcher {
       });
     }
     return matches;
+  }
+
+  /**
+   * Cheap context-free suffix probe used by optimistic editor mirrors.
+   * Expensive LaTeX context scanning is only necessary when at least one
+   * enabled snippet actually matches the newly typed suffix.
+   */
+  public hasTriggerCandidate(request: {
+    readonly textBefore: string;
+    readonly textAfter?: string;
+    readonly activation?: SnippetMatchRequest['activation'];
+    readonly visualText?: string;
+  }): boolean {
+    const finalCharacter = request.textBefore.slice(-1);
+    const literalCandidates = this.literalsByLastCharacter.get(finalCharacter) ?? [];
+    const candidates = [...literalCandidates, ...this.regexSnippets].sort(compareSnippets);
+    for (const snippet of candidates) {
+      if (snippet.disabled || !matchesActivation(snippet, request)) {
+        continue;
+      }
+      const trigger = snippet.triggerKind === 'literal'
+        ? matchLiteral(snippet, request.textBefore)
+        : matchRegex(snippet, request.textBefore, this.maxRegexInputLength);
+      if (
+        trigger !== undefined &&
+        !isUnsafeTexControlWordSuffix(request.textBefore, trigger) &&
+        hasRequiredWordBoundary(
+          snippet,
+          {
+            ...request,
+            context: {
+              mathMode: 'text',
+              inComment: false,
+              inVerbatim: false,
+              inTextCommandArgument: false,
+              inSnippetSuppressedArgument: false,
+              snippetSuppressionCommand: undefined,
+              environments: [],
+              matrixEnvironment: undefined,
+            },
+          },
+          trigger.startOffset,
+          this.wordDelimiters,
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   public match(request: SnippetMatchRequest): SnippetMatch | undefined {
