@@ -8,7 +8,7 @@ import ts from "typescript";
 const provider = readFileSync(
   join(process.cwd(), "src", "visualEditorProvider.ts"),
   "utf8",
-);
+).replace(/\r\n/gu, "\n");
 
 function sourceSection(startMarker: string, endMarker: string): string {
   const start = provider.indexOf(startMarker);
