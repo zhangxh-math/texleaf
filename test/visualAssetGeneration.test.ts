@@ -10,7 +10,7 @@ import { createLocalLatexPreviewDocument, localLatexPreviewKind } from "../src/c
 import { scanVisualDocumentStructure, visualInlineReferenceRecords, mapVisualRecordInlineSegments } from "../src/core/visualStructure";
 
 // Exercise the provider's real deferred local-TeX lane without loading VS Code.
-const provider = readFileSync("src/visualEditorProvider.ts", "utf8");
+const provider = readFileSync("src/visualEditorProvider.ts", "utf8").replace(/\r\n/gu, "\n");
 const start = provider.indexOf("          if (this.renderer.usesLocalTeX(input)) {");
 const end = provider.indexOf("          try {\n            const result = await this.renderer.render(", start);
 assert.ok(start >= 0 && end > start);
