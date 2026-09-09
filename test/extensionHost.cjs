@@ -2355,6 +2355,10 @@ async function run() {
     );
     const nestedFractionStart =
       cascadedNestedFractionExpected.indexOf("\\frac");
+    await waitFor(
+      () => document.offsetAt(editor.selection.active) === nestedFractionStart + "\\frac{".length,
+      "the nested fraction's numerator tabstop selection",
+    );
     assert.equal(
       document.offsetAt(editor.selection.active),
       nestedFractionStart + "\\frac{".length,
@@ -6221,8 +6225,13 @@ C(\mathbf{d}) & =\sum_{j=1}^{n}\frac{2d_{j}+1}{\chi(\mathbf{d})-1}C(d_{1},\dots,
       "cleared native AI diagnostic",
     );
     await waitFor(async () => {
-      const record = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(aiIssueCacheUri)));
-      return record.issues.length === 0;
+      try {
+        const record = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(aiIssueCacheUri)));
+        return record.issues.length === 0;
+      } catch (error) {
+        if (error instanceof vscode.FileSystemError && error.code === "FileNotFound") return false;
+        throw error;
+      }
     }, "the cleared AI issue snapshot to reach disk");
     const clearedRecord = JSON.parse(new TextDecoder().decode(
       await vscode.workspace.fs.readFile(aiIssueCacheUri),
@@ -6865,6 +6874,12 @@ C(\mathbf{d}) & =\sum_{j=1}^{n}\frac{2d_{j}+1}{\chi(\mathbf{d})-1}C(d_{1},\dots,
         vscode.window.tabGroups.activeTabGroup.activeTab?.input?.viewType ===
         "texleaf.visualEditor",
       "a native Problems selection to return to the existing visual editor",
+    );
+    await waitFor(
+      () => vscode.window.activeTextEditor?.document.uri.toString() !== nativeProblemEntry.uri.toString() &&
+        !vscode.window.tabGroups.all.some(group => group.tabs.some(tab =>
+          tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === nativeProblemEntry.uri.toString())),
+      "the consumed Problems mirror to lose focus and close",
     );
     assert.notEqual(
       vscode.window.activeTextEditor?.document.uri.toString(),
