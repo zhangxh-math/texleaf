@@ -28,6 +28,7 @@ export type AIWritingStyle = "academic" | "general" | "concise";
 
 export interface TeXLeafConfig {
   readonly visualCompatibilityMode: VisualCompatibilityMode;
+  readonly visualPreviewZoomPercent: number;
   readonly visualGraphCacheLimitMB: number;
   readonly enabled: boolean;
   readonly autoSnippets: boolean;
@@ -114,6 +115,7 @@ export function readConfig(uri?: vscode.Uri): TeXLeafConfig {
   return {
     enabled: config.get<boolean>("enabled", true),
     visualCompatibilityMode: normalizeVisualCompatibilityMode(config.get("visualEditor.compatibilityMode")),
+    visualPreviewZoomPercent: clamp(config.get<number>("visualEditor.previewZoomPercent", 150), 50, 400),
     visualGraphCacheLimitMB: clamp(readGlobalConfigurationValue(config, "visualEditor.graphCacheLimitMB", 128), 16, 2048),
     autoSnippets: config.get<boolean>("autoSnippets", true),
     manualTrigger: manual === "space" ? "space" : "tab",

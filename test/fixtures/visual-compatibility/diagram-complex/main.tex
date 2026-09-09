@@ -1,0 +1,10 @@
+\documentclass{article}
+\usepackage{tikz-cd}
+\begin{document}
+Before the diagram.
+\begin{tikzcd}[row sep=large, column sep=huge]
+ A \arrow[r,"{(x,y)}" description,black] \arrow[d,red] & B \arrow[d,"\psi" red] \\[2pt]
+ C \arrow[r,"\eta" blue] & |[blue,rotate=-15]|D
+\end{tikzcd}
+After the diagram.
+\end{document}

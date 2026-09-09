@@ -138,6 +138,8 @@ const PREVIEW_FALLBACK_MACROS = {
   mathds: [String.raw`\mathbb{#1}`, 1] as const,
   mathbbmss: [String.raw`\mathbb{#1}`, 1] as const,
   bm: [String.raw`\boldsymbol{#1}`, 1] as const,
+  // Beamer emphasis has no slide palette in a detached formula preview.
+  alert: [String.raw`\boldsymbol{#1}`, 1] as const,
   dag: String.raw`\dagger`,
   slash: "/",
   o: "ø",

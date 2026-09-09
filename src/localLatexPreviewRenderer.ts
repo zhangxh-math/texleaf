@@ -68,7 +68,7 @@ export class LocalLatexPreviewRenderer {
   private disposed = false;
   private clearing = false;
 
-  public constructor(private readonly options: { readonly cacheDirectory?: string | undefined } = {}) {}
+  public constructor(private readonly options: { readonly cacheDirectory?: string | undefined; readonly quiverPackagePath?: string | undefined } = {}) {}
 
   public supports(input: MathPreviewRenderInput): boolean {
     return localLatexPreviewKind(input) !== undefined;
@@ -236,6 +236,9 @@ export class LocalLatexPreviewRenderer {
     const directory = await mkdtemp(path.join(tmpdir(), "texleaf-local-preview-"));
     try {
       await writeFile(path.join(directory, "preview.tex"), request.document, { encoding: "utf8", flag: "wx" });
+      if (this.options.quiverPackagePath && /% texleaf-quiver-v1:/u.test(request.input.tex)) {
+        await writeFile(path.join(directory, "quiver.sty"), await readFile(this.options.quiverPackagePath), {flag: "wx"});
+      }
       for (const file of request.input.localFiles ?? []) await writeFile(path.join(directory, file.name), file.contents, { flag: "wx" });
       const inherited = appendPathDirectories(process.env, await this.texLiveBinDirectories);
       const environment: NodeJS.ProcessEnv = {

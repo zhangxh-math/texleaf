@@ -115,6 +115,7 @@ export class VisualEditorRenderer implements vscode.Disposable {
   public constructor(context: vscode.ExtensionContext) {
     const workerPath = context.asAbsolutePath("dist/mathPreviewWorker.js");
     this.local = new LocalLatexPreviewRenderer({
+      quiverPackagePath: context.asAbsolutePath("dist/quiver/quiver.sty"),
       cacheDirectory: context.globalStorageUri?.scheme === "file"
         ? path.join(context.globalStorageUri.fsPath, "visual-tex-cache") : undefined,
     });

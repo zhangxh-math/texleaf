@@ -1,6 +1,6 @@
 # TeXLeaf 配置参考
 
-在 VS Code 设置中搜索 `@ext:zhangxh-math.texleaf` 即可修改配置。1.0.0 的 56 个用户可见设置按 **TeXLeaf · 片段**（22 项）、**TeXLeaf · 文献**（9 项）、**TeXLeaf · AI 写作**（14 项）、**TeXLeaf · 可视化编辑器**（4 项）、**TeXLeaf · 预览**（7 项）分成五个原生分类。全部 AI 写作设置与 `texleaf.visualEditor.defaultMode` 都是 application 级，只能由用户/Profile 设置控制；真正联网前仍要求受信任工作区、针对实际接收地址的明确同意，以及 SecretStorage 中该目标专用的 API Key。
+在 VS Code 设置中搜索 `@ext:zhangxh-math.texleaf` 即可修改配置。1.2.1 的 61 个用户可见设置按 **TeXLeaf · 片段**（22 项）、**TeXLeaf · 文献**（9 项）、**TeXLeaf · AI 写作**（14 项）、**TeXLeaf · 可视化编辑器**（9 项）、**TeXLeaf · 预览**（7 项）分成五个原生分类。全部 AI 写作设置与 `texleaf.visualEditor.defaultMode` 都是 application 级，只能由用户/Profile 设置控制；真正联网前仍要求受信任工作区、针对实际接收地址的明确同意，以及 SecretStorage 中该目标专用的 API Key。
 
 ## 设置项
 
@@ -46,8 +46,10 @@
 | `texleaf.aiWriting.maxDocumentLength` | 手动整篇检查单次最多发送的正文 UTF-16 字符数，默认 30000。 |
 | `texleaf.project.rootFile` | 可选的工作区文件夹相对主 TeX 文件。留空时依次使用有效 `% !TEX root`、当前文件的 `documentclass` 和唯一反向 include；显式值无效时 fail closed，不猜另一个 root。 |
 | `texleaf.visualEditor.defaultMode` | 普通打开 `.tex` 时默认使用 `visual`（默认）或 `source`。这是 application 级用户/Profile 选择；只管理 `*.tex` 的编辑器关联，不改其他文件类型。 |
+| `texleaf.visualEditor.syntaxTheme` | 源码配色默认 `followVsCode`，读取 VS Code TextMate/LaTeX grammar；`fixedPrimer` 使用内置浅/深配色。 |
+| `texleaf.visualEditor.previewZoomPercent` | 增强图形默认 150%，整数范围 50–400%；修改立即应用，重置返回设置值，仅影响显示，不重编译、不改变源码或 PDF。 |
 | `texleaf.visualEditor.compatibilityMode` | `basic`（默认）使用 MathJax；`maximum` 使用本机 TeX 排版复杂公式和图形，可在可视化工具栏切换。 |
-| `texleaf.visualEditor.graphCacheLimitMB` | 本地图形缓存容量，默认 128 MB，可设为 16–2048 MB；工具栏支持查看和清空缓存。 |
+| `texleaf.visualEditor.graphCacheLimitMB` | 本地图形缓存容量，默认 128 MiB，可设为 16–2048 MiB；工具栏支持查看和清空缓存。 |
 | `texleaf.visualEditor.texBinPath` | 增强可视化模式的本机 TeX 可执行文件目录；留空时按系统 PATH 查找。 |
 | `texleaf.visualEditor.providerCompletions` | 是否通过 VS Code 官方补全提供器命令把安全普通候选与常见 Snippet 桥接到可视化/同标签页源码模式，默认开启。带命令回调、额外编辑或复杂 transform 的候选仍只在“↗ 原生”中使用。 |
 | `texleaf.visualEditor.latexWorkshopCompatibility` | 保存及可视化工具栏命令是否短暂建立 LaTeX Workshop 需要的原生 TextEditor/光标上下文，默认开启。 |
@@ -104,6 +106,46 @@
 | `TeXLeaf: 清除 AI 写作问题` | `texleaf.aiWriting.clearDiagnostics` | 清空当前保存的 AI 问题标记和本机恢复快照，不修改正文；命令 ID 为兼容旧版保持不变。 |
 
 表中列出的是正常需要从 Command Palette 运行的功能命令。`texleaf.handleTab`、`texleaf.matrixEnter`、`texleaf.handleSpace`、`texleaf.deleteEmptyMathDelimiters` 等编辑器动作由 when context 和键位调用；`texleaf.aiIssues.reveal`、`texleaf.aiIssues.apply`、`texleaf.aiIssues.ignore` 是旧入口兼容转发命令，只供 Problems 建议卡、Hover 与 Quick Fix 的内部路径使用，并在 Command Palette 中隐藏，不应作为外部自动化 API。
+
+## 标准与增强可视化
+
+工具栏可在标准模式（`basic`，默认）和增强模式（`maximum`）之间切换。标准模式用本地 MathJax 显示常规公式，不启动 TeX；需要本地排版的特殊内容提供黄色模式切换提示。增强模式使用本机 TeX 排版复杂公式、公式内 TikZ、TeX 盒子、Young 图和包含 PDF/位图子图的完整组合 figure，先显示可编辑正文，再逐项补齐图形，并提供进度、取消、失败说明及重试。
+
+增强模式需要可信工作区、本机 TeX 和相应宏包。通常使用 `latex` 与 `dvisvgm`；中文图形需要 `xelatex`、`ctex` 和字体。含外部图片的预览优先用支持 PDF 的 `dvisvgm` 转换，失败后尝试 `pdftocairo`。依赖缺失时保留源码和提示，不自动下载工具。可通过 `texleaf.visualEditor.texBinPath` 指定本机工具目录；完整论文编译仍由 LaTeX Workshop 负责。
+
+图形任务共享并缓存完成结果，切换模式、滚动或普通正文编辑可以复用；图形源码、有效宏、绘图颜色或相关图片内容变化时失效。`texleaf.visualEditor.graphCacheLimitMB` 控制磁盘缓存，默认 128 MiB、范围 16–2048，超限优先清理较久未使用项；可视化菜单可清理缓存，源码与 PDF 不受影响。
+
+增强图形预览默认 **150%**。设置 `texleaf.visualEditor.previewZoomPercent` 可在 **50–400%** 间调整默认值，修改后立即应用；“缩小 / 重置 / 放大”只改变显示，重置返回设置值，新建预览也使用该值，不重新运行 TeX、不改变源码或 PDF。图形卡片、图注、操作按钮和图形引用悬浮使用不透明浅色纸面；保留原图颜色、透明度、位图像素及空实心节点，主题切换无需重新编译。
+
+## 标题、摘要、编号与源码入口
+
+1.2.1 保留 1.2.0 的完整改进：标题、作者、单位居中呈现，摘要独立带框并有源码入口；增强模式可整合可确定的分散文首信息。标题编辑按钮独占上方一行，窄窗不遮挡标题；标题、摘要、空样式命令、计数和布局命令均保留准确的源码入口。连续退格遇到折叠命令、表格或图形时先展开，再逐字删除；显式选中的完整命令仍可删除。
+
+支持安全局部宏、脚注及其悬浮、定理样式、图题、目录、附录，以及章节计数器的字面整数赋值、加法和步进。标题与文献悬浮保留 LaTeX 公式，不解释标题中的 HTML；公式失败时保留红色原始公式，长标题和手写文献保留文字回退。可验证的 LaTeX Workshop 成功编译结果仅在相关源码仍一致时补充编号，过期或来源不明的结果不覆盖当前推断。
+
+可视化属于静态近似。动态宏、精确编号、分页、浮动位置和模板最终排版以 LaTeX Workshop 编译的 PDF 为准。
+
+## Beamer 与输入交互
+
+Beamer 保留帧外框、标题与正文，`columns` / `column` 按正文顺序纵向展开，便于连续编辑。支持局部分组的字号、粗体、斜体、命名颜色，以及可确定的单参数来源说明宏；样式与分栏包装仍可展开源码。普通文本 `\alert` 显示为加粗与可确定的高亮色，独立公式中的 `\alert` 用加粗数学兼容显示。局部作用域与重定义会更新样式，显式换行不再与源码换行叠加成额外空行；真实幻灯片布局仍以 PDF 为准。
+
+Beamer 双向定位复用 LaTeX Workshop 的 SyncTeX 索引与 PDF viewer。普通帧先核验原行的双向记录；无法确认精确位置时，使用本帧结束记录的首个命中，避免跳到上一帧或同帧后续 overlay。显式 fragile/direct 帧，以及可核验的全局 direct 帧，保留准确原行；反向命中普通帧的 `\end{frame}` 时返回帧头，精确正文命中仍保留原位置。可视化位置通过统一 LF 坐标与原 `TextDocument` 的 LF/CRLF 坐标转换，避免 Windows 换行导致偏移累积，不改写文件换行格式。缺少可用 Workshop 运行时组件时沿用原同步路径，不猜测更细的位置。
+
+公式内中文 IME 候选替换、删除与取消后恢复正常输入和退格，即使缺少 composition 结束通知也能由普通按键恢复。展开表格源码及混合文字单元格均支持 Math Preview，位置对齐公式起始处；单元格空格不会误触源码展开。工具栏、右键插入及多行片段自动缩进结果同步写入同一 `TextDocument`，沿用原有保存和撤销历史。
+
+## quiver 编辑与配置边界
+
+点击 **可视化编辑交换图** 打开内置 quiver 1.7.0 中文编辑器。可选择、拖动节点与箭头，编辑标签、弯曲、颜色、端点和箭头样式，也可放大编辑画布。标准与增强模式均使用浅色交换图卡片，外围文档继续跟随 VS Code 主题。
+
+编辑器直接加载当前 `tikzcd`，不设独立导入、宏定义或导出栏。点击 **应用修改** 将结果写回原位置，可一次撤销；未修改就应用或取消均保持原文。源码中的 `texleaf-quiver-v1` 注释保存 quiver 原生状态，仅在对应图形源码未被外部修改时使用；手动改图后重新解析 TikZ。
+
+quiver 无法无损导入所有手写 TikZ 选项。未识别的选项会列出提示；修改后应用需要勾选转换确认。需要保留原样时使用 **编辑 tikzcd 源码**。TikZ 无法准确表达的箭头组合会提示调整，不会静默替换样式。
+
+修改主文档图形时按需补充 `\usepackage{quiver}`，与图形修改共用一次撤销；编辑 `\input` 子文件时需自行在主文档加载宏包。完整文档编译需要本机 quiver 1.7 及 TikZ 依赖；增强预览使用随扩展提供的 `quiver.sty`。界面、KaTeX、字体和图标全部本地加载，宏由 TeX 文档管理，不加载远程宏。
+
+这里实际嵌入了 [q.uiver.app](https://q.uiver.app/) / [varkor/quiver](https://github.com/varkor/quiver) 1.7.0 的代码，上游提交为 `2f289ecbae9b7e5a473e04b924750c538ed5c4cf`，原作者版权为 `Copyright (c) 2018 varkor`，使用 MIT License。TeXLeaf 维护本地汉化与集成补丁，并保留 quiver 和 KaTeX 0.18.1 的原许可证；这是实际代码集成，不只是交互参考。
+
+`syntaxTheme` 使用 window scope；`texBinPath` 与 `graphCacheLimitMB` 使用 machine scope；`previewZoomPercent` 与 `compatibilityMode` 使用 resource scope。
 
 ## 可视化编辑器配置与兼容边界
 
@@ -375,7 +417,7 @@ TeXLeaf 识别常见的 `$ … $`、`\( … \)`、`$$ … $$`、`\[ … \]` 与�
 
 ### 可视化编辑器与源码模式边界
 
-VS Code 的稳定扩展 API 无法在原生 Monaco 文本范围内放入可点击、可交互并自动参与行高布局的任意 MathJax 部件；Decoration 也没有可靠的点击回调。因此 TeXLeaf 1.0.0 使用正式 `CustomTextEditorProvider` 提供独立的 CodeMirror 6 可视化编辑器，并把它注册为 `*.tex` 的默认编辑器。完整公式在选区之外显示为 SVG；点击或键盘激活后原位恢复 LaTeX 源码，光标移出后重新排版。编辑、保存、dirty 状态、Undo/Redo 和外部变化始终同步到同一个 VS Code `TextDocument`，不会创建第二份 TeX 文件。
+VS Code 的稳定扩展 API 无法在原生 Monaco 文本范围内放入可点击、可交互并自动参与行高布局的任意 MathJax 部件；Decoration 也没有可靠的点击回调。因此 TeXLeaf 1.2.1 使用正式 `CustomTextEditorProvider` 提供独立的 CodeMirror 6 可视化编辑器，并把它注册为 `*.tex` 的默认编辑器。完整公式在选区之外显示为 SVG；点击或键盘激活后原位恢复 LaTeX 源码，光标移出后重新排版。编辑、保存、dirty 状态、Undo/Redo 和外部变化始终同步到同一个 VS Code `TextDocument`，不会创建第二份 TeX 文件。
 
 Custom Editor Webview 不是原生 `TextEditor`，但 TeXLeaf 的输入规划已通过专用消息桥接到 CodeMirror：自动/手动/Visual 片段、模板、占位符、自动分数与括号放大、Tabout、matrix/align 键位、片段搜索、引用、AI 检查/改写/续写都可直接使用。工具栏“源码模式”在当前标签内显示完整主题高亮源码并继续提供不改动文档字符或选择范围的活动公式浮动预览；安全普通 Provider 候选和常见 Snippet 也可通过官方执行命令桥接。只有复杂补全副作用、完整 Monaco Suggest UI、Hover、Code Action、Inline Suggest 和扩展专属键位需要点击“↗ 原生”。TeXLeaf 不重复实现 TeX 编译器或 PDF Webview，PDF 仍交给 LaTeX Workshop。
 

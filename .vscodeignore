@@ -48,3 +48,5 @@ docs/superpowers/**
 docs/*compatibility-report.md
 
 .gitattributes
+
+vendor/**

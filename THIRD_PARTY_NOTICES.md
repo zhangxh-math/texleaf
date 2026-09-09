@@ -36,6 +36,19 @@ SOFTWARE.
 
 TeXLeaf 自身的 `GPL-3.0-only` 条款、合理署名要求和用户文档输出例外见根目录 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。本文件中的第三方材料继续适用各自声明，不因 TeXLeaf 主体许可证变化而被改写。
 
+## quiver 与 KaTeX（实际嵌入组件）
+
+- 项目：[q.uiver.app](https://q.uiver.app/) / [varkor/quiver](https://github.com/varkor/quiver)
+- quiver 版本：1.7.0；固定上游提交：`2f289ecbae9b7e5a473e04b924750c538ed5c4cf`
+- 用途：实际嵌入的交换图编辑器代码，包括节点、箭头、样式、渲染与直接操纵；不是仅参考其产品或交互。
+- 原作者与版权：`Copyright (c) 2018 varkor`
+- quiver 许可证：MIT License，原文保存在 `vendor/quiver/LICENSE`，发行包保留为 `dist/quiver/LICENSE`。
+- 配套 KaTeX：0.18.1，MIT License，`Copyright (c) 2013-2020 Khan Academy and other contributors`；原文保存在 `vendor/quiver/KaTeX/LICENSE`，发行包保留为 `dist/quiver/KaTeX/LICENSE`。
+
+本地汉化与集成补丁从 TexLeaf-Z 回迁：本地打包 KaTeX、字体和图标，提供就绪事件与文档事务桥，使用规范导出 URL，禁用首次使用面板、持久化远程渲染器设置及 trusted KaTeX 命令，并调整中文控件和嵌入界面。原版图形渲染和操纵代码得到保留。补丁入口位于 `src/quiver`，固定来源与补丁记录见 `vendor/quiver/UPSTREAM.md`，发行包保留为 `dist/quiver/UPSTREAM.md`。
+
+运行时编辑器由本地 `dist/quiver/editor.html`、字体、图标和 nonce 绑定脚本组成，不请求远程资源；增强 TeX 预览另提供 `dist/quiver/quiver.sty`。TeXLeaf 的 GPL-3.0-only 与 NOTICE 不改写 quiver、KaTeX 的原许可证和版权。再分发时须同时保留这些原始通知。
+
 ## CodeMirror 6 与编辑器运行依赖
 
 - 项目：https://codemirror.net/ 与 https://github.com/codemirror/dev

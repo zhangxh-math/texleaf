@@ -2,7 +2,7 @@
   "name": "texleaf",
   "displayName": "TeXLeaf — Fast LaTeX Snippets",
   "description": "安全、可定制的 LaTeX 可视化公式编辑、自动片段、AI 写作检查、Math Preview 与 Zotero 引用管理。",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "publisher": "zhangxh-math",
   "author": {
     "name": "zhangxh-math",
@@ -974,6 +974,15 @@
             "minimum": 16,
             "maximum": 2048,
             "description": "图形磁盘缓存容量上限（MB）。超过上限时自动清理最久未使用的图形；可在可视化菜单中手动清理。"
+          },
+          "texleaf.visualEditor.previewZoomPercent": {
+            "order": 1.15,
+            "scope": "resource",
+            "type": "integer",
+            "default": 150,
+            "minimum": 50,
+            "maximum": 400,
+            "description": "增强图形预览的默认缩放比例（%）。修改后立即应用；预览中的“重置”也回到此比例。仅影响编辑器显示，不影响源码或导出 PDF。"
           }
         }
       },

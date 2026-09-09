@@ -54,6 +54,8 @@ export interface VisualFormulaRecord {
   readonly bodyFrom: number;
   readonly bodyTo: number;
   readonly display: boolean;
+  /** A containing structure renders this formula; source editing still has Math Preview. */
+  readonly sourceOnly?: boolean;
   /** Present for display environments whose body must retain its wrapper. */
   readonly environmentName?: string;
   readonly labels: readonly VisualFormulaLabel[];
@@ -164,6 +166,7 @@ export interface VisualEditorCapabilities {
 }
 
 export interface VisualEditorInputFeatures {
+  readonly previewZoomPercent?: number;
   readonly compatibilityMode?: "basic" | "maximum";
   readonly enabled: boolean;
   readonly manualTrigger: "tab" | "space";

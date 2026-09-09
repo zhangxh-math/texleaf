@@ -380,6 +380,7 @@ interface VisualSnapshot {
   readonly version: number;
   readonly preview: MathPreviewSnapshot;
   readonly records: readonly VisualFormulaRecord[];
+  readonly viewportRecords: readonly VisualFormulaRecord[];
   readonly formulaById: ReadonlyMap<string, MathPreviewFormula>;
   structures: readonly VisualStructureRecord[];
   readonly projectContext: LatexProjectContext | undefined;
@@ -423,7 +424,8 @@ function buildVisualSnapshot(
   projectContext?: LatexProjectContext,
 ): VisualSnapshot {
   preview = { ...preview, referenceLabels: new Map([...([...indexVisualStructureReferences(text, structures)].map(([key, value]) => [key, value.label] as const)), ...(preview.referenceLabels ?? [])]) };
-  const collapsedRanges = visualCollapsedSourceRanges(structures);
+  const collapsedRanges = visualCollapsedSourceRanges(structures.filter(record => record.kind !== "table"));
+  const tableRanges = visualCollapsedSourceRanges(structures.filter(record => record.kind === "table"));
   const records: VisualFormulaRecord[] = [];
   const formulaById = new Map<string, MathPreviewFormula>();
   const formulaIdentityOccurrences = new Map<string, number>();
@@ -462,6 +464,7 @@ function buildVisualSnapshot(
       bodyFrom: formula.bodyRange.start,
       bodyTo: formula.bodyRange.end,
       display: formula.mode === "block",
+      sourceOnly: tableRanges.some(([from, to]) => formula.outerRange.start >= from && formula.outerRange.end <= to),
       ...(formula.environmentName === undefined
         ? {}
         : { environmentName: formula.environmentName }),
@@ -476,6 +479,7 @@ function buildVisualSnapshot(
     version,
     preview,
     records,
+    viewportRecords: records.filter(record => !record.sourceOnly),
     formulaById,
     structures,
     projectContext,
@@ -3804,6 +3808,7 @@ export class VisualEditorProvider
         synctexEnabled: session.document.uri.scheme === "file" && vscode.workspace.isTrusted,
       },
       inputFeatures: {
+        previewZoomPercent: config.visualPreviewZoomPercent,
         compatibilityMode: config.visualCompatibilityMode,
         enabled: config.enabled,
         manualTrigger: config.manualTrigger,
@@ -4130,7 +4135,7 @@ export class VisualEditorProvider
           remainingBudget,
         );
         const candidates = selectVisualFormulaViewportBatch(
-          snapshot.records,
+          snapshot.viewportRecords,
           session.renderedFormulaIds,
           from,
           to,
@@ -6237,11 +6242,12 @@ export class VisualEditorProvider
     const pdfAssetsUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, "dist", "pdfjs"),
     );
+    const quiverUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "dist", "quiver", "editor.html"));
     return `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; img-src ${webview.cspSource} https: data:; connect-src ${webview.cspSource}; font-src ${webview.cspSource} data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}' blob: 'wasm-unsafe-eval';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-src ${webview.cspSource}; img-src ${webview.cspSource} https: data:; connect-src ${webview.cspSource}; font-src ${webview.cspSource} data:; style-src 'nonce-${nonce}'; style-src-attr 'unsafe-inline'; script-src 'nonce-${nonce}' blob: 'wasm-unsafe-eval';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style nonce="${nonce}">
     :root { color-scheme: light dark; --texleaf-math-preview-caret: #ff2bd6; --texleaf-main-scrollbar-track: rgba(128, 128, 128, .34); --texleaf-main-scrollbar-thumb: rgba(224, 224, 224, .92); }
@@ -6255,6 +6261,12 @@ export class VisualEditorProvider
     }
     html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; color: var(--vscode-editor-foreground); }
     body { display: flex; flex-direction: column; font-family: var(--vscode-font-family); }
+    .texleaf-quiver-editor { background: #fff; color: #222; padding: 8px; }
+    .texleaf-quiver-editor iframe { display:block; width:100%; height:600px; border:1px solid #ddd; }
+    .texleaf-quiver-editor.expanded { position:fixed; inset:8px; z-index:10000; display:flex; flex-direction:column; }
+    .texleaf-quiver-editor.expanded iframe { flex:1; min-height:0; }
+    .texleaf-quiver-editor p { white-space:pre-wrap; max-height:100px; overflow:auto; margin:6px 0; }
+    .texleaf-quiver-editor button { margin:0 8px 6px 0; }
     #editor { position: relative; flex: 1 1 auto; min-height: 0; box-sizing: border-box; padding-right: 20px; overflow: hidden; isolation: isolate; }
     #editor-background { position: absolute; inset: 0 20px 0 0; z-index: 0; pointer-events: none; background-color: transparent; background-image: none; }
     #editor-background.front { z-index: 3; }
@@ -6354,6 +6366,7 @@ export class VisualEditorProvider
     .texleaf-footnote-hover { position: fixed; z-index: 80; box-sizing: border-box; padding: 10px 12px; max-height: min(45vh, 320px); overflow: auto; border: 1px solid var(--vscode-editorHoverWidget-border); border-radius: 6px; background: var(--vscode-editorHoverWidget-background); color: var(--vscode-editorHoverWidget-foreground); box-shadow: 0 4px 14px var(--vscode-widget-shadow); font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size, 13px); line-height: 1.5; }
     .texleaf-footnote-hover > button { display: block; margin-top: 8px; }
     .texleaf-enhanced-visualization-hint { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px; color: var(--vscode-editorWarning-foreground, #cca700); border: 1px solid currentColor; border-radius: 4px; font-size: .85em; }
+    .texleaf-paper-preview { --vscode-input-background: #fff; --vscode-input-foreground: #242424; --vscode-input-border: #b8b8b8; --vscode-sideBar-background: #f1f1f1; --vscode-editor-foreground: #000000; --vscode-editor-background: #f1f1f1; --vscode-editorWidget-background: #f1f1f1; --vscode-editorWidget-border: #b8b8b8; --vscode-descriptionForeground: #525252; --vscode-textCodeBlock-background: #e5e5e5; --vscode-textLink-foreground: #005a9e; --vscode-textLink-activeForeground: #004578; --vscode-textBlockQuote-background: #e5e5e5; --vscode-textBlockQuote-border: #b8b8b8; --vscode-list-hoverBackground: #dedede; --vscode-focusBorder: #005a9e; --vscode-button-secondaryForeground: #242424; --vscode-button-secondaryBackground: #e2e2e2; --vscode-button-secondaryHoverBackground: #d3d3d3; color: #000; background: #f1f1f1; color-scheme: light; }
     #reference-hover { position: fixed; z-index: 85; display: none; box-sizing: border-box; width: min(460px, calc(100vw - 16px)); max-height: min(62vh, 420px); overflow: hidden; border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-editorWidget-border)); border-radius: 7px; color: var(--vscode-editorHoverWidget-foreground); background: var(--vscode-editorHoverWidget-background); box-shadow: 0 4px 14px var(--vscode-widget-shadow); font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size, 13px); line-height: 1.45; }
     #reference-hover.visible { display: block; }
     #reference-hover-content { max-height: min(62vh, 420px); overflow: auto; overscroll-behavior: contain; }
@@ -6571,7 +6584,7 @@ export class VisualEditorProvider
   <div id="reference-hover" role="tooltip" aria-hidden="true">
     <div id="reference-hover-content"></div>
   </div>
-  <div id="editor" data-csp-nonce="${nonce}" data-pdf-assets="${pdfAssetsUri}/">
+  <div id="editor" data-csp-nonce="${nonce}" data-pdf-assets="${pdfAssetsUri}/" data-quiver-uri="${quiverUri}">
     <div id="editor-background" aria-hidden="true"></div>
     <div class="texleaf-editor-scrollbar" tabindex="0" role="scrollbar" aria-orientation="vertical" aria-label="可视化编辑器文档滚动条" title="可视化编辑器文档滚动条">
       <div class="texleaf-editor-scrollbar-thumb disabled" style="top: 3px; height: 52px"></div>

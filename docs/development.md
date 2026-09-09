@@ -33,6 +33,19 @@ TEXLEAF_WORKSHOP_PATH="/path/to/installed/latex-workshop" node test/run-visual-c
 
 报告与截图写入 `.tmp/max-compat/`。`performance` 校验慢图形编译期间的普通公式与输入响应，以及缓存失效、复用和清空；`compiled` 使用复制到隔离目录的 LaTeX Workshop 安装，验证成功编译后的编号与修改后的失效。
 
+## 1.2.1 发布验收补充
+
+以下是发布要求，不是已通过的测试结果。结果应以本次候选提交、隔离宿主报告及最终 VSIX 的实际记录为准。
+
+- 在标准/增强模式和深/浅主题中检查 quiver 中文界面、选择/拖动、标签/颜色/箭头样式、放大、应用/一次撤销；未编辑应用与取消保持字节不变。复杂手写导入应提示转换确认；外部改动使保存状态失效，过时应用不得覆盖新文档；主文档补宏包与子文件提示分别验收。
+- 核对 Beamer 局部样式、columns/column 纵向正文、alert、包装宏重定义和换行；通过 LaTeX Workshop 验收编译、PDF 与 SyncTeX，不沿用 TexLeaf-Z 独立 PDF/同步实现的测试结论。
+- 用 `test/latexWorkshopBeamerSync.test.ts` 与真实 Workshop PDF 检查普通帧不跳上一帧、首个 overlay 命中、fragile/direct 与全局 direct 的精确原行、反向帧末回帧头，以及 LF/CRLF 位置一致；文章类文档和不可用组件继续使用原路径。
+- `test/visualPdfAssetPaths.test.ts` 回归可视化 PDF 插图的 PDF.js CMap、标准字体、WASM 和 ICC 资源根 URL：Windows/Linux 路径、空格及中文均保持 URL 与末尾斜杠，文件系统反斜杠不得进入 Webview 资源地址。
+- 真实输入法检查候选输入、替换、删除、取消和继续退格；表格源码与混合单元格检查 Math Preview、空格、工具栏/右键插入及缩进结果落盘。
+- 用含 PDF 子图、渐变、透明度、彩色箭头、空实心节点的夹具检查浅色纸面与原图色彩。默认缩放 150%，测试 50/400 边界、设置立即更新和重置；缩放或主题切换不得重新编译。
+- 回归 1.2.0 模式切换、进度/取消/重试、缓存复用/失效/容量/清理、标题/摘要源码入口、局部宏、脚注、目录/附录、文献标题公式与新鲜构建编号；保留原生编辑器入口、引用导航、Undo/Redo、片段、Zotero 与 AI 原有验收。
+- 检查最终 VSIX 的 `dist/quiver/editor.html`、本地字体/图标、`LICENSE`、`UPSTREAM.md`、`quiver.sty` 和 `KaTeX/LICENSE`，原版权分别为 varkor (2018) 与 Khan Academy and other contributors (2013–2020)；与根 GPL-3.0-only、NOTICE、第三方通知一并保留。断网打开编辑器确认资源本地加载。
+
 ## F5 调试
 
 1. 用 VS Code 打开仓库根目录。
@@ -42,12 +55,12 @@ TEXLEAF_WORKSHOP_PATH="/path/to/installed/latex-workshop" node test/run-visual-c
 5. 先验证可视化公式；需要测试 `dm`、`;a`、`//` 等原生片段时点击“源码模式”，或运行 `TeXLeaf: 搜索并插入片段`。
 6. 修改源码并重新编译后，点击调试工具栏的“重新启动”验证变更。
 
-针对 1.0.0 的手工冒烟检查至少包括：
+针对 1.2.1 的手工冒烟检查至少包括：
 
-- 在没有 `workbench.editorAssociations` 覆盖的干净 Profile 中双击 `.tex`，确认默认打开 `TeXLeaf 可视化 LaTeX 编辑器`，而 `.bib` 仍使用 Text Editor。夹具同时放入行内、display、equation、align、matrix、注释、`\verb` 与 `verbatim`：只有已闭合、正文中的真实数学范围变成 SVG；公式前后普通正文保持源码。直接点击 SVG 字形中央，不点击上方空白，必须在原位置展开完整 LaTeX 并把光标放入公式 body；源码态显示不占行高的浮动 Math Preview，位置遵循预览设置，移动到公式外后重新渲染。SVG 的可见图形、DOM 包围框和点击命中区必须重合，不能出现逐段累加的空白。关闭“公式预览”后所有源码出现且文件字节不变，再打开后只渲染当前视口附近公式。
+- 在没有 `workbench.editorAssociations` 覆盖的干净 Profile 中双击 `.tex`，确认默认打开 `TeXLeaf 可视化 LaTeX 编辑器`，而 `.bib` 仍使用 Text Editor。夹具同时放入行内、display、equation、align、matrix、注释、`\verb` 与 `verbatim`：只有已闭合、正文中的真实数学范围变成 SVG；公式前后普通正文保持源码。直接点击 SVG 字形中央，不点击上方空白，必须在原位置展开完整 LaTeX 并把光标放入公式 body；源码态显示不占行高的浮动 Math Preview，位置遵循预览设置，移动到公式外后重新渲染。SVG 的可见图形、DOM 包围框和点击命中区必须重合，不能出现逐段累加的空白。切到“源码”后所有源码出现且文件字节不变，再切回只渲染当前视口附近公式。
 - 同一夹具加入 `\title` / `\author` / `\date` / `\maketitle`、chapter/section/subsection、`\newtheorem`、definition/theorem/proof、itemize/enumerate/description、citation、BibTeX/BibLaTeX 与 `thebibliography`。首次打开应直接显示标题而非裸 `\maketitle`；导言区默认只显示“显示文档导言区”，展开后显示“隐藏文档导言区”和完整可编辑高亮源码，收起时隐藏范围内的光标必须移到正文。定理/证明边框、QED、枚举编号、引用 chip 和参考文献卡片必须与源码行对应；点击结构部件后能回到原命令，编辑并撤销后结构重新收敛。
 - 在可视化模式中验证自动/手动/Visual 片段、模板、分子/分母占位符 Tab、环境正文中的括号 Tabout、`<1/2`、选区 `/`、多层自动括号放大、空数学定界符 Backspace，以及 align/matrix 的行首 Tab、Enter、Shift+Enter。再把同一 `.tex` 的可视化 Custom Editor 与原生 Text Editor 放在两个编辑组中同时保持打开，分别连续输入、粘贴、多光标修改（CodeMirror 支持范围内）、`Ctrl+S`、`Ctrl+Z`/`Ctrl+Y`：两侧必须引用同一个 VS Code `TextDocument`，Webview、源码视图、磁盘、dirty 标记和 Git diff 必须收敛到同一正文；过时片段响应与 Worker 结果不能覆盖新版本。构造重叠/越界 Webview 消息时必须拒绝并以当前 TextDocument 重同步。SVG 不能包含 script、事件属性、外部 URL 或 `foreignObject`；CSP 只允许带 nonce 的本地 bundle/style。
-- 安装 LaTeX Workshop 后从可视化工具栏依次运行“编译”“PDF”“定位 PDF”，确认当前光标被桥接到原生选择、公开命令取得正确 root，右侧 PDF viewer 可以继续使用，随后焦点回到可视化编辑器。分别把 `latex-workshop.latex.autoBuild.run` 设为 `onSave` 与默认 `onFileChange`，确认保存触发构建；允许出现文档所述的短暂源码切换，但不能留下不同步的第二份文件。关闭 `texleaf.visualEditor.latexWorkshopCompatibility` 后，保存不再自动切换；“源码模式”必须随时打开同一文档与同一光标附近位置，并恢复 TeXLeaf 自动片段、AI Inline Completion 和 LaTeX Workshop 原生补全/键位。
+- 安装 LaTeX Workshop 后从可视化工具栏依次运行“编译”“PDF”“定位 PDF”，确认当前光标被桥接到原生选择、运行时兼容桥或公开命令回退取得正确 root，右侧 PDF viewer 可以继续使用，随后焦点回到可视化编辑器。分别把 `latex-workshop.latex.autoBuild.run` 设为 `onSave` 与默认 `onFileChange`，确认保存触发构建；允许出现文档所述的短暂源码切换，但不能留下不同步的第二份文件。关闭 `texleaf.visualEditor.latexWorkshopCompatibility` 后，保存不再自动切换；“源码模式”必须随时打开同一文档与同一光标附近位置，并恢复 TeXLeaf 自动片段、AI Inline Completion 和 LaTeX Workshop 原生补全/键位。
 - 切换到 Windows 中文输入法，在已保存的 `.tex` 文件中分别按下全角左括号和顿号对应按键，确认每次只得到一个 `（` 和一个 `、`。
 - 用全新隔离 Profile 激活扩展，运行 `TeXLeaf: 管理 Snippet 与模板`，确认无需显示任何存储路径即可载入 223 条 Snippet 和四个模板。结构化编辑一个 trigger 后保存，运行时应立即使用新 trigger；另一个干净工作区应看到同一 Profile 内容。
 - 干净 Profile 不应物化 `globalStorageUri/templates/*.tex` 作为运行依赖。分别在空白文档完整输入 `article-cn`、`article-en`、`beamer-cn`、`beamer-en`，确认最后一字符输入后自动展开；在管理器模板页修改 trigger/正文、新增、复制、删除后，保存结果应立即生效。另用旧版四个 `.tex` 副本建立升级夹具，确认首次迁入内部 catalog 后再改动旧文件不会影响运行时。还要覆盖 1.0.0 的一次性 trigger 迁移：当前 factory trigger 仍为 `tmpa-cn` / `tmpa-en` 时分别迁移为 `article-cn` / `article-en`；当前值已经是其他字符串时保持不变；新 trigger 被占用、存在前缀冲突或提交失败时先写入迁移 marker，再保留旧目录/旧 trigger 并在 **Output → TeXLeaf** 记录原因，后续激活不得反复覆盖。marker 写入后，用户主动把 trigger 改回 `tmpa-cn` / `tmpa-en` 也不得再次迁移。
@@ -89,7 +102,7 @@ TEXLEAF_WORKSHOP_PATH="/path/to/installed/latex-workshop" node test/run-visual-c
 - 对 DeepSeek mock 断言默认与自定义地址都只请求 `{规范化 Base URL}/chat/completions`，不跟随重定向且不回退 `/responses`。远程 HTTP、URL credentials/query/fragment、主机名尾随点和路径已以 `/chat/completions` 结尾的地址必须在联网前拒绝，HTTP 仅允许 `localhost`、`127.0.0.1` 与 `[::1]`。再验证空 content 或非法 JSON 只自动重试一次，第二次仍失败就停止；恰好一层完整 ```` ```json … ``` ```` 围栏可剥离，围栏外有文字或嵌套围栏时失败；字段/offset/original/重叠错误均不重试，也不做模糊内容提取。确认逐条拒绝只输出 `rejectedIssueCount` 与去重后的安全子码，绝不包含 original。再模拟 401、402、429、5xx、网络、超时、取消和超限响应，确认错误提示不包含 API Key、论文正文、原始响应或底层异常。
 - 对 OpenAI mock 断言只请求 `{规范化 Base URL}/responses`，请求使用 Structured Outputs JSON Schema、`store:false` 且不跟随重定向；官方默认模型为 `gpt-5.6-luna`。远程 HTTP、URL credentials/query/fragment、路径已以 `/responses` 结尾的地址必须在联网前拒绝，HTTP 仅允许 `localhost`、`127.0.0.1` 与 `[::1]`。分别覆盖 completed、incomplete、refusal、空 output、非法 JSON、响应体上限、401/403/402/429/5xx、超时和取消；自定义服务仅有 `/chat/completions` 或不支持 Structured Outputs 时应给出 Responses 不兼容提示，不能回退协议。
 - 所有会执行 AI 客户端请求的自动测试必须注入 mock fetch；Extension Host 测试不得使用真实 Key 或真实网络，只在专用测试账户和最小无敏感文本上做人工 API 冒烟。关闭功能、切换 Provider/Base URL、删除对应 Secret 或修改文档时应立即 abort，任何过时响应都不得产生问题标记或编辑。
-- 在设置页搜索 `@ext:zhangxh-math.texleaf`，确认总计 56 个设置：片段 22 项、文献 9 项、AI 写作 14 项、可视化编辑器 4 项、预览 7 项。“AI 写作”分类精确显示总开关、自动检查、行内补全、Provider、两个服务商各自的模型与 Base URL、语言、风格、两个防抖和两个长度上限，默认 Provider 为 DeepSeek、DeepSeek Base URL 为 `https://api.deepseek.com`、OpenAI 默认模型为 `gpt-5.6-luna`、自动检查防抖为 900 毫秒且范围 500–10000；全部 14 项 scope 都必须是 `application`。可视化编辑器的 `defaultMode` 为 application 级并可在 `visual`/`source` 间切换，Provider 补全桥和 LaTeX Workshop 兼容桥默认开启；公式可视化始终启用，旧 `texleaf.visualEditor.renderFormulas` 已退役且不再出现在设置页。Math Preview 总开关、默认 `autoAbove`（优先上方）、`autoBelow`（优先下方）、`above`/`below` 位置和性能参数位于“预览”分类，并同时影响原生源码与可视化公式源码态；旧值 `auto` 不得出现在设置选项中，但运行时仍映射到 `autoBelow`。
+- 在设置页搜索 `@ext:zhangxh-math.texleaf`，确认总计 61 个设置：片段 22 项、文献 9 项、AI 写作 14 项、可视化编辑器 9 项、预览 7 项。“AI 写作”分类精确显示总开关、自动检查、行内补全、Provider、两个服务商各自的模型与 Base URL、语言、风格、两个防抖和两个长度上限，默认 Provider 为 DeepSeek、DeepSeek Base URL 为 `https://api.deepseek.com`、OpenAI 默认模型为 `gpt-5.6-luna`、自动检查防抖为 900 毫秒且范围 500–10000；全部 14 项 scope 都必须是 `application`。可视化编辑器的 `defaultMode` 为 application 级并可在 `visual`/`source` 间切换，Provider 补全桥和 LaTeX Workshop 兼容桥默认开启；公式可视化始终启用，旧 `texleaf.visualEditor.renderFormulas` 已退役且不再出现在设置页。Math Preview 总开关、默认 `autoAbove`（优先上方）、`autoBelow`（优先下方）、`above`/`below` 位置和性能参数位于“预览”分类，并同时影响原生源码与可视化公式源码态；旧值 `auto` 不得出现在设置选项中，但运行时仍映射到 `autoBelow`。
 - 在 `$x^2$`、`$$\sum_n a_n$$`、`\(\frac{1}{2}\)`、`align` 和嵌套 `cases` 中移动光标，确认只出现一个当前公式预览；注释、`\verb`、`verbatim`、`lstlisting`、`minted` 中不出现。分别验证 `cursor`、`hover`、`both` 与总开关。`cursor` 卡片的底色必须 100% 不透明，并显示在源文字上层。
 - 在长行内公式的上下都留出足够空间，确认 `autoBelow` 把浮动卡片放在活动源码行下方，`autoAbove` 放在上方；分别压缩首选侧空间、保留另一侧空间时，应切到另一侧。上下都不足时，两种自动模式都必须强制选择上方。卡片不参与行宽或换行计算；光标位于起始行时，左边缘必须与 `$`/`\(` 对齐，把同一公式写成多行并把光标移到后续行时，左边缘必须改为对齐该行首个非空白字符，而不是光标横坐标或第 0 列。
 - 给 `$$…$$`、`\[…\]` 和 `\begin{align}…\end{align}` 加入不同非零缩进及 Tab：卡片应稳定保持 opening delimiter 列；超宽卡片允许右端被编辑器裁切，但不得因 Monaco 的短 token span 错跳到第 0 列。对行间公式分别验证 `placement=autoBelow` 下方优先、下方不足转上方，以及 `placement=autoAbove` 上方优先、上方不足转下方；上下都不足时二者都在上方并共用源码/预览末尾保留策略。显式 `above`/`below` 仍严格服从设置。另直接注入旧值 `auto`，确认其布局与 `autoBelow` 完全一致。
@@ -164,7 +177,7 @@ pnpm run package
 构建完成后，可从命令面板选择 `Extensions: Install from VSIX...`，或在终端执行：
 
 ```powershell
-code --install-extension .\texleaf-1.2.0.vsix --force
+code --install-extension .\texleaf-1.2.1.vsix --force
 ```
 
 安装后在普通 VS Code 窗口验证，而不是只在扩展开发宿主中验证。发布前至少执行：
@@ -175,7 +188,7 @@ pnpm run release:verify
 
 还应检查 VSIX 内容，确认 `dist/extension.js`、`dist/mathPreviewWorker.js`、README、CHANGELOG、GPLv3 `LICENSE`、`NOTICE`、`SUPPORT.md`、`THIRD_PARTY_NOTICES.md`、`licenses/`、`media/icon.png` 与其他运行资源已包含，源码、测试、coverage、本机临时目录和赞助二维码未被打包。`package.json` 的 SPDX 值必须为 `GPL-3.0-only`，`NOTICE` 必须保留合理 TeXLeaf 署名与用户文档输出例外。README 图片使用公开仓库的 `https://raw.githubusercontent.com/zhangxh-math/texleaf/main/media/` 绝对地址，避免扩展详情页把 `media/...` 解析到错误位置；仅将图片打包进 VSIX 不足以保证详情页显示。检查归档中的 `extension/readme.md`，确认图标和全部 GIF 均使用 HTTPS 图片地址、对应 URL 返回正确的 PNG/GIF 内容，且相对文档链接已由 `vsce --githubBranch main` 改写为公开 HTTPS 地址；安装后的扩展详情页应显示 PNG 图标，命令面板应能找到片段、AI 写作、Zotero 与 Math Preview 命令。手工 VSIX 不会因为 Settings Sync 而自动安装到另一台机器；跨机测试必须在两端安装兼容版本并保持扩展标识 `zhangxh-math.texleaf`。
 
-Visual Studio Marketplace 使用现有 Publisher `zhangxh-math`；Marketplace 项目标识为 `zhangxh-math.texleaf`。可以在 Publisher 管理页手工上传 `texleaf-1.2.0.vsix`；后续自动发布优先使用短期联合身份凭据，不要把 PAT、DeepSeek/OpenAI/自定义 Responses API Key 或其他 secrets 写入仓库。Publisher 变更会建立新的扩展身份：升级冒烟必须先在旧版保存修改并记录自定义模板，安装新版后禁用旧版但暂不卸载，再 Reload Window；只有新主文件不存在、旧 JSONC 严格校验通过且复制期间未变化时，新版才尽力逐字节复制旧片段库，并保留旧文件。验证 Snippet、按需重建自定义模板后再卸载旧版。模板 catalog、既有 `globalState` 与 Settings Sync 基线不会跨 ID 自动迁移。
+Visual Studio Marketplace 使用现有 Publisher `zhangxh-math`；Marketplace 项目标识为 `zhangxh-math.texleaf`。可以在 Publisher 管理页手工上传 `texleaf-1.2.1.vsix`；后续自动发布优先使用短期联合身份凭据，不要把 PAT、DeepSeek/OpenAI/自定义 Responses API Key 或其他 secrets 写入仓库。Publisher 变更会建立新的扩展身份：升级冒烟必须先在旧版保存修改并记录自定义模板，安装新版后禁用旧版但暂不卸载，再 Reload Window；只有新主文件不存在、旧 JSONC 严格校验通过且复制期间未变化时，新版才尽力逐字节复制旧片段库，并保留旧文件。验证 Snippet、按需重建自定义模板后再卸载旧版。模板 catalog、既有 `globalState` 与 Settings Sync 基线不会跨 ID 自动迁移。
 
 ## 安全约束
 

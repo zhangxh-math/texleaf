@@ -6800,7 +6800,7 @@ test('visual layout wrappers keep small groups and subequations transparent but 
   }
   assert.equal(
     source.slice(wrappers[0]?.prefixFrom, wrappers[0]?.prefixTo),
-    String.raw`{\small`,
+    "{\\small\n",
   );
   assert.equal(
     source.slice(wrappers[0]?.suffixFrom, wrappers[0]?.suffixTo),
@@ -9087,4 +9087,19 @@ test('visual bibliography discovery remembers declarations whose paths fail clos
 % \addbibresource{ignored.bib}
 \begin{document}\end{document}`);
   assert.equal(commented.hasBibliographyDeclaration, false);
+});
+
+test('fresh IME candidate updates replace a restarted local DOM composition', () => {
+  for (const candidate of ['n', '']) {
+    const source = String.raw`\(d_{j}ni^{(1)}<d\)`;
+    const from = source.indexOf('ni');
+    const plan = planVisualImeCompositionUpdate(source, from, from + 2,
+      from + (candidate ? 2 : 1), from + 2, candidate, candidate, undefined,
+      { freshCompositionText: true });
+    assert.equal(plan?.insert, candidate);
+    assert.equal(plan?.cursor, from + candidate.length);
+  }
+  const shrinking = planVisualImeCompositionUpdate('ni', 0, 2, 1, 2, '', 'ni', undefined,
+    { freshCompositionText: true });
+  assert.equal(shrinking?.insert, 'n', 'a shrinking local Backspace still beats stale candidate data');
 });

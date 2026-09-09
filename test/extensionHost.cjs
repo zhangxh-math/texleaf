@@ -1780,6 +1780,7 @@ async function run() {
           "texleaf.visualEditor.texBinPath",
           "texleaf.visualEditor.compatibilityMode",
           "texleaf.visualEditor.graphCacheLimitMB",
+          "texleaf.visualEditor.previewZoomPercent",
         ],
         [
           "texleaf.mathPreview.enabled",

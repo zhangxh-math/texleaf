@@ -122,6 +122,11 @@ export function createLocalLatexPreviewDocument(
 \usetikzlibrary{arrows.meta,backgrounds,calc,decorations.markings,decorations.pathmorphing,fit,intersections,matrix,positioning,quotes,shapes.geometric,shapes.multipart}` : "");
   const words = new Set(effective.match(/[A-Za-z][A-Za-z0-9_-]*/gu) ?? []);
   const declarations: string[] = [];
+  if (needsTikzCd && /% texleaf-quiver-v1:/u.test(input.tex)) declarations.push(String.raw`\usepackage{quiver}`);
+  // Mark only tikz-cd's default label/crossing/double-arrow knockout paint;
+  // authored white artwork must retain its color.
+  if (needsTikzCd) declarations.push(String.raw`\definecolor{texleafPreviewBackground}{HTML}{040506}
+\tikzcdset{background color=texleafPreviewBackground}`);
   for (const [name, color] of Object.entries(input.localSettings?.colors ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
     if (!words.has(name) || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/u.test(name)) continue;
     if ((color.model === "HTML" && /^[0-9A-Fa-f]{6}$/u.test(color.value)) ||
@@ -224,6 +229,14 @@ export function sanitizeLocalLatexSvg(
   const safeForeground = /^#[0-9A-Fa-f]{6}$/u.test(foreground)
     ? foreground.toLowerCase()
     : "#010203";
+  // PDF-to-SVG uses percentage RGB, whereas dvisvgm uses hex. Normalize only
+  // our theme markers; preserve the precision of authored colors.
+  svg = svg.replace(/rgb\(\s*([\d.]+)%\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*\)/giu,
+    (original: string, ...channels: string[]) => {
+      const hex = "#" + channels.slice(0, 3).map(value => Math.round(Number(value) * 2.55).toString(16).padStart(2, "0")).join("");
+      return hex === safeForeground || hex === "#040506" ? hex : original;
+    });
+  svg = svg.replace(/#040506\b/giu, "var(--vscode-editorWidget-background, var(--vscode-editor-background, Canvas))");
   const label = kind === "tikzpicture"
     ? "TikZ picture preview"
     : kind === "tikzcd"

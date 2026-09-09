@@ -503,7 +503,7 @@ export function planVisualImeCompositionUpdate(
   inputText: string,
   compositionText: string | undefined,
   inputIntent?: VisualImeCompositionInputIntent,
-  options: { readonly finalCommit?: boolean } = {},
+  options: { readonly finalCommit?: boolean; readonly freshCompositionText?: boolean } = {},
 ): VisualImeCompositionUpdatePlan | undefined {
   if (
     compositionFrom < 0 ||
@@ -546,6 +546,18 @@ export function planVisualImeCompositionUpdate(
     // complete candidate, not as text appended to its end. This keeps a single
     // full-width punctuation commit idempotent and still replaces Pinyin such
     // as `ni` with the selected Chinese candidate `你`.
+    insert = compositionText;
+  } else if (
+    options.freshCompositionText === true && compositionText !== undefined &&
+    !(
+      locallyReportedCandidate !== undefined &&
+      locallyReportedCandidate.length < current.length &&
+      compositionText.length >= current.length
+    )
+  ) {
+    // A restarted Chromium composition can report the complete new candidate
+    // as an insertion at the old candidate's end. Consume each fresh event
+    // once; a genuinely shrinking DOM edit still beats stale candidate text.
     insert = compositionText;
   } else if (locallyReportedCandidate !== undefined) {
     // A native edit wholly inside the currently tracked candidate is the most

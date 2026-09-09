@@ -1,0 +1,26 @@
+:root { color-scheme: light; }
+body { background: white; }
+#logo-link, .version, .welcome, select[name="renderer"], [data-name="autosave"], [data-name="autosave-on"], [data-name="autosave-off"] { display:none !important; }
+.side.panel { max-height:calc(100vh - 32px); overflow-y:auto; }
+
+:root {
+  --ui-black:#f1f1f1; --ui-white:#242424; --ui-text:#444; --ui-border:#b8b8b8;
+  --ui-hover:#e4e8eb; --ui-active:#d4dde4; --ui-warning:#fff0b3;
+  --cell-selected:#c8cece;
+}
+.toolbar, .panel > .wrapper, .global, .label-input-container, .pane { box-shadow:0 1px 6px #0002; }
+.toolbar .symbol img, .panel input[type=radio]:not(:checked) { filter:invert(1); }
+.thumb { background:#fff; border-color:#aaa; }
+.slider:not(.disabled):not(.focused) .thumb:hover { background:#e4e8eb; }
+.panel input[type=text], .pane input[type=text] { background:#fff; }
+.panel input[type=text]::placeholder, .pane input[type=text]::placeholder { color:#777; }
+.port { background:#f6f6f6ed; color:#242424; }
+.close { color:#242424; }
+.label-input-container { min-width:0; width:min(560px,90%); }
+
+.toolbar .action .name, .toolbar .action .shortcut { color:#4b4b4b; }
+.toolbar .action:disabled .name, .toolbar .action:disabled .shortcut { color:#888; }
+[data-name="dark-theme"] { display:none !important; }
+
+.global.panel { display:none !important; }
+.label-input-container { bottom:16px; }

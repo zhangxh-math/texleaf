@@ -1824,12 +1824,21 @@ function isInsideInactiveMathPreviewRange(
   );
 }
 
+/** Reuse the macro scanner's comment, conditional, verbatim and TeX scope rules. */
+export function visitMathPreviewSource(
+  text: string,
+  visitCommand: (offset: number, name: string, end: number) => void,
+  visitScope: (event: "enter" | "exit", offset: number) => void,
+): void {
+  collectDocumentMacros(text, true, createMutableMacroTable(), visitCommand, visitScope);
+}
+
 function collectDocumentMacros(
   text: string,
   collectAllMacros: boolean,
   resolved: Record<string, MathPreviewMacro>,
   visitCommand?: (offset: number, name: string, end: number) => void,
-  visitScope?: (event: "enter" | "exit") => void,
+  visitScope?: (event: "enter" | "exit", offset: number) => void,
 ): DocumentMacroScan {
   const result: ParsedMacro[] = [];
   const environmentAliases = new Map<number, LatexEnvironmentAlias>();
@@ -1892,10 +1901,10 @@ function collectDocumentMacros(
     }
     if (character !== "\\") {
       if (character === "{") {
-        visitScope?.("enter");
+        visitScope?.("enter", index);
         groupDepth += 1;
       } else if (character === "}") {
-        visitScope?.("exit");
+        visitScope?.("exit", index);
         groupDepth = Math.max(0, groupDepth - 1);
         restoreAliasShadows();
       }
@@ -1905,13 +1914,13 @@ function collectDocumentMacros(
 
     const command = readControlSequence(text, index);
     if (command.name === "begingroup") {
-      visitScope?.("enter");
+      visitScope?.("enter", index);
       groupDepth += 1;
       index = command.end;
       continue;
     }
     if (command.name === "endgroup") {
-      visitScope?.("exit");
+      visitScope?.("exit", index);
       groupDepth = Math.max(0, groupDepth - 1);
       restoreAliasShadows();
       index = command.end;
@@ -2004,10 +2013,10 @@ function collectDocumentMacros(
           continue;
         }
         if (environmentCommand === "begin") {
-          visitScope?.("enter");
+          visitScope?.("enter", index);
           environmentStack.push(name);
         } else if (environmentStack.at(-1) === name) {
-          visitScope?.("exit");
+          visitScope?.("exit", index);
           environmentStack.pop();
           restoreAliasShadows();
         } else {

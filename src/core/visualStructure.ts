@@ -8,7 +8,7 @@
 import { parseHomeProjectTitle } from "./homeProjectTitle";
 import type { BibTeXEntry } from "./citation";
 import { findLatexOpaqueEnvironmentEnd } from "./latexScanner";
-import { scanMathPreviewDocument } from "./mathPreview";
+import { scanMathPreviewDocument, visitMathPreviewSource } from "./mathPreview";
 import type { VisualFormulaAsset } from "./visualFormula";
 
 const MAX_VISUAL_STRUCTURE_RECORDS = 4_000;
@@ -386,13 +386,13 @@ export interface VisualTikzcdRecord {
   readonly arrows: readonly VisualTikzcdArrow[];
   readonly rowCount: number;
   readonly columnCount: number;
-  /** Exact optional argument on \begin{tikzcd}; visual body edits preserve it. */
+  /** Exact optional argument on \begin{tikzcd}. */
   readonly environmentOptions: string | undefined;
   readonly visualEditable: boolean;
   readonly visualEditReason: string | undefined;
   readonly simplifiedOptions: readonly string[];
   readonly truncated: boolean;
-  /** Exact local-TeX rendering; the geometric editor model remains available. */
+  /** Exact local-TeX rendering; the standard geometric preview remains available. */
   readonly asset?: VisualFormulaAsset;
   readonly previewStatus?: VisualLocalPreviewStatus;
 }
@@ -529,9 +529,12 @@ export interface VisualTextStyleRecord {
   readonly foreground: string | undefined;
   readonly background: string | undefined;
   readonly border: string | undefined;
+  /** Relative to the editor body font; finite, bounded presentation sizes only. */
+  readonly fontSize?: number;
+  readonly lineHeight?: number;
   /**
-   * A presentation-only wrapper whose TeX syntax is hidden without applying
-   * typography to its body. The wrapper keeps an explicit edit affordance so
+   * A presentation wrapper whose TeX syntax stays hidden while editing its
+   * body. An explicit edit affordance lets users reveal the delimiters, so
    * users can still reveal both delimiters in place.
    */
   readonly transparent?: boolean;
@@ -803,8 +806,9 @@ const MATH_ENVIRONMENTS = new Set([
   "Vmatrix",
   "smallmatrix",
 ]);
-const TRANSPARENT_VISUAL_ENVIRONMENTS = new Set(["subequations", "multicols"]);
+const TRANSPARENT_VISUAL_ENVIRONMENTS = new Set(["subequations", "multicols", "columns", "column"]);
 const TRANSPARENT_VISUAL_SIZE_DECLARATIONS = new Set([
+  "fontsize", "color", "bfseries", "itshape", "slshape", "scshape",
   "noindent",
   "rm",
   "tiny",
@@ -924,6 +928,46 @@ export function scanVisualDocumentStructure(
   let affiliations: readonly VisualSourceText[] = [];
   let emails: readonly VisualSourceText[] = [];
   let date: VisualSourceText | undefined;
+  const namedColors = new Map<string, string>();
+  const textStyleCommands = new Map<string, string>();
+  const styleScopes = new Map<number, {end: number} | undefined>();
+  const globalStyleDefinitions = new Set<number>();
+  const scopeStack: {end: number; globalColors: boolean}[] = [];
+  let globalColors = false, globalPrefix = false;
+  visitMathPreviewSource(text, (offset, name) => {
+    if (name === "global") { globalPrefix = true; return; }
+    if (["long", "outer", "protected"].includes(name)) return;
+    if (name === "globalcolorstrue" || name === "globalcolorsfalse") {
+      globalColors = name === "globalcolorstrue";
+      if (globalPrefix) for (const scope of scopeStack) scope.globalColors = globalColors;
+    }
+    if (name === "definecolor" || name === "setbeamercolor" || isVisualLabelDefinitionCommand(name)) {
+      styleScopes.set(offset, scopeStack.at(-1));
+      if (globalPrefix || name === "gdef" || name === "xdef" || name === "definecolor" && globalColors) {
+        globalStyleDefinitions.add(offset);
+      }
+    }
+    globalPrefix = false;
+  }, (event, offset) => {
+    if (event === "enter") scopeStack.push({end: text.length, globalColors});
+    else {
+      const scope = scopeStack.pop();
+      if (scope !== undefined) { scope.end = offset; globalColors = scope.globalColors; }
+    }
+  });
+  const styleRestorations: {end: number; map: Map<string, string>; name: string; previous: string | undefined}[] = [];
+  const setStyleDefinition = (map: Map<string, string>, name: string, value: string | undefined): void => {
+    // Unknown/opaque scopes remain source instead of promoting their definitions.
+    if (!styleScopes.has(index)) return;
+    const scope = styleScopes.get(index);
+    if (globalStyleDefinitions.has(index)) {
+      // A global assignment also replaces values saved by surrounding groups.
+      for (let i = styleRestorations.length - 1; i >= 0; i -= 1) {
+        if (styleRestorations[i]!.map === map && styleRestorations[i]!.name === name) styleRestorations.splice(i, 1);
+      }
+    } else if (scope !== undefined) styleRestorations.push({end: scope.end, map, name, previous: map.get(name)});
+    if (value === undefined) map.delete(name); else map.set(name, value);
+  };
   const titleMacros = new Map<string, ParsedArgument>();
   const redefinedCommands = new Set<string>();
   const literalTextCommands = new Set<string>();
@@ -968,6 +1012,10 @@ export function scanVisualDocumentStructure(
   };
 
   while (index < text.length) {
+    while (styleRestorations.length > 0 && styleRestorations.at(-1)!.end <= index) {
+      const {map, name, previous} = styleRestorations.pop()!;
+      if (previous === undefined) map.delete(name); else map.set(name, previous);
+    }
     while (formulaIndex < formulaRanges.length && formulaRanges[formulaIndex]!.end <= index) formulaIndex += 1;
     const formulaRange = formulaRanges[formulaIndex];
     if (formulaRange !== undefined && index >= formulaRange.start && index < formulaRange.end) {
@@ -1639,11 +1687,40 @@ export function scanVisualDocumentStructure(
       }
     }
 
+    if (control.name === "setbeamercolor" && documentClass === "beamer") {
+      const role = readRequiredArgument(text, control.end);
+      const options = role === undefined ? undefined : readRequiredArgument(text, role.end);
+      if (role !== undefined && options !== undefined && text.slice(role.contentFrom, role.contentTo).trim() === "alerted text") {
+        const foreground = /^\s*fg\s*=\s*([^,{}]+)\s*$/u.exec(text.slice(options.contentFrom, options.contentTo));
+        const color = foreground === null ? undefined : visualCssColor(foreground[1]!, undefined, namedColors);
+        setStyleDefinition(namedColors, "beamer:alert", color);
+        index = options.end;
+        continue;
+      }
+    }
+
+    if (control.name === "definecolor") {
+      const name = readRequiredArgument(text, control.end);
+      const model = name === undefined ? undefined : readRequiredArgument(text, name.end);
+      const value = model === undefined ? undefined : readRequiredArgument(text, model.end);
+      if (name !== undefined && model !== undefined && value !== undefined) {
+        const key = text.slice(name.contentFrom, name.contentTo).trim();
+        const color = visualCssColor(text.slice(value.contentFrom, value.contentTo), text.slice(model.contentFrom, model.contentTo));
+        if (/^[A-Za-z][A-Za-z0-9_-]{0,63}$/u.test(key)) setStyleDefinition(namedColors, key, color);
+        index = value.end;
+        continue;
+      }
+    }
+
     if (isVisualLabelDefinitionCommand(control.name)) {
       const staticBox = parseStaticBoxCommand(text, control, theoremDefinitions);
       if (staticBox !== undefined) staticBoxCommands.set(staticBox.name, staticBox);
+      const textWrapper = parseStaticTextStyleCommand(text, control);
       const target = collectSimpleTitleMacro(text, control, titleMacros);
       if (target !== undefined) {
+        if (control.name !== "providecommand" || !textStyleCommands.has(target)) {
+          setStyleDefinition(textStyleCommands, target, textWrapper?.name === target ? textWrapper.group : "");
+        }
         redefinedCommands.add(target);
         headingCountersAmbiguous ||= isHeadingLevel(target) ||
           target.startsWith("the") && isHeadingLevel(target.slice(3)) ||
@@ -1945,15 +2022,31 @@ export function scanVisualDocumentStructure(
       }
     }
 
+    const styleGroup = textStyleCommands.get(control.name);
+    if (styleGroup !== undefined) {
+      const first = readControl(styleGroup, 1);
+      const style = first === undefined ? undefined : parseVisualTransparentSizeDeclaration(styleGroup, 1, first, namedColors);
+      const body = readRequiredArgument(text, control.end);
+      if (style !== undefined && styleGroup.slice(style.contentFrom, style.contentTo) === "#1" && body !== undefined) {
+        pushRecord({ ...style, command: control.name, from: index, to: body.end,
+          prefixFrom: index, prefixTo: body.contentFrom, contentFrom: body.contentFrom, contentTo: body.contentTo,
+          suffixFrom: body.contentTo, suffixTo: body.end, editLabel: `编辑 \\${control.name}` });
+        index = body.contentFrom;
+        continue;
+      }
+    }
+
     const sizeDeclaration = parseVisualTransparentSizeDeclaration(
       text,
       index,
       control,
+      namedColors,
     );
     if (sizeDeclaration !== undefined) {
       pushRecord(sizeDeclaration);
       // Scan inside the group rather than jumping to its closing brace.
-      index = control.end;
+      scanJumps.set(sizeDeclaration.contentTo, sizeDeclaration.to);
+      index = sizeDeclaration.contentFrom;
       continue;
     }
 
@@ -2013,7 +2106,7 @@ export function scanVisualDocumentStructure(
       }
     }
 
-    const textStyle = parseVisualTextStyle(text, index, control);
+    const textStyle = parseVisualTextStyle(text, index, control, namedColors, documentClass === "beamer");
     if (textStyle !== undefined) {
       pushRecord(textStyle);
       // Continue scanning inside the argument so nested styles, references and
@@ -2027,7 +2120,7 @@ export function scanVisualDocumentStructure(
       continue;
     }
 
-    if (["noindent", "par", "smallskip", "medskip", "bigskip", "hfill", "newpage", "clearpage"].includes(control.name)) {
+    if (["noindent", "par", "vfill", "smallskip", "medskip", "bigskip", "hfill", "newpage", "clearpage"].includes(control.name)) {
       pushRecord({ kind: "accent", from: index, to: control.end, text: "" });
       index = control.end;
       continue;
@@ -2040,6 +2133,15 @@ export function scanVisualDocumentStructure(
         index = argument.end;
         continue;
       }
+    }
+
+    if (control.name === "\\" && findLastOpenFrame(stack) !== undefined) {
+      const optional = readOptionalArgument(text, text[control.end] === "*" ? control.end + 1 : control.end);
+      const end = optional?.end ?? (text[control.end] === "*" ? control.end + 1 : control.end);
+      pushRecord({ kind: "accent", from: index, to: end,
+        text: /^[ \t]*(?:\r?\n|%)/u.test(text.slice(end)) ? "" : "\n" });
+      index = end;
+      continue;
     }
 
     const layoutEnd = redefinedCommands.has(control.name)
@@ -4261,6 +4363,12 @@ function readDelimitedArgument(
       index = control?.end ?? index + 1;
       continue;
     }
+    if (open !== "{" && character === "{") {
+      const group = readDelimitedArgument(text, index, "{", "}");
+      if (group === undefined) return undefined;
+      index = group.end;
+      continue;
+    }
     if (character === open) {
       depth += 1;
     } else if (character === close) {
@@ -4666,6 +4774,17 @@ function parseVisualTransparentEnvironment(
   environment: string,
 ): VisualTextStyleRecord | undefined {
   let contentFrom = beginTo;
+  if (environment === "columns" || environment === "column") {
+    const options = readOptionalArgument(text, beginTo);
+    const value = options === undefined ? "" : text.slice(options.contentFrom, options.contentTo).trim();
+    if (value && !value.split(",").every(option => /^(?:[tTcb]|onlytextwidth|totalwidth\s*=\s*(?:\d+(?:\.\d*)?|\.\d+)\\textwidth)$/u.test(option.trim()))) return undefined;
+    contentFrom = options?.end ?? beginTo;
+    if (environment === "column") {
+      const width = readRequiredArgument(text, contentFrom);
+      if (width === undefined || !/^(?:\d+(?:\.\d*)?|\.\d+)\s*(?:\\(?:textwidth|linewidth)|pt|cm|mm|in|em)$/u.test(text.slice(width.contentFrom, width.contentTo).trim())) return undefined;
+      contentFrom = width.end;
+    }
+  }
   if (environment === "multicols") {
     const columns = readRequiredArgument(text, beginTo);
     const count = columns === undefined ? "" : text.slice(columns.contentFrom, columns.contentTo).trim();
@@ -4714,43 +4833,78 @@ function parseVisualTransparentSizeDeclaration(
   text: string,
   from: number,
   control: ParsedControl,
+  namedColors: ReadonlyMap<string, string>,
 ): VisualTextStyleRecord | undefined {
-  if (!TRANSPARENT_VISUAL_SIZE_DECLARATIONS.has(control.name)) {
-    return undefined;
-  }
+  if (!TRANSPARENT_VISUAL_SIZE_DECLARATIONS.has(control.name)) return undefined;
   let groupFrom = from - 1;
-  while (groupFrom >= 0 && /[ \t\r\n]/u.test(text[groupFrom] ?? "")) {
-    groupFrom -= 1;
-  }
-  if (
-    groupFrom < 0 ||
-    text[groupFrom] !== "{" ||
-    text.slice(groupFrom + 1, from).trim().length > 0
-  ) {
-    return undefined;
-  }
+  while (groupFrom >= 0 && /\s/u.test(text[groupFrom]!)) groupFrom -= 1;
+  if (text[groupFrom] !== "{") return undefined;
   const group = readDelimitedArgument(text, groupFrom, "{", "}");
-  if (group === undefined || group.contentTo < control.end) {
-    return undefined;
+  if (group === undefined || group.contentTo < control.end) return undefined;
+  const sizes: Record<string, number> = { tiny: .5, scriptsize: .65, footnotesize: .8, small: .9,
+    normalsize: 1, large: 1.2, Large: 1.44, LARGE: 1.73, huge: 2.07, Huge: 2.49 };
+  let cursor = from, fontSize: number | undefined, lineHeight: number | undefined, foreground: string | undefined;
+  let bold = false, italic = false, smallCaps = false;
+  while (cursor < group.contentTo) {
+    const declaration = readControl(text, cursor);
+    if (declaration === undefined) break;
+    let end = declaration.end;
+    if (declaration.name === "fontsize") {
+      const size = readRequiredArgument(text, end);
+      const leading = size === undefined ? undefined : readRequiredArgument(text, size.end);
+      if (size === undefined || leading === undefined) return undefined;
+      const number = (argument: ParsedArgument): number => {
+        const value = text.slice(argument.contentFrom, argument.contentTo).trim();
+        return /^(?:\d+(?:\.\d*)?|\.\d+)(?:pt)?$/u.test(value) ? Number(value.replace(/pt$/u, "")) : NaN;
+      };
+      const points = number(size), baseline = number(leading);
+      if (!(points >= 5 && points <= 72 && baseline >= points && baseline <= points * 3)) return undefined;
+      fontSize = points / 12;
+      lineHeight = baseline / points;
+      end = leading.end;
+    } else if (declaration.name === "color") {
+      const model = readOptionalArgument(text, end);
+      const color = readRequiredArgument(text, model?.end ?? end);
+      if (color === undefined) return undefined;
+      foreground = visualCssColor(text.slice(color.contentFrom, color.contentTo), model === undefined ? undefined : text.slice(model.contentFrom, model.contentTo), namedColors);
+      if (foreground === undefined) return undefined;
+      end = color.end;
+    } else if (declaration.name === "bfseries") bold = true;
+    else if (["itshape", "slshape"].includes(declaration.name)) italic = true;
+    else if (declaration.name === "scshape") smallCaps = true;
+    else if (sizes[declaration.name] !== undefined) fontSize = sizes[declaration.name];
+    else if (!["selectfont", "noindent", "rm"].includes(declaration.name)) break;
+    cursor = end;
+    while (cursor < group.contentTo && /\s/u.test(text[cursor]!)) cursor += 1;
   }
-  return transparentVisualTextStyle(
-    control.name,
-    groupFrom,
-    group.end,
-    groupFrom,
-    control.end,
-    control.end,
-    group.contentTo,
-    group.contentTo,
-    group.end,
-    `编辑 \\${control.name}`,
-  );
+  if (cursor === from) return undefined;
+  const trailing = /\\par\s*$/u.exec(text.slice(cursor, group.contentTo));
+  const contentTo = trailing === null || isEscapedAt(text, cursor + trailing.index)
+    ? group.contentTo : cursor + trailing.index;
+  return { ...transparentVisualTextStyle(control.name, groupFrom, group.end, groupFrom, cursor,
+    cursor, contentTo, contentTo, group.end, `编辑 \\${control.name}`),
+    bold, italic, smallCaps, foreground, ...(fontSize === undefined ? {} : {fontSize}),
+    ...(lineHeight === undefined ? {} : {lineHeight}) };
+}
+
+function parseStaticTextStyleCommand(text: string, control: ParsedControl): {name: string; group: string} | undefined {
+  if (!["newcommand", "renewcommand", "providecommand"].includes(control.name)) return undefined;
+  const name = readRequiredArgument(text, text[control.end] === "*" ? control.end + 1 : control.end);
+  const count = name === undefined ? undefined : readOptionalArgument(text, name.end);
+  const body = count === undefined ? undefined : readRequiredArgument(text, count.end);
+  if (name === undefined || count === undefined || body === undefined || text.slice(count.contentFrom, count.contentTo).trim() !== "1") return undefined;
+  const command = /^\\([A-Za-z@]+)$/u.exec(text.slice(name.contentFrom, name.contentTo).trim())?.[1];
+  // ponytail: literal one-argument formatting wrappers only; dynamic TeX remains source.
+  const wrapper = /^\s*(?:\\(?:par|vfill)\s*)*(\{[^#]*#1\s*(?:\\par\s*)?\})\s*$/u.exec(text.slice(body.contentFrom, body.contentTo));
+  return command === undefined || wrapper === null ? undefined : {name: command, group: wrapper[1]!};
 }
 
 function parseVisualTextStyle(
   text: string,
   from: number,
   control: ParsedControl,
+  namedColors: ReadonlyMap<string, string>,
+  beamer: boolean,
 ): VisualTextStyleRecord | undefined {
   if (control.name === "texorpdfstring" || control.name === "href") {
     const optional = control.name === "href" ? readOptionalArgument(text, control.end) : undefined;
@@ -4800,6 +4954,7 @@ function parseVisualTextStyle(
     ["st", { bold: false, italic: false, underline: false, strike: true, smallCaps: false }],
     ["textsc", { bold: false, italic: false, underline: false, strike: false, smallCaps: true }],
   ]);
+  if (beamer) simple.set("alert", { bold: true, italic: false, underline: false, strike: false, smallCaps: false });
   const simpleStyle = simple.get(control.name) ?? (["text", "textrm", "textsf", "texttt", "textnormal"].includes(control.name)
     ? { bold: false, italic: false, underline: false, strike: false, smallCaps: false } : undefined);
   if (simpleStyle !== undefined) {
@@ -4818,7 +4973,7 @@ function parseVisualTextStyle(
           suffixFrom: content.contentTo,
           suffixTo: content.end,
           ...simpleStyle,
-          foreground: undefined,
+          foreground: beamer && control.name === "alert" ? namedColors.get("beamer:alert") : undefined,
           background: undefined,
           border: undefined,
         };
@@ -4854,12 +5009,14 @@ function parseVisualTextStyle(
   const first = visualCssColor(
     text.slice(firstColor.contentFrom, firstColor.contentTo),
     colorModel,
+    namedColors,
   );
   const second = secondColor === undefined
     ? undefined
     : visualCssColor(
         text.slice(secondColor.contentFrom, secondColor.contentTo),
         colorModel,
+        namedColors,
       );
   return {
     kind: "textStyle",
@@ -4899,7 +5056,7 @@ function parseVisualAccent(
       };
 }
 
-function visualCssColor(value: string, model: string | undefined): string | undefined {
+function visualCssColor(value: string, model: string | undefined, colors: ReadonlyMap<string, string> = new Map()): string | undefined {
   const color = value.trim();
   if (color.length === 0 || color.length > 128) {
     return undefined;
@@ -4908,7 +5065,7 @@ function visualCssColor(value: string, model: string | undefined): string | unde
   if (normalizedModel === "html" && /^[0-9a-f]{6}$/iu.test(color)) {
     return `#${color}`;
   }
-  if (normalizedModel === "rgb") {
+  if (normalizedModel === "rgb" && model !== "RGB") {
     const channels = color.split(",").map((part) => Number(part.trim()));
     return channels.length === 3 && channels.every((channel) =>
       Number.isFinite(channel) && channel >= 0 && channel <= 1
@@ -4945,7 +5102,7 @@ function visualCssColor(value: string, model: string | undefined): string | unde
     ["orange", "#ffa500"], ["pink", "#ffc0cb"], ["purple", "#800080"],
     ["teal", "#008080"], ["violet", "#8a2be2"],
   ]);
-  const direct = named.get(color.toLocaleLowerCase("en-US"));
+  const direct = colors.get(color) ?? named.get(color.toLocaleLowerCase("en-US"));
   if (direct !== undefined) {
     return direct;
   }
@@ -5109,15 +5266,19 @@ function parseVisualTikzcdEnvironment(
     rawRows.pop();
   }
   if (rawRows.length === 0) {
-    return undefined;
+    rawRows.push({source: body, sourceFrom: bodyFrom, sourceTo: bounds.endFrom});
   }
   const simplified = new Set<string>();
   const environmentOptions = options === undefined
     ? undefined
     : text.slice(options.contentFrom, options.contentTo).trim() || undefined;
+  const separatorOption = splitTikzcdOptions(environmentOptions ?? "")
+    .find(option => /^ampersand\s+replacement\s*=/u.test(option));
+  const separator = separatorOption === undefined ? "&"
+    : /^ampersand\s+replacement\s*=\s*\\&\s*$/u.test(separatorOption) ? "\\&" : undefined;
   const rows = rawRows.slice(0, MAX_VISUAL_TIKZCD_ROWS);
   const rowCells = rows.map((row) =>
-    splitTabularCellSlices(row.source, row.sourceFrom).slice(
+    splitTabularCellSlices(row.source, row.sourceFrom, separator ?? "&", true).slice(
       0,
       MAX_VISUAL_TIKZCD_COLUMNS,
     )
@@ -5145,7 +5306,7 @@ function parseVisualTikzcdEnvironment(
   let truncated = rawRows.length > MAX_VISUAL_TIKZCD_ROWS ||
     rawRows.some(
       (row) =>
-        splitTabularCellSlices(row.source, row.sourceFrom).length >
+        splitTabularCellSlices(row.source, row.sourceFrom, separator ?? "&", true).length >
           MAX_VISUAL_TIKZCD_COLUMNS,
     ) ||
     pendingArrows.length > MAX_VISUAL_TIKZCD_ARROWS;
@@ -5194,7 +5355,7 @@ function parseVisualTikzcdEnvironment(
     rowCount,
     columnCount,
     environmentOptions,
-    visualEditable: !truncated && simplified.size === 0,
+    visualEditable: true,
     visualEditReason: truncated
       ? "交换图超过可视化编辑上限。"
       : simplified.size > 0
@@ -5262,26 +5423,39 @@ function parseTikzcdCell(
   readonly node: VisualMathFragment;
   readonly arrows: readonly PendingTikzcdArrow[];
 } {
-  const nodeParts: string[] = [];
+  const nodeParts: {source: string; from: number}[] = [];
   const arrows: PendingTikzcdArrow[] = [];
   let index = 0;
+  let segmentStart = 0;
+  let depth = 0;
+  let firstCommand = source.length;
   while (index < source.length) {
-    const next = source.indexOf("\\", index);
-    if (next < 0) {
-      nodeParts.push(source.slice(index));
-      break;
-    }
-    const control = readControl(source, next);
-    if (control?.name !== "arrow") {
-      nodeParts.push(source.slice(index, control?.end ?? next + 1));
-      index = control?.end ?? next + 1;
+    if (source[index] === "%" && !isEscapedAt(source, index)) {
+      nodeParts.push({source: source.slice(segmentStart, index), from: segmentStart});
+      firstCommand = Math.min(firstCommand, index);
+      index = skipComment(source, index);
+      segmentStart = index;
       continue;
     }
-    nodeParts.push(source.slice(index, next));
+    if (source[index] === "{" && !isEscapedAt(source, index)) depth++;
+    if (source[index] === "}" && !isEscapedAt(source, index)) depth = Math.max(0, depth - 1);
+    if (source[index] === "|" && depth === 0) {
+      const options = readOptionalArgument(source, index + 1);
+      if (options !== undefined && source[options.end] === "|") { index = options.end + 1; continue; }
+    }
+    if (source[index] !== "\\") { index++; continue; }
+    const control = readControl(source, index);
+    if (depth !== 0 || (control?.name !== "arrow" && control?.name !== "ar")) {
+      index = control?.end ?? index + 1;
+      continue;
+    }
+    nodeParts.push({source: source.slice(segmentStart, index), from: segmentStart});
+    firstCommand = Math.min(firstCommand, index);
     const options = readOptionalArgument(source, control.end);
     if (options === undefined) {
       simplified.add("\\arrow without an option list");
       index = control.end;
+      segmentStart = index;
       continue;
     }
     const parsed = parseTikzcdArrowOptions(
@@ -5291,20 +5465,32 @@ function parseTikzcdCell(
       column,
       simplified,
     );
-    if (parsed !== undefined) {
-      arrows.push(parsed);
-    }
+    if (parsed !== undefined) arrows.push(parsed);
     index = options.end;
+    segmentStart = index;
   }
-  const nodeSource = nodeParts.join("").trim();
-  const contiguousNodeFrom = source.indexOf(nodeSource);
-  const nodeSourceFrom = contiguousNodeFrom >= 0
-    ? sourceFrom + contiguousNodeFrom
-    : sourceFrom + Math.max(0, source.search(/\S/u));
+  nodeParts.push({source: source.slice(segmentStart), from: segmentStart});
+  const nodeSource = nodeParts.map(part => part.source).join("").trim();
+  const contiguousPart = nodeParts.find(part => part.source.includes(nodeSource));
+  const contiguousNodeFrom = contiguousPart === undefined ? -1 : contiguousPart.from + contiguousPart.source.indexOf(nodeSource);
+  let prefix = "";
+  if (nodeSource.startsWith("|")) {
+    const options = readOptionalArgument(nodeSource, 1);
+    if (options !== undefined && nodeSource[options.end] === "|") prefix = nodeSource.slice(0, options.end + 1);
+  }
+  const labelSource = nodeSource.slice(prefix.length).trim();
+  const nodeSourceFrom = contiguousNodeFrom >= 0 ? sourceFrom + contiguousNodeFrom : -1;
+  const labelFrom = nodeSourceFrom < 0 ? -1 : labelSource.length === 0
+    ? sourceFrom + Math.min(firstCommand, Math.max(0, source.search(/\S/u))) + prefix.length
+    : nodeSourceFrom + nodeSource.indexOf(labelSource, prefix.length);
   return {
-    node: mathFragmentFromLatex(nodeSource, nodeSourceFrom),
+    node: mathFragmentFromLatex(labelSource, Math.max(sourceFrom, labelFrom)),
     arrows,
   };
+}
+
+function tikzcdLabelOption(source: string): RegExpExecArray | null {
+  return /^"((?:\\.|[^"\\])*)"(')?([\s\S]*)$/u.exec(source);
 }
 
 function parseTikzcdArrowOptions(
@@ -5318,6 +5504,11 @@ function parseTikzcdArrowOptions(
   const direction = options.find((option) => /^[rlud]+$/u.test(option.source));
   const explicitFrom = parseTikzcdCoordinateOption(options, "from");
   const explicitTo = parseTikzcdCoordinateOption(options, "to");
+  if ((explicitFrom === undefined && options.some(option => /^from\s*=/u.test(option.source))) ||
+      (explicitTo === undefined && options.some(option => /^to\s*=/u.test(option.source)))) {
+    simplified.add(`arrow direction: ${source.slice(0, 160)}`);
+    return undefined;
+  }
   if (direction === undefined && explicitTo === undefined) {
     simplified.add(`arrow direction: ${source.slice(0, 160)}`);
     return undefined;
@@ -5346,7 +5537,7 @@ function parseTikzcdArrowOptions(
     ) {
       continue;
     }
-    const labelMatch = /^"([\s\S]*)"(')?$/u.exec(option.source);
+    const labelMatch = tikzcdLabelOption(option.source);
     if (labelMatch !== null) {
       label = mathFragmentFromLatex(labelMatch[1] ?? "", option.sourceFrom + 1);
       swap ||= labelMatch[2] === "'";
@@ -5956,18 +6147,30 @@ function splitTabularCells(source: string): readonly string[] {
 function splitTabularCellSlices(
   source: string,
   sourceFrom: number,
+  separator = "&",
+  protectOptions = false,
 ): readonly AbsoluteSourceSlice[] {
   const cells: AbsoluteSourceSlice[] = [];
   let start = 0;
   let braceDepth = 0;
+  let bracketDepth = 0;
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index];
+    if (character === "%" && !isEscapedAt(source, index)) {
+      index = skipComment(source, index) - 1;
+      continue;
+    }
     if (character === "{" && !isEscapedAt(source, index)) {
       braceDepth += 1;
     } else if (character === "}" && !isEscapedAt(source, index)) {
       braceDepth = Math.max(0, braceDepth - 1);
-    } else if (character === "&" && braceDepth === 0 && !isEscapedAt(source, index)) {
+    } else if (protectOptions && braceDepth === 0 && character === "[" && !isEscapedAt(source, index)) {
+      bracketDepth++;
+    } else if (protectOptions && braceDepth === 0 && character === "]" && !isEscapedAt(source, index)) {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+    } else if (source.startsWith(separator, index) && braceDepth === 0 && bracketDepth === 0 && !isEscapedAt(source, index)) {
       cells.push(absoluteSourceSlice(source, start, index, sourceFrom));
+      index += separator.length - 1;
       start = index + 1;
     }
   }

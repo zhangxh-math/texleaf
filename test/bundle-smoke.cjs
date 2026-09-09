@@ -22,6 +22,17 @@ const visualEditorBundlePath = path.resolve(
 );
 const visualEditorBundle = fs.readFileSync(visualEditorBundlePath, "utf8");
 
+const quiverDirectory = path.join(path.dirname(bundlePath), "quiver");
+const quiverHtml = fs.readFileSync(path.join(quiverDirectory, "editor.html"), "utf8");
+assert.match(quiverHtml, /connect-src 'none'/, "quiver must work without network access");
+assert.doesNotMatch(quiverHtml, /<(?:script|link)\b[^>]*(?:src|href)=["']https?:/i);
+assert.match(quiverHtml, /data:font\/woff2;base64,/, "quiver fonts must be embedded");
+assert.match(quiverHtml, /data:image\/svg\+xml;base64,/, "quiver icons must be embedded");
+assert.doesNotThrow(() => new Function(quiverHtml.match(/<script\b[^>]*>([\s\S]*?)<\/script>/)[1]));
+assert.match(fs.readFileSync(path.join(quiverDirectory, "LICENSE"), "utf8"), /Copyright \(c\) 2018 varkor/);
+assert.match(fs.readFileSync(path.join(quiverDirectory, "KaTeX", "LICENSE"), "utf8"), /MIT License/);
+assert.ok(fs.statSync(path.join(quiverDirectory, "quiver.sty")).size > 0);
+
 assert.doesNotMatch(
   bundle,
   /\brequire\w*\(\s*["']\.\.?[\\/]/,

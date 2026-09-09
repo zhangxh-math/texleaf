@@ -58,6 +58,10 @@ function render(overrides) {
 
 (async () => {
   try {
+    const beamerAlert = await render({ tex: String.raw`\alert{K_\lambda(x,y)<0}` });
+    assert.equal(beamerAlert.type, "result", beamerAlert.message);
+    const customAlert = await render({ tex: String.raw`\alert{x}`, macros: {alert: [String.raw`\mathrm{#1}`, 1]} });
+    assert.equal(customAlert.type, "result", customAlert.message);
     const symbols = await render({ tex: String.raw`\<x\>+\!{y}`,
       macros: { "<": String.raw`\langle`, ">": String.raw`\rangle`, "!": [String.raw`\mathbf{#1}`, 1] } });
     assert.equal(symbols.type, "result", symbols.message);

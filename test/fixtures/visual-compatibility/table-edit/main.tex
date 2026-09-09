@@ -1,0 +1,19 @@
+\documentclass{article}
+\usepackage{booktabs,tabularx,ytableau}
+\begin{document}
+Before the table.
+\begin{table}[htbp]
+\centering
+\caption{Values of \(N(d)\)}
+\label{tab:values}
+\begin{tabular}{@{}ccc@{}}
+\toprule
+Partition \(d\) & Genus \(g(d)\) & \(N(d)\) \\
+\midrule
+\((3)\) & \(4\) & \(\frac{1}{6}\) \\
+\((1,2)\) & \(4\) & \(\ydiagram{2,1}\) \\
+\bottomrule
+\end{tabular}
+\end{table}
+After the table.
+\end{document}

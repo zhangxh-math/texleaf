@@ -11,6 +11,9 @@ import * as path from "node:path";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
+import * as beamerSynctex from "../src/core/beamerSynctex";
+import * as latexProject from "../src/core/latexProject";
+import * as visualTextCoordinates from "../src/core/visualTextCoordinates";
 
 // Run the complete bridge; only the external VS Code/Workshop runtimes are substituted.
 function fixture(filename = "main.tex") {
@@ -50,7 +53,10 @@ function fixture(filename = "main.tex") {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText, { exports, process, require: (id: string) => id === "vscode" ? api
     : id === "node:module" ? { createRequire: () => ({ cache }) }
-    : id === "./visualEditorProtocol" ? {} : require(id) });
+    : id === "./visualEditorProtocol" ? {}
+    : id === "./core/beamerSynctex" ? beamerSynctex
+    : id === "./core/latexProject" ? latexProject
+    : id === "./core/visualTextCoordinates" ? visualTextCoordinates : require(id) });
   return { bridge: exports, plan, lw, rootFile, setResult: (value: unknown) => { result = value; },
     queue: () => exports.runLatexWorkshopInBackground({ extensionPath, packageJSON: {}, activate: async () => undefined }, "latex-workshop.build", document, {}),
     execute: () => pending.run() };

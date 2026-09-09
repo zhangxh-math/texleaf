@@ -171,6 +171,7 @@ import {
   rebindVisualFormulaAssetSource,
   visualFormulaAssetsHaveCurrentSource,
 } from "./core/visualFormula";
+import { scanLatexRegions } from "./core/latexScanner";
 import { resolveVisualFormulaActivationTarget } from "./core/visualFormulaActivation";
 import {
   applyAtomicCodeMirrorSnippet,
@@ -863,6 +864,7 @@ interface VisualImeCompositionSession {
   readonly prefix: string;
   readonly suffix: string;
   eventText: string | undefined;
+  eventTextIsFresh?: boolean;
   pendingInputIntent: VisualImeCompositionInputIntent | undefined;
 }
 let visualImeCompositionSession: VisualImeCompositionSession | undefined;
@@ -3082,6 +3084,25 @@ const editorTheme = EditorView.theme({
     borderRight: VISUAL_FRAME_RAIL,
     lineHeight: "1.55",
   },
+  ".cm-line.texleaf-frame-layout-line": {
+    minHeight: "0.35em",
+    height: "0.35em",
+    lineHeight: "0.35em",
+    paddingTop: "0",
+    paddingBottom: "0",
+  },
+  ".texleaf-frame-line .texleaf-transparent-wrapper-edit-chip": {
+    fontSize: "0",
+    opacity: "0.45",
+    verticalAlign: "middle",
+  },
+  ".texleaf-frame-line .texleaf-transparent-wrapper-edit-chip::before": {
+    content: "'⋯'",
+    fontSize: "11px",
+  },
+  ".texleaf-frame-line .texleaf-transparent-wrapper-edit-chip:hover, .texleaf-frame-line .texleaf-transparent-wrapper-edit-chip:focus-visible": {
+    opacity: "1",
+  },
   ".texleaf-frame-end": {
     boxSizing: "border-box",
     display: "flex",
@@ -4016,6 +4037,12 @@ const editorTheme = EditorView.theme({
     overflow: "hidden",
     contain: "inline-size",
   },
+  // A paper surface keeps vector ink and embedded PDF pixels consistent.
+  ".texleaf-paper-preview": {
+    color: "#000000",
+    backgroundColor: "#f1f1f1",
+    colorScheme: "light",
+  },
   ".texleaf-local-latex-preview": {
     boxSizing: "border-box",
     width: "100%",
@@ -4111,301 +4138,6 @@ const editorTheme = EditorView.theme({
     color: "var(--vscode-descriptionForeground)",
     fontSize: "0.82em",
     textAlign: "center",
-  },
-  ".texleaf-tikzcd-editor-grid": {
-    display: "grid",
-    gap: "5px",
-    width: "max-content",
-    minWidth: "100%",
-  },
-  ".texleaf-tikzcd-direct-toolbar": {
-    display: "flex",
-    alignItems: "center",
-    flexWrap: "wrap",
-    gap: "5px",
-    marginBottom: "8px",
-  },
-  ".texleaf-tikzcd-direct-toolbar-spacer": {
-    flex: "1 1 auto",
-  },
-  ".texleaf-tikzcd-zoom": {
-    minWidth: "4.5em",
-    color: "var(--vscode-descriptionForeground)",
-    fontSize: "0.78em",
-    textAlign: "center",
-  },
-  ".texleaf-tikzcd-direct-workspace": {
-    position: "relative",
-    boxSizing: "border-box",
-    minHeight: "22em",
-    maxHeight: "min(52vh, 38em)",
-    padding: "0",
-    overflow: "auto",
-    color: "var(--vscode-editor-foreground)",
-    backgroundColor: "color-mix(in srgb, var(--vscode-editor-background) 96%, var(--vscode-focusBorder) 4%)",
-    border: "1px solid var(--vscode-editorWidget-border)",
-    borderRadius: "8px",
-    outline: "none",
-  },
-  ".texleaf-tikzcd-direct-workspace:focus-within": {
-    borderColor: "var(--vscode-focusBorder)",
-  },
-  ".texleaf-tikzcd-direct-canvas": {
-    position: "relative",
-    boxSizing: "border-box",
-    width: "max-content",
-    minWidth: "0",
-    minHeight: "20em",
-    margin: "0 auto",
-    padding: "4em",
-    transformOrigin: "top left",
-  },
-  ".texleaf-tikzcd-direct-grid": {
-    position: "relative",
-    zIndex: "2",
-    display: "grid",
-    alignItems: "stretch",
-    justifyItems: "stretch",
-    gridAutoRows: "8em",
-    gap: "0",
-    width: "max-content",
-    minWidth: "0",
-    borderRight: "1px dashed color-mix(in srgb, var(--vscode-editor-foreground) 22%, transparent)",
-    borderBottom: "1px dashed color-mix(in srgb, var(--vscode-editor-foreground) 22%, transparent)",
-  },
-  ".texleaf-tikzcd-editor-cell": {
-    position: "relative",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    boxSizing: "border-box",
-    width: "8em",
-    minWidth: "8em",
-    height: "8em",
-    minHeight: "8em",
-    padding: "0",
-    border: "0",
-    borderTop: "1px dashed color-mix(in srgb, var(--vscode-editor-foreground) 22%, transparent)",
-    borderLeft: "1px dashed color-mix(in srgb, var(--vscode-editor-foreground) 22%, transparent)",
-    borderRadius: "0",
-    outline: "none",
-    cursor: "move",
-  },
-  ".texleaf-tikzcd-editor-cell:hover, .texleaf-tikzcd-editor-cell:focus": {
-    outline: "none",
-  },
-  ".texleaf-tikzcd-editor-cell-selected": {
-    borderTopColor: "color-mix(in srgb, var(--vscode-editor-foreground) 22%, transparent)",
-    borderLeftColor: "color-mix(in srgb, var(--vscode-editor-foreground) 22%, transparent)",
-  },
-  ".texleaf-tikzcd-editor-cell-selected .texleaf-tikzcd-editor-node": {
-    backgroundColor: "color-mix(in srgb, var(--vscode-editor-foreground) 17%, transparent)",
-    boxShadow: "0 0 0 2px color-mix(in srgb, var(--vscode-focusBorder) 88%, transparent)",
-  },
-  ".texleaf-tikzcd-editor-cell-drop .texleaf-tikzcd-editor-node": {
-    backgroundColor: "color-mix(in srgb, var(--vscode-terminal-ansiGreen, var(--vscode-focusBorder)) 22%, transparent)",
-    boxShadow: "0 0 0 2px var(--vscode-terminal-ansiGreen, var(--vscode-focusBorder))",
-  },
-  ".texleaf-tikzcd-editor-node": {
-    position: "relative",
-    zIndex: "4",
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    boxSizing: "border-box",
-    minWidth: "4em",
-    minHeight: "4em",
-    padding: "0.45em 0.8em",
-    color: "var(--vscode-editor-foreground)",
-    backgroundColor: "transparent",
-    border: "0",
-    borderRadius: "1em",
-    boxShadow: "none",
-    cursor: "crosshair",
-    userSelect: "none",
-    transition: "background-color 80ms ease, box-shadow 80ms ease, opacity 80ms ease",
-  },
-  ".texleaf-tikzcd-editor-node:hover": {
-    backgroundColor: "color-mix(in srgb, var(--vscode-editor-foreground) 10%, transparent)",
-  },
-  ".texleaf-tikzcd-direct-workspace-arrow-mode .texleaf-tikzcd-editor-node": {
-    cursor: "crosshair",
-  },
-  ".texleaf-tikzcd-direct-workspace:not(.texleaf-tikzcd-direct-workspace-arrow-mode) .texleaf-tikzcd-editor-node": {
-    cursor: "move",
-  },
-  ".texleaf-tikzcd-editor-node-source": {
-    backgroundColor: "color-mix(in srgb, var(--vscode-focusBorder) 18%, transparent)",
-    boxShadow: "0 0 0 2px var(--vscode-focusBorder)",
-  },
-  ".texleaf-tikzcd-editor-node-empty": {
-    minWidth: "4em",
-    minHeight: "4em",
-    opacity: "0.22",
-  },
-  ".texleaf-tikzcd-editor-node-empty:hover, .texleaf-tikzcd-editor-cell-selected .texleaf-tikzcd-editor-node-empty, .texleaf-tikzcd-editor-cell-drop .texleaf-tikzcd-editor-node-empty": {
-    opacity: "1",
-  },
-  ".texleaf-tikzcd-editor-node-label": {
-    pointerEvents: "none",
-  },
-  ".texleaf-tikzcd-connect-handle": {
-    position: "absolute",
-    left: "50%",
-    top: "50%",
-    zIndex: "-1",
-    width: "18px",
-    height: "18px",
-    padding: "0",
-    backgroundColor: "transparent",
-    border: "0",
-    borderRadius: "50%",
-    opacity: "0",
-    transform: "translate(-50%, -50%)",
-    pointerEvents: "none",
-  },
-  ".texleaf-tikzcd-mode-active": {
-    color: "var(--vscode-button-foreground)",
-    backgroundColor: "var(--vscode-button-background)",
-    borderColor: "var(--vscode-focusBorder)",
-  },
-  ".texleaf-tikzcd-editor-arrows": {
-    position: "absolute",
-    inset: "0",
-    zIndex: "3",
-    width: "100%",
-    height: "100%",
-    overflow: "visible",
-    color: "var(--vscode-editor-foreground)",
-    pointerEvents: "none",
-  },
-  ".texleaf-tikzcd-editor-arrow-hit": {
-    fill: "none",
-    stroke: "transparent",
-    strokeWidth: "16px",
-    pointerEvents: "stroke",
-    cursor: "pointer",
-  },
-  ".texleaf-tikzcd-editor-arrow-selected": {
-    filter: "drop-shadow(0 0 2px var(--vscode-focusBorder))",
-  },
-  ".texleaf-tikzcd-editor-endpoint": {
-    // Keep the drag target visible without painting over the marker-end that
-    // terminates at the same coordinate.
-    fill: "transparent",
-    stroke: "var(--vscode-focusBorder)",
-    strokeWidth: "2px",
-    pointerEvents: "all",
-    cursor: "crosshair",
-  },
-  ".texleaf-tikzcd-editor-drag-line": {
-    fill: "none",
-    stroke: "var(--vscode-focusBorder)",
-    strokeWidth: "1.7px",
-    strokeLinecap: "round",
-    pointerEvents: "none",
-  },
-  ".texleaf-tikzcd-editor-arrow-label": {
-    position: "absolute",
-    zIndex: "5",
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    maxWidth: "18em",
-    padding: "1px 4px",
-    overflow: "hidden",
-    color: "var(--vscode-editor-foreground)",
-    backgroundColor: "var(--vscode-editorWidget-background)",
-    border: "1px solid transparent",
-    borderRadius: "3px",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-    transform: "translate(-50%, -50%)",
-    pointerEvents: "none",
-  },
-  ".texleaf-tikzcd-editor-arrow-label-selected": {
-    borderColor: "var(--vscode-focusBorder)",
-  },
-  ".texleaf-tikzcd-selection-panel": {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(11em, 1fr))",
-    gap: "8px",
-    marginTop: "9px",
-    padding: "9px",
-    backgroundColor: "color-mix(in srgb, var(--vscode-editorWidget-background) 70%, transparent)",
-    border: "1px solid var(--vscode-editorWidget-border)",
-    borderRadius: "5px",
-  },
-  ".texleaf-tikzcd-selection-title, .texleaf-tikzcd-selection-hint": {
-    gridColumn: "1 / -1",
-    margin: "0",
-  },
-  ".texleaf-tikzcd-selection-title": {
-    fontSize: "0.86em",
-    fontWeight: "700",
-  },
-  ".texleaf-tikzcd-selection-hint": {
-    color: "var(--vscode-descriptionForeground)",
-    fontSize: "0.78em",
-  },
-  ".texleaf-tikzcd-field": {
-    display: "flex",
-    flexDirection: "column",
-    gap: "3px",
-    minWidth: "0",
-    color: "var(--vscode-descriptionForeground)",
-    fontSize: "0.76em",
-  },
-  ".texleaf-tikzcd-field input[type=text], .texleaf-tikzcd-field select": {
-    boxSizing: "border-box",
-    width: "100%",
-    minHeight: "29px",
-    padding: "3px 6px",
-    color: "var(--vscode-input-foreground)",
-    backgroundColor: "var(--vscode-input-background)",
-    border: "1px solid var(--vscode-input-border, var(--vscode-editorWidget-border))",
-    borderRadius: "3px",
-    fontFamily: "var(--vscode-editor-font-family)",
-    fontSize: "var(--vscode-editor-font-size)",
-  },
-  ".texleaf-tikzcd-selection-actions": {
-    gridColumn: "1 / -1",
-    display: "flex",
-    alignItems: "center",
-    flexWrap: "wrap",
-    gap: "5px",
-  },
-  ".texleaf-tikzcd-node-input": {
-    boxSizing: "border-box",
-    width: "clamp(7em, 14vw, 18em)",
-    minHeight: "30px",
-    padding: "4px 6px",
-    color: "var(--vscode-input-foreground)",
-    backgroundColor: "var(--vscode-input-background)",
-    border: "1px solid var(--vscode-input-border, var(--vscode-editorWidget-border))",
-    borderRadius: "3px",
-    fontFamily: "var(--vscode-editor-font-family)",
-    fontSize: "0.86em",
-    textAlign: "center",
-  },
-  ".texleaf-tikzcd-arrow-editor": {
-    display: "grid",
-    gridTemplateColumns: "minmax(7em, auto) minmax(7em, auto) minmax(8em, 1fr) minmax(7em, auto) auto auto",
-    alignItems: "center",
-    gap: "5px",
-    marginTop: "6px",
-  },
-  ".texleaf-tikzcd-arrow-editor select, .texleaf-tikzcd-arrow-editor input[type=text]": {
-    boxSizing: "border-box",
-    minHeight: "27px",
-    minWidth: "0",
-    padding: "3px 5px",
-    color: "var(--vscode-input-foreground)",
-    backgroundColor: "var(--vscode-input-background)",
-    border: "1px solid var(--vscode-input-border, var(--vscode-editorWidget-border))",
-    borderRadius: "3px",
-    fontFamily: "var(--vscode-editor-font-family)",
-    fontSize: "0.82em",
   },
   ".texleaf-table-caption, .texleaf-image-caption": {
     display: "flex",
@@ -5343,6 +5075,11 @@ const editorTheme = EditorView.theme({
     border: "0",
     borderRadius: "0",
   },
+  ".texleaf-frame-content-shell > .texleaf-paper-preview": {
+    backgroundColor: "#f1f1f1",
+    padding: "12px 14px",
+    borderRadius: "7px",
+  },
   ".texleaf-frame-content-shell.texleaf-formula-shell": {
     padding: "0.3em 18px",
   },
@@ -6215,6 +5952,7 @@ function appendDiagramReferenceHover(
       record.asset,
       record.kind === "tikzcd" ? "引用目标交换图" : "引用目标 TikZ 图",
     );
+    root.classList.add("texleaf-paper-preview");
     exact.classList.add("texleaf-reference-hover-diagram-exact");
     root.append(exact);
     if (record.kind === "figure" && record.caption !== undefined) root.append(createInlineContentElement(record.captionSegments, record.caption, "texleaf-reference-hover-structure-caption"));
@@ -6932,9 +6670,15 @@ function applyDocumentMessage(message: VisualDocumentHostMessage): void {
   const activeBracketConfigurationChanged =
     inputFeatures.highlightActiveBracketPair !==
       message.inputFeatures.highlightActiveBracketPair;
+  const previewZoomChanged = inputFeatures.previewZoomPercent !== message.inputFeatures.previewZoomPercent;
   const compatibilityModeChanged = inputFeatures.compatibilityMode !== message.inputFeatures.compatibilityMode;
   assetGeneration = message.assetGeneration;
   inputFeatures = message.inputFeatures;
+  if (previewZoomChanged) {
+    for (const preview of Array.from(document.querySelectorAll(".texleaf-local-latex-preview"))) {
+      preview.dispatchEvent(new Event("texleaf-preview-zoom-change"));
+    }
+  }
   const enhanced = inputFeatures.compatibilityMode === "maximum";
   requiredElement<HTMLButtonElement>("visual-mode-button").textContent = enhanced ? "增强可视化" : "标准可视化";
   requiredElement<HTMLButtonElement>("visual-mode-basic").setAttribute("aria-checked", String(!enhanced));
@@ -6981,6 +6725,23 @@ function applyDocumentMessage(message: VisualDocumentHostMessage): void {
         extensions: createEditorExtensions(message.editable),
       }),
     });
+    // Chromium may drop compositionend when a decorated candidate disappears.
+    // CodeMirror ignores key handlers while composing, so recover in capture
+    // phase when the browser confirms that an ordinary key is no longer IME.
+    editor.contentDOM.addEventListener("keydown", (event) => {
+      if (
+        editor !== undefined &&
+        (visualImeCompositionActive || editor.composing) &&
+        !visualImeCompositionDomEnded &&
+        event.isTrusted && !event.isComposing && event.keyCode !== 229 &&
+        (event.key.length === 1 || /^(?:Backspace|Delete|Enter|Escape|Arrow(?:Left|Right|Up|Down)|Home|End)$/u.test(event.key))
+      ) {
+        editor.contentDOM.dispatchEvent(new CompositionEvent("compositionend", {
+          bubbles: true,
+          data: visualImeCompositionSession?.eventText ?? "",
+        }));
+      }
+    }, true);
     rememberVisualImeStableSelection(editor, true);
     syncEditorModeClass(editor);
     installPersistentEditorScrollbar(editor);
@@ -7728,6 +7489,7 @@ function updateVisualImeCompositionText(event: Event): void {
   }
   if (event instanceof CompositionEvent) {
     visualImeCompositionSession.eventText = event.data;
+    visualImeCompositionSession.eventTextIsFresh = true;
   }
 }
 
@@ -9779,6 +9541,7 @@ function handleVisualInputBeforeCollapsedBlock(
       session.eventText,
       inputIntent,
       {
+        freshCompositionText: session.eventTextIsFresh === true,
         finalCommit:
           visualImeCompositionDomEnded &&
           nativeUserEvent?.includes("compose") === true,
@@ -9792,6 +9555,7 @@ function handleVisualInputBeforeCollapsedBlock(
 
     session.to = plan.cursor;
     session.eventText = plan.insert;
+    session.eventTextIsFresh = false;
     // Always replay the immutable-prefix/suffix plan. Even when the native
     // transaction produces the right EditorState, Chromium can retain a stale
     // composition DOM anchored to an earlier decorated formula token.
@@ -10550,6 +10314,15 @@ function attachVirtualLatexInput(
       scheduleVirtualMathPreview(binding, true);
     }
   });
+  input.addEventListener("scroll", () => {
+    const popup = virtualMathPreviewPopup;
+    if (virtualMathPreviewBinding === binding && popup?.parentElement) {
+      positionVirtualMathPreview(binding, popup, popup.parentElement);
+    }
+  });
+  input.addEventListener("selectionchange", () => {
+    if (document.activeElement === input) scheduleVirtualMathPreview(binding);
+  });
   input.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.code === "Space") {
       event.preventDefault();
@@ -10787,7 +10560,7 @@ function scheduleVirtualMathPreview(
     binding.context,
     binding.input.value,
     binding.input.selectionStart ?? binding.input.value.length,
-  );
+  )?.tex;
   if (tex === undefined) {
     closeVirtualMathPreview(binding);
     return;
@@ -10832,45 +10605,22 @@ function virtualMathPreviewSource(
   context: VisualEditorVirtualInputContext,
   value: string,
   cursor: number,
-): string | undefined {
+): { readonly tex: string; readonly from: number } | undefined {
   const trimmed = value.trim();
-  if (trimmed.length === 0) {
-    return undefined;
+  if (trimmed.length === 0) return undefined;
+  const from = value.length - value.trimStart().length;
+  if (context === "tikzcd") return { tex: trimmed, from };
+  const boundedCursor = clampVirtualInputOffset(cursor, value.length);
+  const region = scanLatexRegions(value)
+    .filter((candidate) => boundedCursor >= candidate.outerStart && boundedCursor <= candidate.outerEnd)
+    .sort((left, right) => (left.outerEnd - left.outerStart) - (right.outerEnd - right.outerStart))[0];
+  if (region !== undefined) {
+    const tex = value.slice(region.innerStart, region.innerEnd).trim();
+    return tex.length === 0 ? undefined : { tex, from: region.outerStart };
   }
-  if (context === "tikzcd") {
-    return trimmed;
-  }
-  if (trimmed.length > 2 && trimmed.startsWith("$") && trimmed.endsWith("$")) {
-    const unwrapped = trimmed.slice(1, -1).trim();
-    return unwrapped.length === 0 ? undefined : unwrapped;
-  }
-  for (const [open, close] of [["\\(", "\\)"], ["\\[", "\\]"]] as const) {
-    if (trimmed.startsWith(open) && trimmed.endsWith(close)) {
-      const unwrapped = trimmed.slice(open.length, -close.length).trim();
-      return unwrapped.length === 0 ? undefined : unwrapped;
-    }
-  }
-  if (context === "table") {
-    const boundedCursor = clampVirtualInputOffset(cursor, value.length);
-    const region = [boundedCursor, boundedCursor - 1, boundedCursor - 2]
-      .filter((offset, index, values) => offset >= 0 && values.indexOf(offset) === index)
-      .map((offset) => innermostLatexMathRegion(value, offset))
-      .find((candidate) => candidate !== undefined);
-    if (region !== undefined) {
-      const unwrapped = value.slice(region.innerStart, region.innerEnd).trim();
-      return unwrapped.length === 0 ? undefined : unwrapped;
-    }
-    // A mixed cell with explicit math delimiters must never fall through to
-    // whole-cell rendering merely because the caret sits just outside the
-    // current region. That produced previews such as `Partition\\(d\\)`.
-    if (/\$|\\[([]/u.test(value)) {
-      return undefined;
-    }
-  }
-  // A tabular cell lives in text mode, so ordinary words should not suddenly
-  // turn into italic mathematics merely because the cell is focused. Still
-  // preview explicit LaTeX-like math while its delimiters are being composed.
-  return /(?:\\[A-Za-z]+|[_^{}])/u.test(trimmed) ? trimmed : undefined;
+  // Explicit delimiters limit the preview to the formula under the caret.
+  if (/\$|\\[([]/u.test(value)) return undefined;
+  return /(?:\\[A-Za-z]+|[_^{}])/u.test(trimmed) ? { tex: trimmed, from } : undefined;
 }
 
 function resolveVirtualMathRenderResult(
@@ -10957,18 +10707,29 @@ function positionVirtualMathPreview(
   popup: HTMLElement,
   panel: HTMLElement,
 ): void {
+  const input = binding.input;
+  const source = virtualMathPreviewSource(binding.context, input.value, input.selectionStart ?? input.value.length);
+  if (source === undefined) return;
   const panelRect = panel.getBoundingClientRect();
-  const inputRect = binding.input.getBoundingClientRect();
-  const popupRect = popup.getBoundingClientRect();
-  const preferredLeft = inputRect.left - panelRect.left;
-  popup.style.left = `${clampNumber(
-    preferredLeft,
-    4,
-    Math.max(4, panel.clientWidth - popupRect.width - 4),
-  )}px`;
-  const above = inputRect.top - panelRect.top - popupRect.height - 4;
-  const below = inputRect.bottom - panelRect.top + 4;
-  popup.style.top = `${above >= 4 ? above : below}px`;
+  const inputRect = input.getBoundingClientRect();
+  const style = getComputedStyle(input);
+  const measure = document.createElement("canvas").getContext("2d");
+  if (measure !== null) measure.font = style.font;
+  const prefixWidth = measure?.measureText(input.value.slice(0, source.from)).width ?? 0;
+  const textLeft = inputRect.left + finiteCssPixels(style.borderLeftWidth, 0) + finiteCssPixels(style.paddingLeft, 0);
+  const anchorLeft = clampNumber(textLeft + prefixWidth - input.scrollLeft, textLeft, inputRect.right - 4);
+  const left = Math.max(4, anchorLeft - panelRect.left - panel.clientLeft);
+  popup.style.left = `${left}px`;
+  // Preserve the delimiter anchor at the right edge, as the body preview does.
+  popup.style.maxWidth = `min(30em, ${Math.max(1, panel.clientWidth - left - 4)}px)`;
+  const height = popup.getBoundingClientRect().height;
+  const gap = VISUAL_MATH_PREVIEW_INLINE_GAP_PX;
+  const viewport = editor?.scrollDOM.getBoundingClientRect();
+  const aboveFits = inputRect.top - height - gap >= Math.max(0, viewport?.top ?? 0);
+  const belowFits = inputRect.bottom + gap + height <= Math.min(window.innerHeight, viewport?.bottom ?? window.innerHeight);
+  const below = mathPreviewPlacement === "below" ||
+    (mathPreviewPlacement !== "above" && (mathPreviewPlacement === "autoBelow" ? belowFits || !aboveFits : !aboveFits && belowFits));
+  popup.style.top = `${(below ? inputRect.bottom + gap : inputRect.top - height - gap) - panelRect.top - panel.clientTop}px`;
 }
 
 function closeVirtualMathPreview(binding?: VirtualLatexInputBinding): void {
@@ -13506,7 +13267,7 @@ function buildStructurePresentation(
         );
         break;
       case "frame":
-        addFrameDecorations(decorations, record, state, addReplacement);
+        addFrameDecorations(decorations, record, sourceReveal, state, addReplacement);
         break;
       case "abstract":
         addAbstractDecorations(
@@ -13689,7 +13450,8 @@ function buildStructurePresentation(
           !sourceRevealTouchesRange(sourceReveal, record.from, record.to)
         ) {
           const decoration = Decoration.replace({
-            widget: new AccentWidget(record),
+            ...(record.text === "" && frameContainsSourceRange(records, record.from, record.to)
+              ? {} : { widget: new AccentWidget(record) }),
             inclusive: false,
           });
           decorations.push(decoration.range(record.from, record.to));
@@ -13803,7 +13565,7 @@ function addTextStyleDecorations(
     decorations.push(hidden.range(from, to));
     atomic.push(hidden.range(from, to));
   }
-  if (record.contentFrom >= record.contentTo || transparent) {
+  if (record.contentFrom >= record.contentTo) {
     return;
   }
   const classes = [
@@ -13815,6 +13577,12 @@ function addTextStyleDecorations(
     record.smallCaps ? "texleaf-text-style-smallcaps" : "",
   ].filter(Boolean).join(" ");
   const styles: string[] = [];
+  if (Number.isFinite(record.fontSize) && record.fontSize! >= .4 && record.fontSize! <= 6) {
+    styles.push(`font-size:calc(var(--vscode-editor-font-size, 14px) * ${record.fontSize})`);
+  }
+  if (Number.isFinite(record.lineHeight) && record.lineHeight! >= 1 && record.lineHeight! <= 3) {
+    styles.push(`line-height:${record.lineHeight}`);
+  }
   if (safeVisualStyleValue(record.foreground)) {
     styles.push(`color:${record.foreground}`);
   }
@@ -14133,6 +13901,7 @@ function addTheoremDecorations(
 function addFrameDecorations(
   decorations: Range<Decoration>[],
   record: VisualFrameRecord,
+  sourceReveal: StructureSourceReveal | undefined,
   state: EditorState,
   addReplacement: (
     range: VisualReplacementRange,
@@ -14152,7 +13921,11 @@ function addFrameDecorations(
   while (position < record.bodyTo) {
     const line = state.doc.lineAt(position);
     decorations.push(
-      Decoration.line({ class: "texleaf-frame-line" }).range(line.from),
+      Decoration.line({ class: ["texleaf-frame-line",
+        (abstractLayoutSpacingKind(line.text) !== undefined || /^\s*\\vfill\s*$/u.test(line.text)) &&
+          !selectionTouchesRange(state, line.from, line.to) && !sourceRevealTouchesRange(sourceReveal, line.from, line.to)
+          ? "texleaf-frame-layout-line" : "",
+      ].filter(Boolean).join(" ") }).range(line.from),
     );
     if (line.to >= record.bodyTo || line.to >= state.doc.length) {
       break;
@@ -16346,6 +16119,7 @@ function renderVisualTableEditor(
   );
   attachVirtualLatexInput(captionInput, {
     context: "table",
+    mathPreview: true,
     getAnchor: () => tableEditorSourceAnchor(card, view, record),
     commit: (value) => {
       model.caption = value;
@@ -16932,6 +16706,7 @@ function hasUnescapedTableSeparator(source: string): boolean {
 let tikzcdMarkerSequence = 0;
 
 class TikzcdWidget extends WidgetType {
+  private card: HTMLElement | undefined;
   private cleanup: (() => void) | undefined;
 
   public constructor(
@@ -16943,12 +16718,15 @@ class TikzcdWidget extends WidgetType {
 
   public override eq(other: TikzcdWidget): boolean {
     return this.insideFrame === other.insideFrame &&
-      visualPresentationKey(this.record) === visualPresentationKey(other.record);
+      ((this.record.tex === other.record.tex &&
+        Boolean(this.card?.querySelector('.texleaf-quiver-editor') ?? other.card?.querySelector('.texleaf-quiver-editor'))) ||
+      visualPresentationKey(this.record) === visualPresentationKey(other.record));
   }
 
   public override toDOM(view: EditorView): HTMLElement {
     const card = document.createElement("section");
-    card.className = "texleaf-tikzcd-card";
+    this.card = card;
+    card.className = "texleaf-tikzcd-card texleaf-paper-preview";
     card.tabIndex = 0;
     card.title = "tikz-cd 交换图预览";
     card.dataset.texleafBodyFrom = String(this.record.bodyFrom);
@@ -16977,7 +16755,7 @@ class TikzcdWidget extends WidgetType {
       visual.addEventListener("pointerdown", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        openVisualTikzcdEditor(card, view, this.record, visual);
+        openQuiverTikzcdEditor(card, view, this.record, visual);
       });
       actions.append(visual);
     }
@@ -16990,6 +16768,7 @@ class TikzcdWidget extends WidgetType {
     card.append(actions);
 
     if (this.record.asset !== undefined) {
+      card.classList.add("texleaf-paper-preview");
       card.append(createLocalLatexStructurePreview(
         this.record.asset,
         "tikz-cd 交换图的本地 TeX 精确预览",
@@ -17101,6 +16880,7 @@ class TikzcdWidget extends WidgetType {
   }
 
   public override destroy(_dom: HTMLElement): void {
+    _dom.querySelector(".texleaf-quiver-editor")?.dispatchEvent(new Event("texleaf-request-close"));
     this.cleanup?.();
     this.cleanup = undefined;
   }
@@ -17123,6 +16903,7 @@ class TikzpictureWidget extends WidgetType {
     const card = document.createElement("figure");
     card.className = this.record.kind === "figure" ? "texleaf-tikzpicture-card texleaf-whole-figure-card" : "texleaf-tikzpicture-card";
     card.tabIndex = 0;
+    card.classList.add("texleaf-paper-preview");
     card.title = this.record.kind === "figure" ? "完整图形预览" : "TikZ 图形预览";
     wireSourcePointer(
       card,
@@ -17183,28 +16964,41 @@ function createLocalLatexStructurePreview(
   label: string,
 ): HTMLElement {
   const root = document.createElement("div");
-  root.className = "texleaf-local-latex-preview";
-  // Authored white fills and imported PDF artwork need a stable paper canvas.
-  // Keep this shared by document cards and reference previews.
-  root.style.color = "#010203";
+  root.className = "texleaf-local-latex-preview texleaf-paper-preview";
   configureStructureHorizontalScroll(root, label);
-  root.style.setProperty(
-    "--texleaf-local-preview-width",
-    `${safeFormulaDimension(asset.widthEm, 1)}em`,
-  );
-  root.style.setProperty(
-    "--texleaf-local-preview-height",
-    `${safeFormulaDimension(asset.heightEm, 1)}em`,
-  );
   const svg = createFormulaSvg(asset);
   if (svg === undefined) {
     return createLocalLatexStructureFallback("本地 TeX 已完成，但 SVG 结果无法安全显示。");
   }
   svg.removeAttribute("aria-hidden");
   svg.setAttribute("aria-label", label);
-  svg.style.backgroundColor = "#fff";
-  svg.style.padding = "4px";
-  root.append(svg);
+  const defaultZoom = (): number => (inputFeatures.previewZoomPercent ?? 150) / 100;
+  let zoom = defaultZoom();
+  const controls = document.createElement("div");
+  controls.className = "texleaf-structure-actions";
+  controls.style.position = "sticky";
+  controls.style.left = "0";
+  const updateZoom = (value: number): void => {
+    zoom = Math.max(0.5, Math.min(4, value));
+    root.style.setProperty("--texleaf-local-preview-width", `${safeFormulaDimension(asset.widthEm, 1) * zoom}em`);
+    root.style.setProperty("--texleaf-local-preview-height", `${safeFormulaDimension(asset.heightEm, 1) * zoom}em`);
+    smaller.disabled = zoom === 0.5;
+    larger.disabled = zoom === 4;
+    reset.textContent = `${Math.round(zoom * 100)}% · 重置`;
+    reset.title = `恢复默认预览大小（${Math.round(defaultZoom() * 100)}%）`;
+  };
+  const smaller = createPlainStructureButton("缩小", () => updateZoom(zoom - 0.25));
+  const reset = createPlainStructureButton("重置", () => updateZoom(defaultZoom()));
+  const larger = createPlainStructureButton("放大", () => updateZoom(zoom + 0.25));
+  root.addEventListener("texleaf-preview-zoom-change", () => updateZoom(defaultZoom()));
+  for (const button of [smaller, reset, larger]) {
+    for (const type of ["pointerdown", "mousedown", "keydown"]) {
+      button.addEventListener(type, event => event.stopPropagation());
+    }
+  }
+  controls.append(smaller, reset, larger);
+  updateZoom(zoom);
+  root.append(controls, svg);
   return root;
 }
 
@@ -17377,7 +17171,6 @@ function drawTikzcdArrows(
 function createTikzcdMarker(
   id: string,
   double: boolean,
-  color = "currentColor",
 ): SVGMarkerElement {
   const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
   marker.id = id;
@@ -17394,11 +17187,9 @@ function createTikzcdMarker(
       ? "M 0.5 1 L 5 4.5 L 0.5 8 M 5.5 1 L 10 4.5 L 5.5 8"
       : "M 1 0.8 L 8.6 4.5 L 1 8.2",
   );
-  // q.uiver uses a light chevron instead of a filled triangular cap.  The
-  // open head remains legible inside the transparent endpoint ring while an
-  // arrow is selected and also reads better over an editor wallpaper.
+  // Open chevrons remain legible at small preview sizes.
   path.style.fill = "none";
-  path.style.stroke = color;
+  path.style.stroke = "currentColor";
   path.setAttribute("stroke-width", double ? "1.2" : "1.35");
   path.setAttribute("stroke-linecap", "round");
   path.setAttribute("stroke-linejoin", "round");
@@ -17420,1925 +17211,88 @@ function tikzcdNodeBoundaryDistance(
   return Math.min(horizontal, vertical);
 }
 
-type MutableTikzcdLineStyle = "solid" | "dashed" | "dotted";
-type MutableTikzcdBend = "none" | "left" | "right";
-type MutableTikzcdHead = "normal" | "twoHeads" | "hook" | "noHead";
-
-interface MutableTikzcdArrow {
-  fromRow: number;
-  fromColumn: number;
-  toRow: number;
-  toColumn: number;
-  label: string;
-  swap: boolean;
-  lineStyle: MutableTikzcdLineStyle;
-  bend: MutableTikzcdBend;
-  bendAmount: number;
-  head: MutableTikzcdHead;
-}
-
-interface MutableTikzcdModel {
-  nodes: string[][];
-  arrows: MutableTikzcdArrow[];
-  rowCount: number;
-  columnCount: number;
-}
-
-type MutableTikzcdSelection =
-  | { readonly kind: "node"; readonly row: number; readonly column: number }
-  | { readonly kind: "arrow"; readonly index: number };
-
-interface MutableTikzcdEditorSession {
-  model: MutableTikzcdModel;
-  selection: MutableTikzcdSelection | undefined;
-  focusRow: number;
-  focusColumn: number;
-  arrowMode: boolean;
-  zoom: number;
-  history: MutableTikzcdModel[];
-  future: MutableTikzcdModel[];
-  /** Initial host renders plus renders produced while editing this diagram. */
-  readonly fragments: Map<string, VisualMathFragment>;
-  readonly record: VisualTikzcdRecord;
-  readonly panel: HTMLElement;
-  readonly card: HTMLElement;
-  readonly view: EditorView;
-  readonly close: () => void;
-  cancelPointerDrag: (() => void) | undefined;
-  disposeCanvas: (() => void) | undefined;
-  redrawCanvas: (() => void) | undefined;
-}
-
-function openVisualTikzcdEditor(
-  card: HTMLElement,
-  view: EditorView,
-  record: VisualTikzcdRecord,
-  trigger: HTMLButtonElement,
-): void {
-  const existing = card.querySelector<HTMLElement>(".texleaf-visual-structure-editor");
-  if (existing !== null) {
-    existing.dispatchEvent(new Event("texleaf-request-close"));
-    return;
-  }
-  const viewportAnchor = structureCardViewportAnchor(card);
-  const triggerLabel = trigger.textContent ?? "可视化编辑交换图";
-  trigger.textContent = "关闭交换图编辑";
-  trigger.setAttribute("aria-pressed", "true");
-  const nodes = Array.from({ length: record.rowCount }, () =>
-    Array.from({ length: record.columnCount }, () => "")
-  );
-  for (const node of record.nodes) {
-    if (nodes[node.row] !== undefined) {
-      nodes[node.row]![node.column] = node.math.tex;
-    }
-  }
-  const model: MutableTikzcdModel = {
-    nodes,
-    arrows: record.arrows.map((arrow) => ({
-      fromRow: arrow.fromRow,
-      fromColumn: arrow.fromColumn,
-      toRow: arrow.toRow,
-      toColumn: arrow.toColumn,
-      label: arrow.label?.tex ?? "",
-      swap: arrow.swap,
-      lineStyle: arrow.lineStyle,
-      bend: arrow.bend ?? "none",
-      bendAmount: arrow.bendAmount ?? 30,
-      head: arrow.head === "none" ? "noHead" : arrow.head,
-    })),
-    rowCount: record.rowCount,
-    columnCount: record.columnCount,
-  };
-  const panel = document.createElement("section");
-  panel.className = "texleaf-visual-structure-editor texleaf-tikzcd-visual-editor";
-  panel.addEventListener("pointerdown", (event) => event.stopPropagation());
-  const fragments = new Map<string, VisualMathFragment>();
-  for (const node of record.nodes) {
-    fragments.set(node.math.tex.trim(), node.math);
-  }
-  for (const arrow of record.arrows) {
-    if (arrow.label !== undefined) {
-      fragments.set(arrow.label.tex.trim(), arrow.label);
-    }
-  }
-  let session: MutableTikzcdEditorSession;
-  let closed = false;
-  const close = (): void => {
-    if (closed) {
-      return;
-    }
-    closed = true;
-    const closeAnchor = structureCardViewportAnchor(card);
-    session.cancelPointerDrag?.();
-    session.disposeCanvas?.();
-    panel.remove();
-    trigger.textContent = triggerLabel;
-    trigger.setAttribute("aria-pressed", "false");
-    retainStructureCardViewport(view, card, closeAnchor, trigger);
-  };
-  panel.addEventListener("texleaf-request-close", close);
-  session = {
-    model,
-    selection: undefined,
-    focusRow: 0,
-    focusColumn: 0,
-    arrowMode: true,
-    zoom: 1,
-    history: [],
-    future: [],
-    fragments,
-    record,
-    panel,
-    card,
-    view,
-    close,
-    cancelPointerDrag: undefined,
-    disposeCanvas: undefined,
-    redrawCanvas: undefined,
-  };
-  panel.addEventListener("keydown", (event) => {
-    const target = event.target;
-    const nativeTextControl = target instanceof HTMLInputElement ||
-      target instanceof HTMLTextAreaElement ||
-      target instanceof HTMLSelectElement;
-    if (!nativeTextControl && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
-      event.preventDefault();
-      event.stopPropagation();
-      if (event.shiftKey) {
-        redoMutableTikzcdEdit(session);
-      } else {
-        undoMutableTikzcdEdit(session);
-      }
-    } else if (!nativeTextControl && event.ctrlKey && event.key.toLowerCase() === "y") {
-      event.preventDefault();
-      event.stopPropagation();
-      redoMutableTikzcdEdit(session);
-    } else if (!nativeTextControl && (event.key === "Delete" || event.key === "Backspace")) {
-      if (deleteMutableTikzcdSelection(session)) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
-    } else if (!nativeTextControl && event.key === "Escape" && session.selection !== undefined) {
-      event.preventDefault();
-      session.selection = undefined;
-      renderVisualTikzcdEditor(session);
-    }
-  }, true);
-  renderVisualTikzcdEditor(session);
-  card.append(panel);
-  retainStructureCardViewport(
-    view,
-    card,
-    viewportAnchor,
-    panel.querySelector<HTMLElement>(".texleaf-tikzcd-editor-cell[tabindex='0']") ?? undefined,
-  );
-}
-
-function renderVisualTikzcdEditor(session: MutableTikzcdEditorSession): void {
-  const { panel, card, view, model } = session;
-  session.cancelPointerDrag?.();
-  session.disposeCanvas?.();
-  session.cancelPointerDrag = undefined;
-  session.disposeCanvas = undefined;
-  session.redrawCanvas = undefined;
-  normalizeMutableTikzcdModel(model);
-  normalizeMutableTikzcdSelection(session);
-  panel.replaceChildren();
-  const title = document.createElement("h3");
-  title.className = "texleaf-visual-structure-editor-title";
-  title.textContent = "tikzcd 直接操纵编辑器";
-  panel.append(title);
-
-  const toolbar = document.createElement("div");
-  toolbar.className = "texleaf-tikzcd-direct-toolbar";
-  const undo = createTikzcdActionButton("撤销图中操作", "undo", () => {
-    undoMutableTikzcdEdit(session);
-  });
-  undo.disabled = session.history.length === 0;
-  const redo = createTikzcdActionButton("重做图中操作", "redo", () => {
-    redoMutableTikzcdEdit(session);
-  });
-  redo.disabled = session.future.length === 0;
-  const addRow = createTikzcdActionButton("添加行", "add-row", () => {
-    mutateMutableTikzcdModel(session, () => {
-      model.rowCount += 1;
-      model.nodes.push(Array.from({ length: model.columnCount }, () => ""));
-      session.focusRow = model.rowCount - 1;
-    });
-  });
-  addRow.disabled = model.rowCount >= 16;
-  const addColumn = createTikzcdActionButton("添加列", "add-column", () => {
-    mutateMutableTikzcdModel(session, () => {
-      model.columnCount += 1;
-      for (const row of model.nodes) {
-        row.push("");
-      }
-      session.focusColumn = model.columnCount - 1;
-    });
-  });
-  addColumn.disabled = model.columnCount >= 16;
-  const removeRow = createTikzcdActionButton("删除末行", "remove-row", () => {
-    mutateMutableTikzcdModel(session, () => {
-      model.rowCount -= 1;
-      model.nodes.pop();
-      session.focusRow = Math.min(session.focusRow, model.rowCount - 1);
-    });
-  });
-  removeRow.disabled = model.rowCount <= 1;
-  const removeColumn = createTikzcdActionButton("删除末列", "remove-column", () => {
-    mutateMutableTikzcdModel(session, () => {
-      model.columnCount -= 1;
-      for (const row of model.nodes) {
-        row.pop();
-      }
-      session.focusColumn = Math.min(session.focusColumn, model.columnCount - 1);
-    });
-  });
-  removeColumn.disabled = model.columnCount <= 1;
-  const addArrow = createTikzcdActionButton("添加箭头", "add-arrow", () => {
-    const source = session.selection?.kind === "node"
-      ? session.selection
-      : { kind: "node" as const, row: 0, column: 0 };
-    const target = defaultTikzcdTarget(model, source.row, source.column);
-    if (target === undefined) {
-      return;
-    }
-    mutateMutableTikzcdModel(session, () => {
-      model.arrows.push(createMutableTikzcdArrow(source.row, source.column, target.row, target.column));
-      session.selection = { kind: "arrow", index: model.arrows.length - 1 };
-    });
-  });
-  addArrow.disabled = model.arrows.length >= 128 ||
-    (model.rowCount === 1 && model.columnCount === 1);
-  const arrowMode = createTikzcdActionButton(
-    session.arrowMode ? "拖动：画线" : "拖动：移动",
-    "arrow-mode",
-    () => {
-      session.arrowMode = !session.arrowMode;
-      renderVisualTikzcdEditor(session);
-    },
-  );
-  arrowMode.classList.toggle("texleaf-tikzcd-mode-active", session.arrowMode);
-  arrowMode.setAttribute("aria-pressed", String(session.arrowMode));
-  arrowMode.title = session.arrowMode
-    ? "默认从节点拖到目标格画箭头；按住 Alt 可临时移动节点"
-    : "默认把节点拖到空格；按住 Shift 可临时画箭头";
-  const spacer = document.createElement("span");
-  spacer.className = "texleaf-tikzcd-direct-toolbar-spacer";
-  const zoomOut = createTikzcdActionButton("−", "zoom-out", () => {
-    session.zoom = Math.max(0.7, Math.round((session.zoom - 0.1) * 10) / 10);
-    renderVisualTikzcdEditor(session);
-  });
-  zoomOut.title = "缩小交换图画布";
-  zoomOut.disabled = session.zoom <= 0.7;
-  const zoom = document.createElement("span");
-  zoom.className = "texleaf-tikzcd-zoom";
-  zoom.textContent = `${Math.round(session.zoom * 100)}%`;
-  const zoomIn = createTikzcdActionButton("+", "zoom-in", () => {
-    session.zoom = Math.min(1.5, Math.round((session.zoom + 0.1) * 10) / 10);
-    renderVisualTikzcdEditor(session);
-  });
-  zoomIn.title = "放大交换图画布";
-  zoomIn.disabled = session.zoom >= 1.5;
-  toolbar.append(
-    undo,
-    redo,
-    addRow,
-    addColumn,
-    removeRow,
-    removeColumn,
-    addArrow,
-    arrowMode,
-    spacer,
-    zoomOut,
-    zoom,
-    zoomIn,
-  );
-  panel.append(toolbar);
-
-  const workspace = document.createElement("div");
-  workspace.className = "texleaf-tikzcd-direct-workspace";
-  workspace.classList.toggle(
-    "texleaf-tikzcd-direct-workspace-arrow-mode",
-    session.arrowMode,
-  );
-  workspace.setAttribute("role", "application");
-  workspace.setAttribute(
-    "aria-label",
-    "交换图画布。点击节点选择；默认从节点拖到目标格创建箭头。切换到移动模式或按住 Alt 可移动节点，Shift 始终临时创建箭头。",
-  );
-  const canvas = document.createElement("div");
-  canvas.className = "texleaf-tikzcd-direct-canvas";
-  canvas.style.fontSize = `${session.zoom * 100}%`;
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.classList.add("texleaf-tikzcd-editor-arrows");
-  const grid = document.createElement("div");
-  grid.className = "texleaf-tikzcd-direct-grid";
-  grid.setAttribute("role", "grid");
-  grid.style.gridTemplateColumns = `repeat(${model.columnCount}, 8em)`;
-  const nodeElements = new Map<string, HTMLElement>();
-  for (let row = 0; row < model.rowCount; row += 1) {
-    for (let column = 0; column < model.columnCount; column += 1) {
-      const cell = document.createElement("div");
-      cell.className = "texleaf-tikzcd-editor-cell";
-      cell.dataset.tikzcdEditorRow = String(row);
-      cell.dataset.tikzcdEditorColumn = String(column);
-      cell.setAttribute("role", "gridcell");
-      cell.setAttribute("aria-label", `第 ${row + 1} 行第 ${column + 1} 列`);
-      cell.tabIndex = row === session.focusRow && column === session.focusColumn ? 0 : -1;
-      if (
-        session.selection?.kind === "node" &&
-        session.selection.row === row &&
-        session.selection.column === column
-      ) {
-        cell.classList.add("texleaf-tikzcd-editor-cell-selected");
-      }
-      cell.addEventListener("focus", () => {
-        session.focusRow = row;
-        session.focusColumn = column;
-      });
-      cell.addEventListener("keydown", (event) => {
-        handleTikzcdCellKeydown(event, session, row, column);
-      });
-      const node = document.createElement("div");
-      node.className = "texleaf-tikzcd-editor-node";
-      node.dataset.tikzcdEditorNode = `${row}:${column}`;
-      const nodeSource = model.nodes[row]?.[column] ?? "";
-      if (nodeSource.trim().length === 0) {
-        node.classList.add("texleaf-tikzcd-editor-node-empty");
-      }
-      const nodeLabel = document.createElement("span");
-      nodeLabel.className = "texleaf-tikzcd-editor-node-label";
-      nodeLabel.dataset.tikzcdEditorNodeLabel = `${row}:${column}`;
-      nodeLabel.append(createTikzcdEditorMath(session, nodeSource, "\\bullet"));
-      node.append(nodeLabel);
-      node.title = session.arrowMode
-        ? "从节点中心拖出箭头；拖动格内外围可移动节点"
-        : "拖动节点；按住 Shift 从中心拖出箭头";
-      node.addEventListener("pointerdown", (event) => {
-        if ((session.arrowMode && !event.altKey) || event.shiftKey) {
-          startTikzcdArrowPointerDrag(event, session, canvas, svg, {
-            kind: "create",
-            row,
-            column,
-          });
-        } else {
-          startTikzcdNodePointerDrag(event, session, canvas, svg, row, column);
-        }
-      });
-      cell.title = nodeSource.trim().length > 0
-        ? "拖动节点外围移动位置；从中间标签区域拖出箭头"
-        : "拖到其他空格可同时创建节点与箭头；双击创建节点";
-      cell.addEventListener("pointerdown", (event) => {
-        if (event.target !== cell) {
-          return;
-        }
-        if (nodeSource.trim().length > 0) {
-          startTikzcdNodePointerDrag(event, session, canvas, svg, row, column);
-        } else {
-          startTikzcdArrowPointerDrag(event, session, canvas, svg, {
-            kind: "create",
-            row,
-            column,
-          });
-        }
-      });
-      cell.addEventListener("dblclick", (event) => {
-        if (event.button !== 0 || (session.model.nodes[row]?.[column] ?? "").trim().length > 0) {
-          return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        mutateMutableTikzcdModel(session, () => {
-          session.model.nodes[row]![column] = "\\bullet";
-          session.focusRow = row;
-          session.focusColumn = column;
-          session.selection = { kind: "node", row, column };
-        });
-      });
-      nodeElements.set(`${row}:${column}`, node);
-      const connector = document.createElement("button");
-      connector.type = "button";
-      connector.className = "texleaf-tikzcd-connect-handle";
-      connector.tabIndex = -1;
-      connector.title = `从 (${row + 1},${column + 1}) 拖出箭头`;
-      connector.setAttribute("aria-label", connector.title);
-      connector.addEventListener("pointerdown", (event) => {
-        startTikzcdArrowPointerDrag(event, session, canvas, svg, {
-          kind: "create",
-          row,
-          column,
-        });
-      });
-      node.append(connector);
-      cell.append(node);
-      grid.append(cell);
-    }
-  }
-  canvas.append(svg, grid);
-  workspace.append(canvas);
-  panel.append(workspace);
-  scheduleEditableTikzcdDrawing(session, canvas, svg, nodeElements);
-
-  panel.append(createTikzcdSelectionPanel(session));
-  panel.append(createTikzcdExactNodeEditor(session));
-
-  const controls = document.createElement("div");
-  controls.className = "texleaf-structure-actions";
-  const cancel = createPlainStructureButton("取消", session.close);
-  const apply = createPlainStructureButton("应用交换图修改", () => {
-    applyVisualTikzcdEdit(card, view, model);
-  }, true);
-  controls.append(cancel, apply);
-  panel.append(controls);
-  const note = document.createElement("div");
-  note.className = "texleaf-visual-editor-note";
-  note.textContent = "点击节点后可编辑标签；默认从节点中央拖到目标格就是画箭头，拖动节点所在格的外围可移动节点。切换“拖动：移动”或 Alt+拖动也可换格，Shift+拖动始终画线。选中箭头后可拖动两端重连。标签输入支持 TeXLeaf 片段与 Ctrl+Space 补全；应用时只重写 tikzcd 正文，环境选项保持不变。";
-  panel.append(note);
-  view.requestMeasure();
-}
-
-function createTikzcdActionButton(
-  label: string,
-  action: string,
-  handler: () => void,
-): HTMLButtonElement {
-  const button = createPlainStructureButton(label, handler);
-  button.dataset.texleafTikzcdAction = action;
-  return button;
-}
-
-function createMutableTikzcdArrow(
-  fromRow: number,
-  fromColumn: number,
-  toRow: number,
-  toColumn: number,
-): MutableTikzcdArrow {
-  return {
-    fromRow,
-    fromColumn,
-    toRow,
-    toColumn,
-    label: "",
-    swap: false,
-    lineStyle: "solid",
-    bend: "none",
-    bendAmount: 30,
-    head: "normal",
-  };
-}
-
-function defaultTikzcdTarget(
-  model: MutableTikzcdModel,
-  row: number,
-  column: number,
-): { readonly row: number; readonly column: number } | undefined {
-  if (column + 1 < model.columnCount) {
-    return { row, column: column + 1 };
-  }
-  if (row + 1 < model.rowCount) {
-    return { row: row + 1, column };
-  }
-  if (column > 0) {
-    return { row, column: column - 1 };
-  }
-  if (row > 0) {
-    return { row: row - 1, column };
-  }
-  return undefined;
-}
-
-function cloneMutableTikzcdModel(model: MutableTikzcdModel): MutableTikzcdModel {
-  return {
-    nodes: model.nodes.map((row) => [...row]),
-    arrows: model.arrows.map((arrow) => ({ ...arrow })),
-    rowCount: model.rowCount,
-    columnCount: model.columnCount,
-  };
-}
-
-function mutableTikzcdModelsEqual(
-  left: MutableTikzcdModel,
-  right: MutableTikzcdModel,
-): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
-function mutateMutableTikzcdModel(
-  session: MutableTikzcdEditorSession,
-  mutation: () => void,
-): void {
-  const before = cloneMutableTikzcdModel(session.model);
-  mutation();
-  normalizeMutableTikzcdModel(session.model);
-  if (!mutableTikzcdModelsEqual(before, session.model)) {
-    session.history.push(before);
-    if (session.history.length > 100) {
-      session.history.shift();
-    }
-    session.future.length = 0;
-  }
-  renderVisualTikzcdEditor(session);
-}
-
-function commitMutableTikzcdTextHistory(
-  session: MutableTikzcdEditorSession,
-  before: MutableTikzcdModel | undefined,
-): void {
-  if (before === undefined || mutableTikzcdModelsEqual(before, session.model)) {
-    return;
-  }
-  session.history.push(before);
-  if (session.history.length > 100) {
-    session.history.shift();
-  }
-  session.future.length = 0;
-}
-
-function undoMutableTikzcdEdit(session: MutableTikzcdEditorSession): void {
-  const previous = session.history.pop();
-  if (previous === undefined) {
-    return;
-  }
-  session.future.push(cloneMutableTikzcdModel(session.model));
-  session.model = previous;
-  renderVisualTikzcdEditor(session);
-}
-
-function redoMutableTikzcdEdit(session: MutableTikzcdEditorSession): void {
-  const next = session.future.pop();
-  if (next === undefined) {
-    return;
-  }
-  session.history.push(cloneMutableTikzcdModel(session.model));
-  session.model = next;
-  renderVisualTikzcdEditor(session);
-}
-
-function normalizeMutableTikzcdSelection(session: MutableTikzcdEditorSession): void {
-  const selection = session.selection;
-  if (selection?.kind === "arrow" && selection.index >= session.model.arrows.length) {
-    session.selection = session.model.arrows.length === 0
-      ? undefined
-      : { kind: "arrow", index: session.model.arrows.length - 1 };
-  } else if (selection?.kind === "node") {
-    session.selection = {
-      kind: "node",
-      row: clampInteger(selection.row, 0, session.model.rowCount - 1),
-      column: clampInteger(selection.column, 0, session.model.columnCount - 1),
-    };
-  }
-  session.focusRow = clampInteger(session.focusRow, 0, session.model.rowCount - 1);
-  session.focusColumn = clampInteger(session.focusColumn, 0, session.model.columnCount - 1);
-}
-
-function deleteMutableTikzcdSelection(session: MutableTikzcdEditorSession): boolean {
-  const selection = session.selection;
-  if (selection === undefined) {
-    return false;
-  }
-  mutateMutableTikzcdModel(session, () => {
-    if (selection.kind === "arrow") {
-      session.model.arrows.splice(selection.index, 1);
-    } else {
-      session.model.nodes[selection.row]![selection.column] = "";
-      session.model.arrows = session.model.arrows.filter((arrow) =>
-        !(arrow.fromRow === selection.row && arrow.fromColumn === selection.column) &&
-        !(arrow.toRow === selection.row && arrow.toColumn === selection.column)
-      );
-    }
-    session.selection = undefined;
-  });
-  return true;
-}
-
-function createTikzcdEditorMath(
-  session: MutableTikzcdEditorSession,
-  source: string,
-  emptyFallback: string,
-): HTMLElement {
-  const trimmed = source.trim();
-  if (trimmed.length === 0) {
-    const empty = document.createElement("span");
-    empty.textContent = emptyFallback;
-    return empty;
-  }
-  const fragment = session.fragments.get(trimmed);
-  return createMathFragmentElement(fragment, fragment?.fallback ?? trimmed);
-}
-
-function createTikzcdSelectionPanel(
-  session: MutableTikzcdEditorSession,
-): HTMLElement {
-  const panel = document.createElement("section");
-  panel.className = "texleaf-tikzcd-selection-panel";
-  const selection = session.selection;
-  if (selection === undefined) {
-    const title = document.createElement("h4");
-    title.className = "texleaf-tikzcd-selection-title";
-    title.textContent = "尚未选择对象";
-    const hint = document.createElement("p");
-    hint.className = "texleaf-tikzcd-selection-hint";
-    hint.textContent = "点击节点或箭头进行精确编辑；也可用方向键移动焦点、Enter 编辑节点、从圆点拖出箭头。";
-    panel.append(title, hint);
-    if (session.model.arrows.length > 0) {
-      const actions = document.createElement("div");
-      actions.className = "texleaf-tikzcd-selection-actions";
-      for (let index = 0; index < session.model.arrows.length; index += 1) {
-        const arrow = session.model.arrows[index]!;
-        const button = createTikzcdActionButton(
-          `箭头 ${index + 1}: (${arrow.fromRow + 1},${arrow.fromColumn + 1}) → (${arrow.toRow + 1},${arrow.toColumn + 1})`,
-          `select-arrow-${index}`,
-          () => {
-            session.selection = { kind: "arrow", index };
-            renderVisualTikzcdEditor(session);
-          },
-        );
-        actions.append(button);
-      }
-      panel.append(actions);
-    }
-    return panel;
-  }
-  if (selection.kind === "node") {
-    createTikzcdNodeSelectionPanel(panel, session, selection.row, selection.column);
-  } else {
-    createTikzcdArrowSelectionPanel(panel, session, selection.index);
-  }
-  return panel;
-}
-
-function createTikzcdNodeSelectionPanel(
-  panel: HTMLElement,
-  session: MutableTikzcdEditorSession,
-  row: number,
-  column: number,
-): void {
-  const title = document.createElement("h4");
-  title.className = "texleaf-tikzcd-selection-title";
-  title.textContent = `节点 (${row + 1},${column + 1})`;
-  panel.append(title);
-  const input = document.createElement("input");
-  input.type = "text";
-  input.className = "texleaf-tikzcd-node-input";
-  input.dataset.tikzcdNodeInput = `${row}:${column}`;
-  input.value = session.model.nodes[row]?.[column] ?? "";
-  input.placeholder = "节点标签 LaTeX";
-  input.setAttribute("aria-label", `第 ${row + 1} 行第 ${column + 1} 列节点 LaTeX`);
-  const sourceAnchor = session.record.nodes.find(
-    (node) => node.row === row && node.column === column,
-  )?.math.sourceFrom;
-  attachTikzcdVirtualInput(session, input, (value) => {
-    session.model.nodes[row]![column] = value;
-    syncTikzcdNodeInputsAndDisplay(session, row, column, value, input);
-  }, sourceAnchor);
-  panel.append(createTikzcdField("节点标签 LaTeX", input));
-  const hint = document.createElement("p");
-  hint.className = "texleaf-tikzcd-selection-hint";
-  hint.textContent = "节点处于数学模式：TeXLeaf 自动片段、Tab/空格展开和 Ctrl+Space 补全均可用。默认从节点中央拖动可画箭头；拖动格内外围、切到移动模式或按住 Alt 可换格。";
-  panel.append(hint);
-  const actions = document.createElement("div");
-  actions.className = "texleaf-tikzcd-selection-actions";
-  const snippets = createTikzcdActionButton("片段 / 补全", "node-completions", () => {
-    openVirtualLatexCompletion(input);
-  });
-  const clear = createTikzcdActionButton("删除节点及相连箭头", "delete-node", () => {
-    deleteMutableTikzcdSelection(session);
-  });
-  actions.append(snippets, clear);
-  panel.append(actions);
-}
-
-function createTikzcdArrowSelectionPanel(
-  panel: HTMLElement,
-  session: MutableTikzcdEditorSession,
-  index: number,
-): void {
-  const arrow = session.model.arrows[index];
-  if (arrow === undefined) {
-    return;
-  }
-  const title = document.createElement("h4");
-  title.className = "texleaf-tikzcd-selection-title";
-  title.textContent = `箭头 ${index + 1}`;
-  panel.append(title);
-  const from = createTikzcdPositionSelect(session.model, arrow.fromRow, arrow.fromColumn);
-  from.setAttribute("aria-label", `第 ${index + 1} 条箭头起点`);
-  from.addEventListener("change", () => {
-    mutateMutableTikzcdModel(session, () => {
-      [arrow.fromRow, arrow.fromColumn] = decodeTikzcdPosition(from.value, session.model.columnCount);
-    });
-  });
-  const to = createTikzcdPositionSelect(session.model, arrow.toRow, arrow.toColumn);
-  to.setAttribute("aria-label", `第 ${index + 1} 条箭头终点`);
-  to.addEventListener("change", () => {
-    mutateMutableTikzcdModel(session, () => {
-      [arrow.toRow, arrow.toColumn] = decodeTikzcdPosition(to.value, session.model.columnCount);
-    });
-  });
-  panel.append(createTikzcdField("起点", from), createTikzcdField("终点", to));
-  const label = document.createElement("input");
-  label.type = "text";
-  label.className = "texleaf-tikzcd-label-input";
-  label.dataset.tikzcdArrowLabelInput = String(index);
-  label.value = arrow.label;
-  label.placeholder = "箭头标签 LaTeX";
-  attachTikzcdVirtualInput(session, label, (value) => {
-    arrow.label = value;
-    syncTikzcdArrowLabel(session, index, value, label);
-  }, session.record.arrows[index]?.label?.sourceFrom);
-  panel.append(createTikzcdField("箭头标签 LaTeX", label));
-  const line = createTikzcdOptionSelect<MutableTikzcdLineStyle>([
-    ["solid", "实线"],
-    ["dashed", "虚线"],
-    ["dotted", "点线"],
-  ], arrow.lineStyle);
-  line.addEventListener("change", () => {
-    mutateMutableTikzcdModel(session, () => {
-      arrow.lineStyle = line.value as MutableTikzcdLineStyle;
-    });
-  });
-  const bend = createTikzcdOptionSelect<MutableTikzcdBend>([
-    ["none", "直线"],
-    ["left", "向左弯"],
-    ["right", "向右弯"],
-  ], arrow.bend);
-  bend.addEventListener("change", () => {
-    mutateMutableTikzcdModel(session, () => {
-      arrow.bend = bend.value as MutableTikzcdBend;
-    });
-  });
-  const bendAmount = createTikzcdOptionSelect<string>([
-    ["15", "15°"],
-    ["30", "30°"],
-    ["45", "45°"],
-    ["60", "60°"],
-  ], String(closestTikzcdBendAmount(arrow.bendAmount)));
-  bendAmount.disabled = arrow.bend === "none";
-  bendAmount.addEventListener("change", () => {
-    mutateMutableTikzcdModel(session, () => {
-      arrow.bendAmount = Number.parseInt(bendAmount.value, 10) || 30;
-    });
-  });
-  const head = createTikzcdOptionSelect<MutableTikzcdHead>([
-    ["normal", "普通箭头"],
-    ["twoHeads", "双箭头头"],
-    ["hook", "Hook 尾"],
-    ["noHead", "无箭头头"],
-  ], arrow.head);
-  head.addEventListener("change", () => {
-    mutateMutableTikzcdModel(session, () => {
-      arrow.head = head.value as MutableTikzcdHead;
-    });
-  });
-  panel.append(
-    createTikzcdField("线型", line),
-    createTikzcdField("弯曲", bend),
-    createTikzcdField("弯曲角度", bendAmount),
-    createTikzcdField("箭头样式", head),
-  );
-  const swapLabel = document.createElement("label");
-  swapLabel.className = "texleaf-table-checkbox";
-  const swap = document.createElement("input");
-  swap.type = "checkbox";
-  swap.checked = arrow.swap;
-  swap.addEventListener("change", () => {
-    mutateMutableTikzcdModel(session, () => {
-      arrow.swap = swap.checked;
-    });
-  });
-  swapLabel.append(swap, document.createTextNode("标签放在箭头反侧"));
-  panel.append(swapLabel);
-  const hint = document.createElement("p");
-  hint.className = "texleaf-tikzcd-selection-hint";
-  hint.textContent = "箭头标签支持 TeXLeaf 片段与 Ctrl+Space 补全；画布端点可拖动重连，线型、弯曲和头型可组合。";
-  panel.append(hint);
-  const actions = document.createElement("div");
-  actions.className = "texleaf-tikzcd-selection-actions";
-  const snippets = createTikzcdActionButton("片段 / 补全", "arrow-completions", () => {
-    openVirtualLatexCompletion(label);
-  });
-  const reverse = createTikzcdActionButton("反转方向", "reverse-arrow", () => {
-    mutateMutableTikzcdModel(session, () => {
-      [arrow.fromRow, arrow.toRow] = [arrow.toRow, arrow.fromRow];
-      [arrow.fromColumn, arrow.toColumn] = [arrow.toColumn, arrow.fromColumn];
-      arrow.swap = !arrow.swap;
-    });
-  });
-  const remove = createTikzcdActionButton("删除箭头", "delete-arrow", () => {
-    deleteMutableTikzcdSelection(session);
-  });
-  actions.append(snippets, reverse, remove);
-  panel.append(actions);
-}
-
-function createTikzcdField(label: string, control: HTMLElement): HTMLElement {
-  const field = document.createElement("label");
-  field.className = "texleaf-tikzcd-field";
-  field.append(document.createTextNode(label), control);
-  return field;
-}
-
-function createTikzcdOptionSelect<T extends string>(
-  entries: readonly (readonly [T, string])[],
-  selected: T,
-): HTMLSelectElement {
-  const select = document.createElement("select");
-  for (const [value, label] of entries) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    option.selected = value === selected;
-    select.append(option);
-  }
-  return select;
-}
-
-function closestTikzcdBendAmount(value: number): 15 | 30 | 45 | 60 {
-  return [15, 30, 45, 60].reduce((best, candidate) =>
-    Math.abs(candidate - value) < Math.abs(best - value) ? candidate : best
-  , 30) as 15 | 30 | 45 | 60;
-}
-
-function attachTikzcdVirtualInput(
-  session: MutableTikzcdEditorSession,
-  input: HTMLInputElement,
-  commit: (value: string) => void,
-  sourceAnchor?: number,
-): void {
-  let beforeFocus: MutableTikzcdModel | undefined;
-  input.addEventListener("focus", () => {
-    beforeFocus = cloneMutableTikzcdModel(session.model);
-  });
-  input.addEventListener("blur", () => {
-    commitMutableTikzcdTextHistory(session, beforeFocus);
-    beforeFocus = undefined;
-  });
-  attachVirtualLatexInput(input, {
-    context: "tikzcd",
-    mathPreview: true,
-    getAnchor: () => {
-      const mappedBody = readMappedDatasetRange(
-        session.card,
-        "texleafBodyFrom",
-        "texleafBodyTo",
-        session.view.state.doc.length,
-      );
-      const bodyAnchor = mappedBody?.from ?? session.record.bodyFrom;
-      return sourceAnchor === undefined
-        ? bodyAnchor
-        : clampNumber(
-            bodyAnchor + (sourceAnchor - session.record.bodyFrom),
-            bodyAnchor,
-            mappedBody?.to ?? session.record.bodyTo,
-          );
-    },
-    commit,
-    onMathRendered: (tex, rendered) => {
-      cacheMutableTikzcdMathRender(session, input, tex, rendered);
-    },
-  });
-}
-
-/**
- * The direct editor starts with SVG fragments rendered by the host for the
- * source document.  A newly typed label is absent from that immutable source
- * snapshot, so without extending the cache the canvas falls back to raw TeX
- * even though the input popup has already rendered it.  Promote the validated
- * virtual-input result into the session cache and refresh every matching node
- * or arrow label without replacing the focused inspector input.
- */
-function cacheMutableTikzcdMathRender(
-  session: MutableTikzcdEditorSession,
-  origin: HTMLInputElement,
-  tex: string,
-  rendered: RenderedFormula,
-): void {
-  const key = tex.trim();
-  if (key.length === 0) {
-    return;
-  }
-  const previous = session.fragments.get(key);
-  const sourceFrom = previous?.sourceFrom ?? session.record.bodyFrom;
-  session.fragments.set(key, {
-    tex: key,
-    fallback: key,
-    sourceFrom,
-    sourceTo: previous?.sourceTo ?? sourceFrom + key.length,
-    asset: rendered,
-  });
-  const nodeTargets = new Set<string>();
-  const originNode = origin.dataset.tikzcdNodeInput;
-  if (originNode !== undefined && origin.value.trim() === key) {
-    nodeTargets.add(originNode);
-  }
-  for (let row = 0; row < session.model.rowCount; row += 1) {
-    for (let column = 0; column < session.model.columnCount; column += 1) {
-      if ((session.model.nodes[row]?.[column] ?? "").trim() !== key) {
-        continue;
-      }
-      nodeTargets.add(`${row}:${column}`);
-    }
-  }
-  for (const input of Array.from(session.panel.querySelectorAll<HTMLInputElement>(
-    "[data-tikzcd-node-input]",
-  ))) {
-    const coordinates = input.dataset.tikzcdNodeInput;
-    if (coordinates !== undefined && input.value.trim() === key) {
-      nodeTargets.add(coordinates);
-    }
-  }
-  let updatedNodes = 0;
-  for (const coordinates of nodeTargets) {
-    const label = session.panel.querySelector<HTMLElement>(
-      `[data-tikzcd-editor-node-label="${coordinates}"]`,
-    );
-    if (label !== null) {
-      label.replaceChildren(createTikzcdEditorMath(session, key, "·"));
-      updatedNodes += 1;
-    }
-  }
-  session.panel.dataset.texleafTikzcdLastMathTex = key;
-  session.panel.dataset.texleafTikzcdLastMathNodes = String(updatedNodes);
-  // Arrow labels are rebuilt by the canvas draw pass. This also recalculates
-  // arrow endpoints after a rendered node label changes its measured bounds.
-  session.redrawCanvas?.();
-}
-
-function openVirtualLatexCompletion(input: HTMLInputElement): void {
-  const binding = virtualLatexBindings.get(input);
-  if (binding === undefined) {
-    return;
-  }
-  input.focus();
-  requestVirtualCompletion(binding, true);
-}
-
-function syncTikzcdNodeInputsAndDisplay(
-  session: MutableTikzcdEditorSession,
-  row: number,
-  column: number,
-  value: string,
-  origin: HTMLInputElement,
-): void {
-  for (const input of Array.from(session.panel.querySelectorAll<HTMLInputElement>(
-    `[data-tikzcd-node-input="${row}:${column}"]`,
-  ))) {
-    if (input !== origin) {
-      input.value = value;
-    }
-  }
-  const label = session.panel.querySelector<HTMLElement>(
-    `[data-tikzcd-editor-node-label="${row}:${column}"]`,
-  );
-  label?.replaceChildren(createTikzcdEditorMath(session, value, "·"));
-  const node = session.panel.querySelector<HTMLElement>(
-    `[data-tikzcd-editor-node="${row}:${column}"]`,
-  );
-  node?.classList.toggle("texleaf-tikzcd-editor-node-empty", value.trim().length === 0);
-  session.redrawCanvas?.();
-}
-
-function syncTikzcdArrowLabel(
-  session: MutableTikzcdEditorSession,
-  index: number,
-  value: string,
-  origin: HTMLInputElement,
-): void {
-  for (const input of Array.from(session.panel.querySelectorAll<HTMLInputElement>(
-    `[data-tikzcd-arrow-label-input="${index}"]`,
-  ))) {
-    if (input !== origin) {
-      input.value = value;
-    }
-  }
-  const label = session.panel.querySelector<HTMLElement>(
-    `[data-tikzcd-editor-arrow-label="${index}"]`,
-  );
-  if (label !== null) {
-    label.replaceChildren(createTikzcdEditorMath(session, value, ""));
-  }
-  session.redrawCanvas?.();
-}
-
-function createTikzcdExactNodeEditor(session: MutableTikzcdEditorSession): HTMLElement {
-  const details = document.createElement("details");
-  details.className = "texleaf-tikzcd-exact-editor";
-  const summary = document.createElement("summary");
-  summary.textContent = "精确编辑节点矩阵";
-  summary.title = "展开后可连续输入所有节点；每格同样支持 TeXLeaf 片段与补全";
-  details.append(summary);
-  const scroll = document.createElement("div");
-  scroll.className = "texleaf-table-editor-scroll";
-  const grid = document.createElement("div");
-  grid.className = "texleaf-tikzcd-editor-grid";
-  grid.style.gridTemplateColumns = `repeat(${session.model.columnCount}, minmax(7em, 1fr))`;
-  for (let row = 0; row < session.model.rowCount; row += 1) {
-    for (let column = 0; column < session.model.columnCount; column += 1) {
-      const input = document.createElement("input");
-      input.type = "text";
-      input.className = "texleaf-tikzcd-node-input";
-      input.dataset.tikzcdNodeInput = `${row}:${column}`;
-      input.value = session.model.nodes[row]?.[column] ?? "";
-      input.placeholder = `(${row + 1},${column + 1})`;
-      input.setAttribute("aria-label", `第 ${row + 1} 行第 ${column + 1} 列节点 LaTeX`);
-      const sourceAnchor = session.record.nodes.find(
-        (node) => node.row === row && node.column === column,
-      )?.math.sourceFrom;
-      attachTikzcdVirtualInput(session, input, (value) => {
-        session.model.nodes[row]![column] = value;
-        syncTikzcdNodeInputsAndDisplay(session, row, column, value, input);
-      }, sourceAnchor);
-      grid.append(input);
-    }
-  }
-  scroll.append(grid);
-  details.append(scroll);
-  return details;
-}
-
-function handleTikzcdCellKeydown(
-  event: KeyboardEvent,
-  session: MutableTikzcdEditorSession,
-  row: number,
-  column: number,
-): void {
-  const movement = event.key === "ArrowLeft"
-    ? [0, -1]
-    : event.key === "ArrowRight"
-      ? [0, 1]
-      : event.key === "ArrowUp"
-        ? [-1, 0]
-        : event.key === "ArrowDown"
-          ? [1, 0]
-          : undefined;
-  if (movement !== undefined) {
-    event.preventDefault();
-    const nextRow = clampInteger(row + movement[0]!, 0, session.model.rowCount - 1);
-    const nextColumn = clampInteger(column + movement[1]!, 0, session.model.columnCount - 1);
-    session.focusRow = nextRow;
-    session.focusColumn = nextColumn;
-    session.panel.querySelector<HTMLElement>(
-      `[data-tikzcd-editor-row="${nextRow}"][data-tikzcd-editor-column="${nextColumn}"]`,
-    )?.focus();
-    return;
-  }
-  if (event.key === "Enter") {
-    event.preventDefault();
-    session.selection = { kind: "node", row, column };
-    renderVisualTikzcdEditor(session);
-    requestAnimationFrame(() => {
-      session.panel.querySelector<HTMLInputElement>(
-        `[data-tikzcd-node-input="${row}:${column}"]`,
-      )?.focus();
-    });
-    return;
-  }
-  if (event.key === " ") {
-    event.preventDefault();
-    const previous = session.selection;
-    if (
-      previous?.kind === "node" &&
-      (previous.row !== row || previous.column !== column)
-    ) {
-      mutateMutableTikzcdModel(session, () => {
-        session.model.arrows.push(createMutableTikzcdArrow(
-          previous.row,
-          previous.column,
-          row,
-          column,
-        ));
-        session.selection = { kind: "arrow", index: session.model.arrows.length - 1 };
-      });
-    } else {
-      session.selection = { kind: "node", row, column };
-      renderVisualTikzcdEditor(session);
-    }
-  }
-}
-
-function startTikzcdNodePointerDrag(
-  event: PointerEvent,
-  session: MutableTikzcdEditorSession,
-  _canvas: HTMLElement,
-  _svg: SVGSVGElement,
-  row: number,
-  column: number,
-): void {
-  if (event.button !== 0) {
-    return;
-  }
-  event.preventDefault();
-  event.stopPropagation();
-  session.cancelPointerDrag?.();
-  const captureTarget = event.currentTarget instanceof Element
-    ? event.currentTarget
-    : undefined;
-  const startX = event.clientX;
-  const startY = event.clientY;
-  let moved = false;
-  let dropCell: HTMLElement | undefined;
-  const clearDrop = (): void => {
-    dropCell?.classList.remove("texleaf-tikzcd-editor-cell-drop");
-    dropCell = undefined;
-  };
-  const move = (moveEvent: PointerEvent): void => {
-    if (moveEvent.pointerId !== event.pointerId) {
-      return;
-    }
-    moved ||= Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) >= 5;
-    if (!moved) {
-      return;
-    }
-    const next = tikzcdCellAtPoint(session.panel, moveEvent.clientX, moveEvent.clientY);
-    if (next !== dropCell) {
-      clearDrop();
-      dropCell = next;
-      dropCell?.classList.add("texleaf-tikzcd-editor-cell-drop");
-    }
-  };
-  const finish = (upEvent: PointerEvent): void => {
-    if (upEvent.pointerId !== event.pointerId) {
-      return;
-    }
-    const target = readTikzcdCellPosition(dropCell);
-    cleanup();
-    if (
-      moved &&
-      target !== undefined &&
-      (target.row !== row || target.column !== column)
-    ) {
-      const source = session.model.nodes[row]?.[column] ?? "";
-      const targetSource = session.model.nodes[target.row]?.[target.column] ?? "";
-      if (source.trim().length === 0) {
-        setStatus("info", "空节点没有可移动的标签；可从蓝色圆点拖出箭头。", 2_500);
-      } else if (targetSource.trim().length > 0) {
-        setStatus("warning", "目标格已有节点；请拖到空格，或先编辑/删除目标节点。", 3_000);
-      } else {
-        mutateMutableTikzcdModel(session, () => {
-          session.model.nodes[target.row]![target.column] = source;
-          session.model.nodes[row]![column] = "";
-          for (const arrow of session.model.arrows) {
-            if (arrow.fromRow === row && arrow.fromColumn === column) {
-              arrow.fromRow = target.row;
-              arrow.fromColumn = target.column;
-            }
-            if (arrow.toRow === row && arrow.toColumn === column) {
-              arrow.toRow = target.row;
-              arrow.toColumn = target.column;
-            }
-          }
-          session.focusRow = target.row;
-          session.focusColumn = target.column;
-          session.selection = { kind: "node", row: target.row, column: target.column };
-        });
-        return;
-      }
-    }
-    session.focusRow = row;
-    session.focusColumn = column;
-    session.selection = { kind: "node", row, column };
-    renderVisualTikzcdEditor(session);
-  };
-  const cancel = (cancelEvent: PointerEvent): void => {
-    if (cancelEvent.pointerId === event.pointerId) {
-      cleanup();
-    }
-  };
-  const cleanup = (): void => {
-    clearDrop();
-    window.removeEventListener("pointermove", move, true);
-    window.removeEventListener("pointerup", finish, true);
-    window.removeEventListener("pointercancel", cancel, true);
-    try {
-      if (captureTarget?.hasPointerCapture(event.pointerId)) {
-        captureTarget.releasePointerCapture(event.pointerId);
-      }
-    } catch {
-      // Pointer capture may already have been released by the browser.
-    }
-    if (session.cancelPointerDrag === cleanup) {
-      session.cancelPointerDrag = undefined;
-    }
-  };
-  session.cancelPointerDrag = cleanup;
-  window.addEventListener("pointermove", move, true);
-  window.addEventListener("pointerup", finish, true);
-  window.addEventListener("pointercancel", cancel, true);
-  try {
-    captureTarget?.setPointerCapture(event.pointerId);
-  } catch {
-    // Window-level listeners remain as the compatibility fallback.
-  }
-}
-
-type TikzcdArrowPointerOperation =
-  | { readonly kind: "create"; readonly row: number; readonly column: number }
-  | { readonly kind: "source" | "target"; readonly index: number };
-
-function startTikzcdArrowPointerDrag(
-  event: PointerEvent,
-  session: MutableTikzcdEditorSession,
-  canvas: HTMLElement,
-  svg: SVGSVGElement,
-  operation: TikzcdArrowPointerOperation,
-): void {
-  if (event.button !== 0) {
-    return;
-  }
-  event.preventDefault();
-  event.stopPropagation();
-  session.cancelPointerDrag?.();
-  const captureTarget = event.currentTarget instanceof Element
-    ? event.currentTarget
-    : undefined;
-  const dragMarkerId = `texleaf-tikzcd-drag-marker-${++tikzcdMarkerSequence}`;
-  const dragDefs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
-  dragDefs.append(createTikzcdMarker(
-    dragMarkerId,
-    false,
-    "var(--vscode-focusBorder)",
-  ));
-  const line = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  line.classList.add("texleaf-tikzcd-editor-drag-line");
-  line.setAttribute("marker-end", `url(#${dragMarkerId})`);
-  svg.append(dragDefs, line);
-  const origin = tikzcdPointerOperationOrigin(session, operation);
-  const originNode: HTMLElement | undefined = origin === undefined
-    ? undefined
-    : session.panel.querySelector<HTMLElement>(
-        `[data-tikzcd-editor-node="${origin.row}:${origin.column}"]`,
-      ) ?? undefined;
-  const startCenter = originNode === undefined
-    ? tikzcdCanvasPoint(canvas, event.clientX, event.clientY)
-    : tikzcdElementCenter(canvas, originNode);
-  originNode?.classList.add("texleaf-tikzcd-editor-node-source");
-  const startClientX = event.clientX;
-  const startClientY = event.clientY;
-  let moved = false;
-  let dropCell: HTMLElement | undefined;
-  const clearDrop = (): void => {
-    dropCell?.classList.remove("texleaf-tikzcd-editor-cell-drop");
-    dropCell = undefined;
-  };
-  const drawPreview = (
-    pointer: { readonly x: number; readonly y: number },
-    targetNode: HTMLElement | undefined,
-  ): void => {
-    const targetCenter = targetNode === undefined
-      ? pointer
-      : tikzcdElementCenter(canvas, targetNode);
-    const deltaX = targetCenter.x - startCenter.x;
-    const deltaY = targetCenter.y - startCenter.y;
-    const distance = Math.hypot(deltaX, deltaY);
-    if (distance < 1) {
-      line.setAttribute(
-        "d",
-        `M ${startCenter.x} ${startCenter.y} L ${startCenter.x} ${startCenter.y}`,
-      );
-      return;
-    }
-    const unitX = deltaX / distance;
-    const unitY = deltaY / distance;
-    const sourceInset = originNode === undefined
-      ? 0
-      : tikzcdNodeBoundaryDistance(originNode.getBoundingClientRect(), unitX, unitY);
-    const targetInset = targetNode === undefined
-      ? 0
-      : tikzcdNodeBoundaryDistance(targetNode.getBoundingClientRect(), unitX, unitY);
-    const start = {
-      x: startCenter.x + unitX * sourceInset,
-      y: startCenter.y + unitY * sourceInset,
-    };
-    const end = {
-      x: targetCenter.x - unitX * targetInset,
-      y: targetCenter.y - unitY * targetInset,
-    };
-    line.setAttribute("d", `M ${start.x} ${start.y} L ${end.x} ${end.y}`);
-  };
-  const move = (moveEvent: PointerEvent): void => {
-    if (moveEvent.pointerId !== event.pointerId) {
-      return;
-    }
-    moved ||= Math.hypot(
-      moveEvent.clientX - startClientX,
-      moveEvent.clientY - startClientY,
-    ) >= 4;
-    if (!moved) {
-      return;
-    }
-    const point = tikzcdCanvasPoint(canvas, moveEvent.clientX, moveEvent.clientY);
-    const next = tikzcdCellAtPoint(session.panel, moveEvent.clientX, moveEvent.clientY);
-    if (next !== dropCell) {
-      clearDrop();
-      dropCell = next;
-      dropCell?.classList.add("texleaf-tikzcd-editor-cell-drop");
-    }
-    const targetPosition = readTikzcdCellPosition(next);
-    const targetNode = targetPosition === undefined
-      ? undefined
-      : session.panel.querySelector<HTMLElement>(
-          `[data-tikzcd-editor-node="${targetPosition.row}:${targetPosition.column}"]`,
-        ) ?? undefined;
-    drawPreview(point, targetNode);
-  };
-  const finish = (upEvent: PointerEvent): void => {
-    if (upEvent.pointerId !== event.pointerId) {
-      return;
-    }
-    const target = readTikzcdCellPosition(dropCell);
-    cleanup();
-    if (origin === undefined) {
-      return;
-    }
-    if (!moved) {
-      if (operation.kind === "create") {
-        session.focusRow = origin.row;
-        session.focusColumn = origin.column;
-        session.selection = { kind: "node", row: origin.row, column: origin.column };
-        renderVisualTikzcdEditor(session);
-      }
-      return;
-    }
-    if (target === undefined) {
-      setStatus("info", "请把箭头拖到目标网格内再松开鼠标。", 2_500);
-      return;
-    }
-    if (operation.kind === "create") {
-      if (target.row === origin.row && target.column === origin.column) {
-        session.selection = { kind: "node", row: origin.row, column: origin.column };
-        renderVisualTikzcdEditor(session);
-        return;
-      }
-      if (session.model.arrows.length >= 128) {
-        setStatus("warning", "交换图已达到 128 条箭头的可视化编辑上限。", 3_000);
-        return;
-      }
-      mutateMutableTikzcdModel(session, () => {
-        if ((session.model.nodes[origin.row]?.[origin.column] ?? "").trim().length === 0) {
-          session.model.nodes[origin.row]![origin.column] = "\\bullet";
-        }
-        if ((session.model.nodes[target.row]?.[target.column] ?? "").trim().length === 0) {
-          session.model.nodes[target.row]![target.column] = "\\bullet";
-        }
-        const arrow = createMutableTikzcdArrow(origin.row, origin.column, target.row, target.column);
-        const parallels = session.model.arrows.filter((candidate) =>
-          candidate.fromRow === origin.row &&
-          candidate.fromColumn === origin.column &&
-          candidate.toRow === target.row &&
-          candidate.toColumn === target.column
-        ).length;
-        if (parallels > 0) {
-          arrow.bend = parallels % 2 === 1 ? "left" : "right";
-          arrow.bendAmount = Math.min(60, 15 + parallels * 15);
-        }
-        session.model.arrows.push(arrow);
-        session.selection = { kind: "arrow", index: session.model.arrows.length - 1 };
-      });
-      return;
-    }
-    const arrow = session.model.arrows[operation.index];
-    if (arrow === undefined) {
-      return;
-    }
-    const other = operation.kind === "source"
-      ? { row: arrow.toRow, column: arrow.toColumn }
-      : { row: arrow.fromRow, column: arrow.fromColumn };
-    if (target.row === other.row && target.column === other.column) {
-      setStatus("warning", "箭头起点与终点不能是同一格。", 2_500);
-      return;
-    }
-    mutateMutableTikzcdModel(session, () => {
-      if ((session.model.nodes[target.row]?.[target.column] ?? "").trim().length === 0) {
-        session.model.nodes[target.row]![target.column] = "\\bullet";
-      }
-      if (operation.kind === "source") {
-        arrow.fromRow = target.row;
-        arrow.fromColumn = target.column;
-      } else {
-        arrow.toRow = target.row;
-        arrow.toColumn = target.column;
-      }
-      session.selection = { kind: "arrow", index: operation.index };
-    });
-  };
-  const cancel = (cancelEvent: PointerEvent): void => {
-    if (cancelEvent.pointerId === event.pointerId) {
-      cleanup();
-    }
-  };
-  const cleanup = (): void => {
-    clearDrop();
-    originNode?.classList.remove("texleaf-tikzcd-editor-node-source");
-    dragDefs.remove();
-    line.remove();
-    window.removeEventListener("pointermove", move, true);
-    window.removeEventListener("pointerup", finish, true);
-    window.removeEventListener("pointercancel", cancel, true);
-    try {
-      if (captureTarget?.hasPointerCapture(event.pointerId)) {
-        captureTarget.releasePointerCapture(event.pointerId);
-      }
-    } catch {
-      // Pointer capture may already have been released by the browser.
-    }
-    if (session.cancelPointerDrag === cleanup) {
-      session.cancelPointerDrag = undefined;
-    }
-  };
-  session.cancelPointerDrag = cleanup;
-  drawPreview(startCenter, undefined);
-  window.addEventListener("pointermove", move, true);
-  window.addEventListener("pointerup", finish, true);
-  window.addEventListener("pointercancel", cancel, true);
-  try {
-    captureTarget?.setPointerCapture(event.pointerId);
-  } catch {
-    // Window-level listeners remain as the compatibility fallback.
-  }
-}
-
-function tikzcdPointerOperationOrigin(
-  session: MutableTikzcdEditorSession,
-  operation: TikzcdArrowPointerOperation,
-): { readonly row: number; readonly column: number } | undefined {
-  if (operation.kind === "create") {
-    return { row: operation.row, column: operation.column };
-  }
-  const arrow = session.model.arrows[operation.index];
-  if (arrow === undefined) {
-    return undefined;
-  }
-  return operation.kind === "source"
-    ? { row: arrow.fromRow, column: arrow.fromColumn }
-    : { row: arrow.toRow, column: arrow.toColumn };
-}
-
-function tikzcdCellAtPoint(
-  panel: HTMLElement,
-  clientX: number,
-  clientY: number,
-): HTMLElement | undefined {
-  for (const cell of Array.from(
-    panel.querySelectorAll<HTMLElement>(".texleaf-tikzcd-editor-cell"),
-  )) {
-    const rectangle = cell.getBoundingClientRect();
-    if (
-      clientX >= rectangle.left && clientX <= rectangle.right &&
-      clientY >= rectangle.top && clientY <= rectangle.bottom
-    ) {
-      return cell;
-    }
-  }
-  return undefined;
-}
-
-function readTikzcdCellPosition(
-  cell: HTMLElement | undefined,
-): { readonly row: number; readonly column: number } | undefined {
-  if (cell === undefined) {
-    return undefined;
-  }
-  const row = Number.parseInt(cell.dataset.tikzcdEditorRow ?? "", 10);
-  const column = Number.parseInt(cell.dataset.tikzcdEditorColumn ?? "", 10);
-  return Number.isSafeInteger(row) && Number.isSafeInteger(column)
-    ? { row, column }
-    : undefined;
-}
-
-function tikzcdCanvasPoint(
-  canvas: HTMLElement,
-  clientX: number,
-  clientY: number,
-): { readonly x: number; readonly y: number } {
-  const rectangle = canvas.getBoundingClientRect();
-  return {
-    x: clientX - rectangle.left,
-    y: clientY - rectangle.top,
-  };
-}
-
-function tikzcdElementCenter(
-  canvas: HTMLElement,
-  element: HTMLElement,
-): { readonly x: number; readonly y: number } {
-  const canvasRectangle = canvas.getBoundingClientRect();
-  const rectangle = element.getBoundingClientRect();
-  return {
-    x: rectangle.left - canvasRectangle.left + rectangle.width / 2,
-    y: rectangle.top - canvasRectangle.top + rectangle.height / 2,
-  };
-}
-
-interface MutableTikzcdArrowGeometry {
-  readonly start: { readonly x: number; readonly y: number };
-  readonly end: { readonly x: number; readonly y: number };
-  readonly control: { readonly x: number; readonly y: number };
-  readonly midpoint: { readonly x: number; readonly y: number };
-  readonly unitX: number;
-  readonly unitY: number;
-  readonly bendAmount: number;
-  readonly path: string;
-}
-
-function mutableTikzcdArrowGeometry(
-  canvas: HTMLElement,
-  fromNode: HTMLElement,
-  toNode: HTMLElement,
-  arrow: MutableTikzcdArrow,
-): MutableTikzcdArrowGeometry | undefined {
-  const canvasRectangle = canvas.getBoundingClientRect();
-  const fromRectangle = fromNode.getBoundingClientRect();
-  const toRectangle = toNode.getBoundingClientRect();
-  const fromCenter = {
-    x: fromRectangle.left - canvasRectangle.left + fromRectangle.width / 2,
-    y: fromRectangle.top - canvasRectangle.top + fromRectangle.height / 2,
-  };
-  const toCenter = {
-    x: toRectangle.left - canvasRectangle.left + toRectangle.width / 2,
-    y: toRectangle.top - canvasRectangle.top + toRectangle.height / 2,
-  };
-  const deltaX = toCenter.x - fromCenter.x;
-  const deltaY = toCenter.y - fromCenter.y;
-  const distance = Math.hypot(deltaX, deltaY);
-  if (distance < 1) {
-    return undefined;
-  }
-  const unitX = deltaX / distance;
-  const unitY = deltaY / distance;
-  const startDistance = tikzcdNodeBoundaryDistance(fromRectangle, unitX, unitY);
-  const endDistance = tikzcdNodeBoundaryDistance(toRectangle, unitX, unitY);
-  const start = {
-    x: fromCenter.x + unitX * startDistance,
-    y: fromCenter.y + unitY * startDistance,
-  };
-  const end = {
-    x: toCenter.x - unitX * endDistance,
-    y: toCenter.y - unitY * endDistance,
-  };
-  const bendAmount = arrow.bend === "none"
-    ? 0
-    : (arrow.bend === "left" ? 1 : -1) *
-      tikzcdBendControlDistance(distance, arrow.bendAmount);
-  const control = {
-    x: (start.x + end.x) / 2 + unitY * bendAmount,
-    y: (start.y + end.y) / 2 - unitX * bendAmount,
-  };
-  const midpoint = bendAmount === 0
-    ? { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 }
-    : {
-        x: (start.x + 2 * control.x + end.x) / 4,
-        y: (start.y + 2 * control.y + end.y) / 4,
-      };
-  return {
-    start,
-    end,
-    control,
-    midpoint,
-    unitX,
-    unitY,
-    bendAmount,
-    path: bendAmount === 0
-      ? `M ${start.x} ${start.y} L ${end.x} ${end.y}`
-      : `M ${start.x} ${start.y} Q ${control.x} ${control.y} ${end.x} ${end.y}`,
-  };
-}
-
-/**
- * Approximate tikz-cd's symmetric `bend left/right=<angle>` geometry with a
- * quadratic Bezier control point.  The old linear formula hit a fixed 72 px
- * ceiling, so a long 30 degree arrow and a 45 degree arrow were practically
- * indistinguishable.  Half-chord times tan(angle) preserves the increasingly
- * strong curvature users expect from 15/30/45/60 degrees; the proportional
- * cap only prevents a near-vertical tangent from leaving the canvas entirely.
- */
 function tikzcdBendControlDistance(distance: number, angle: number): number {
   const radians = clampInteger(Math.round(angle), 1, 75) * Math.PI / 180;
-  return Math.min(
-    distance * 0.7,
-    Math.max(8, distance * 0.5 * Math.tan(radians)),
-  );
+  return Math.min(distance * 0.7, Math.max(8, distance * 0.5 * Math.tan(radians)));
 }
 
-function scheduleEditableTikzcdDrawing(
-  session: MutableTikzcdEditorSession,
-  canvas: HTMLElement,
-  svg: SVGSVGElement,
-  nodes: ReadonlyMap<string, HTMLElement>,
+function openQuiverTikzcdEditor(
+  card: HTMLElement, view: EditorView, record: VisualTikzcdRecord, trigger: HTMLButtonElement,
 ): void {
-  const markerId = `texleaf-tikzcd-editor-marker-${++tikzcdMarkerSequence}`;
-  let frame = 0;
-  const draw = (): void => {
-    cancelAnimationFrame(frame);
-    frame = requestAnimationFrame(() => {
-      drawEditableTikzcdArrows(session, canvas, svg, nodes, markerId);
-      session.view.requestMeasure();
-    });
+  const existing = card.querySelector('.texleaf-quiver-editor');
+  if (existing) { existing.dispatchEvent(new Event('texleaf-request-close')); return; }
+  const uri = document.querySelector<HTMLElement>('#editor')?.dataset.quiverUri;
+  if (!uri) { setStatus('warning', 'quiver 资源未加载，请重新打开编辑器。', 4_000); return; }
+  const sourceRange = () => readMappedDatasetRange(card, 'texleafSourceFrom', 'texleafSourceTo', view.state.doc.length);
+  const range = sourceRange();
+  if (!range) return;
+  const source = view.state.sliceDoc(range.from, range.to), offset = source.indexOf(record.tex);
+  if (offset < 0) { setStatus('warning', '交换图预览正在更新，请稍后重新打开。', 2_000); return; }
+  const panel = document.createElement('section');
+  panel.className = 'texleaf-quiver-editor texleaf-paper-preview';
+  panel.addEventListener('pointerdown', event => event.stopPropagation());
+  panel.addEventListener('keydown', event => event.stopPropagation());
+  const controls = document.createElement('div');
+  const button = (label: string, action: () => void) => {
+    const element = document.createElement('button'); element.type = 'button'; element.textContent = label;
+    element.addEventListener('click', action); controls.append(element); return element;
   };
-  session.redrawCanvas = draw;
-  draw();
-  const observer = typeof ResizeObserver === "function"
-    ? new ResizeObserver(draw)
-    : undefined;
-  observer?.observe(canvas);
-  session.disposeCanvas = () => {
-    cancelAnimationFrame(frame);
-    observer?.disconnect();
-    if (session.redrawCanvas === draw) {
-      session.redrawCanvas = undefined;
-    }
-  };
-}
-
-function drawEditableTikzcdArrows(
-  session: MutableTikzcdEditorSession,
-  canvas: HTMLElement,
-  svg: SVGSVGElement,
-  nodes: ReadonlyMap<string, HTMLElement>,
-  markerId: string,
-): void {
-  svg.replaceChildren();
-  for (const label of Array.from(
-    canvas.querySelectorAll(".texleaf-tikzcd-editor-arrow-label"),
-  )) {
-    label.remove();
-  }
-  const width = Math.max(canvas.clientWidth, canvas.scrollWidth);
-  const height = Math.max(canvas.clientHeight, canvas.scrollHeight);
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.style.width = `${width}px`;
-  svg.style.height = `${height}px`;
-  const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
-  defs.append(
-    createTikzcdMarker(markerId, false),
-    createTikzcdMarker(`${markerId}-double`, true),
-    createTikzcdMarker(
-      `${markerId}-selected`,
-      false,
-      "var(--vscode-focusBorder)",
-    ),
-    createTikzcdMarker(
-      `${markerId}-double-selected`,
-      true,
-      "var(--vscode-focusBorder)",
-    ),
-  );
-  svg.append(defs);
-  for (let index = 0; index < session.model.arrows.length; index += 1) {
-    const arrow = session.model.arrows[index]!;
-    const fromNode = nodes.get(`${arrow.fromRow}:${arrow.fromColumn}`);
-    const toNode = nodes.get(`${arrow.toRow}:${arrow.toColumn}`);
-    if (fromNode === undefined || toNode === undefined) {
-      continue;
-    }
-    const geometry = mutableTikzcdArrowGeometry(canvas, fromNode, toNode, arrow);
-    if (geometry === undefined) {
-      continue;
-    }
-    const selected = session.selection?.kind === "arrow" && session.selection.index === index;
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.dataset.tikzcdEditorArrow = String(index);
-    path.dataset.tikzcdEditorBend = arrow.bend;
-    path.setAttribute("d", geometry.path);
-    path.setAttribute("fill", "none");
-    path.setAttribute("stroke", selected ? "var(--vscode-focusBorder)" : "currentColor");
-    path.setAttribute("stroke-width", selected ? "2.2" : "1.55");
-    path.setAttribute("stroke-linecap", "round");
-    if (selected) {
-      path.classList.add("texleaf-tikzcd-editor-arrow-selected");
-    }
-    if (arrow.lineStyle === "dashed") {
-      path.setAttribute("stroke-dasharray", "5 4");
-    } else if (arrow.lineStyle === "dotted") {
-      path.setAttribute("stroke-dasharray", "1.5 4");
-    }
-    if (arrow.head !== "noHead") {
-      const markerBase = selected ? `${markerId}-selected` : markerId;
-      path.setAttribute(
-        "marker-end",
-        `url(#${
-          arrow.head === "twoHeads"
-            ? selected
-              ? `${markerId}-double-selected`
-              : `${markerId}-double`
-            : markerBase
-        })`,
-      );
-    }
-    svg.append(path);
-    if (arrow.head === "hook") {
-      const hook = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      hook.setAttribute(
-        "d",
-        `M ${geometry.start.x - geometry.unitY * 5} ${geometry.start.y + geometry.unitX * 5} Q ${geometry.start.x - geometry.unitX * 5} ${geometry.start.y - geometry.unitY * 5} ${geometry.start.x + geometry.unitY * 5} ${geometry.start.y - geometry.unitX * 5}`,
-      );
-      hook.setAttribute("fill", "none");
-      hook.setAttribute("stroke", selected ? "var(--vscode-focusBorder)" : "currentColor");
-      hook.setAttribute("stroke-width", "1.3");
-      svg.append(hook);
-    }
-    const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    hit.classList.add("texleaf-tikzcd-editor-arrow-hit");
-    hit.dataset.tikzcdEditorArrowHit = String(index);
-    hit.setAttribute("d", geometry.path);
-    hit.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0) {
-        return;
+  const controller = new AbortController(), token = crypto.randomUUID();
+  const close = () => { controller.abort(); panel.remove(); trigger.textContent = '可视化编辑交换图'; trigger.setAttribute('aria-pressed', 'false'); view.requestMeasure(); };
+  panel.addEventListener('texleaf-request-close', close);
+  button('取消', close);
+  const iframe = document.createElement('iframe');
+  iframe.title = 'quiver 中文交换图编辑器';
+  iframe.sandbox.add('allow-scripts', 'allow-same-origin');
+  void fetch(uri, {signal: controller.signal}).then(response => {
+    if (!response.ok) throw new Error(`quiver 加载失败 (${response.status})`);
+    return response.text();
+  }).then(html => {
+    if (!controller.signal.aborted) iframe.srcdoc = html
+      .replaceAll('TEXLEAF_QUIVER_NONCE', document.querySelector<HTMLElement>('#editor')?.dataset.cspNonce ?? '')
+      .replaceAll('TEXLEAF_QUIVER_TOKEN', token);
+  }).catch(error => { if (!controller.signal.aborted) notice.textContent = String(error.message); });
+  const send = (type: string, extra = {}) => iframe.contentWindow?.postMessage({protocol: 'texleaf-quiver-v1', token, type, ...extra}, '*');
+  const apply = button('应用修改', () => send('export', {allowConversion: consent.checked})); apply.disabled = true;
+  button('放大 / 还原', () => { panel.classList.toggle('expanded'); view.requestMeasure(); });
+  const notice = document.createElement('p'); notice.textContent = '正在加载本地 quiver…'; notice.setAttribute('role', 'status');
+  const warning = document.createElement('label'); warning.hidden = true;
+  const consent = document.createElement('input'); consent.type = 'checkbox';
+  warning.append(consent, '允许转换为 quiver 支持的样式（上方列出的未识别选项可能丢失）');
+  panel.append(controls, notice, warning, iframe);
+  window.addEventListener('message', event => {
+    const message = event.data;
+    if (event.source !== iframe.contentWindow || message?.protocol !== 'texleaf-quiver-v1' || message.token !== token) return;
+    if (message.type === 'ready') send('load', {tex: record.tex});
+    else if (message.type === 'loaded' && Array.isArray(message.warnings)) {
+      apply.disabled = false;
+      warning.hidden = message.warnings.length === 0;
+      notice.textContent = message.warnings.length ? `以下选项可能无法保留：\n${message.warnings.filter((s: unknown) => typeof s === 'string').join('\n').slice(0, 20_000)}` : '双击空白处添加节点，拖动节点创建箭头；选中箭头后可调整完整样式。';
+    } else if (message.type === 'error' && typeof message.message === 'string') notice.textContent = message.message.slice(0, 20_000);
+    else if (message.type === 'apply-request') apply.click();
+    else if (message.type === 'result' && typeof message.tex === 'string' && message.tex.length <= 1_000_000) {
+      const current = sourceRange();
+      if (!current || view.state.sliceDoc(current.from, current.to) !== source) {
+        notice.textContent = '原图源码已在其他位置修改，请取消并重新打开。'; return;
       }
-      event.preventDefault();
-      event.stopPropagation();
-      session.selection = { kind: "arrow", index };
-      renderVisualTikzcdEditor(session);
-    });
-    svg.append(hit);
-    if (arrow.label.trim().length > 0) {
-      const label = document.createElement("span");
-      label.className = "texleaf-tikzcd-editor-arrow-label";
-      label.dataset.tikzcdEditorArrowLabel = String(index);
-      if (selected) {
-        label.classList.add("texleaf-tikzcd-editor-arrow-label-selected");
+      if (!message.tex.startsWith('\\begin{tikzcd}') || !message.tex.endsWith('\\end{tikzcd}')) return;
+      const insert = source.slice(0, offset) + message.tex + source.slice(offset + record.tex.length);
+      let change = {...current, insert};
+      if (insert !== source) {
+        const document = view.state.doc.toString();
+        const visible = document.replace(/(?<!\\)(?:\\\\)*%[^\n]*/gu, comment => ' '.repeat(comment.length));
+        const begin = /\\begin\s*\{document\}/u.exec(visible);
+        if (begin && begin.index < current.from && !/\\(?:usepackage|RequirePackage)\s*(?:\[[^\]]*\]\s*)?\{[^}]*\bquiver\b[^}]*\}/u.test(visible.slice(0, begin.index))) {
+          change = {from: begin.index, to: current.to, insert: '\\usepackage{quiver}\n' + document.slice(begin.index, current.from) + insert};
+        }
+        if (!begin) setStatus('info', '交换图已更新；主文档导言区需加载 \\usepackage{quiver} 以使用完整箭头样式。', 6_000);
       }
-      label.append(createTikzcdEditorMath(session, arrow.label, arrow.label));
-      const side = arrow.swap ? -1 : 1;
-      label.style.left = `${geometry.midpoint.x + geometry.unitY * 14 * side}px`;
-      label.style.top = `${geometry.midpoint.y - geometry.unitX * 14 * side}px`;
-      canvas.append(label);
+      close();
+      if (insert !== source) applyAtomicVisualDocumentChange(view, change, {before: current.to, after: change.from + change.insert.length});
     }
-    if (selected) {
-      for (const [kind, point] of [
-        ["source", geometry.start],
-        ["target", geometry.end],
-      ] as const) {
-        const endpoint = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-        endpoint.classList.add("texleaf-tikzcd-editor-endpoint");
-        endpoint.dataset.tikzcdEditorEndpoint = kind;
-        endpoint.setAttribute("cx", String(point.x));
-        endpoint.setAttribute("cy", String(point.y));
-        endpoint.setAttribute("r", "7");
-        endpoint.addEventListener("pointerdown", (event) => {
-          startTikzcdArrowPointerDrag(event, session, canvas, svg, { kind, index });
-        });
-        svg.append(endpoint);
-      }
-    }
-  }
-}
-
-function createTikzcdPositionSelect(
-  model: MutableTikzcdModel,
-  selectedRow: number,
-  selectedColumn: number,
-): HTMLSelectElement {
-  const select = document.createElement("select");
-  for (let row = 0; row < model.rowCount; row += 1) {
-    for (let column = 0; column < model.columnCount; column += 1) {
-      const option = document.createElement("option");
-      option.value = String(row * model.columnCount + column);
-      const source = model.nodes[row]?.[column]?.trim();
-      option.textContent = `(${row + 1},${column + 1})${source ? ` ${source.slice(0, 30)}` : ""}`;
-      option.selected = row === selectedRow && column === selectedColumn;
-      select.append(option);
-    }
-  }
-  return select;
-}
-
-function decodeTikzcdPosition(value: string, columnCount: number): [number, number] {
-  const position = Math.max(0, Number.parseInt(value, 10) || 0);
-  return [Math.floor(position / columnCount), position % columnCount];
-}
-
-function normalizeMutableTikzcdModel(model: MutableTikzcdModel): void {
-  model.rowCount = clampInteger(model.rowCount, 1, 16);
-  model.columnCount = clampInteger(model.columnCount, 1, 16);
-  while (model.nodes.length < model.rowCount) {
-    model.nodes.push(Array.from({ length: model.columnCount }, () => ""));
-  }
-  model.nodes.length = model.rowCount;
-  for (const row of model.nodes) {
-    while (row.length < model.columnCount) {
-      row.push("");
-    }
-    row.length = model.columnCount;
-  }
-  model.arrows = model.arrows.filter((arrow) =>
-    arrow.fromRow >= 0 && arrow.fromRow < model.rowCount &&
-    arrow.toRow >= 0 && arrow.toRow < model.rowCount &&
-    arrow.fromColumn >= 0 && arrow.fromColumn < model.columnCount &&
-    arrow.toColumn >= 0 && arrow.toColumn < model.columnCount &&
-    (arrow.fromRow !== arrow.toRow || arrow.fromColumn !== arrow.toColumn)
-  ).slice(0, 128);
-}
-
-function applyVisualTikzcdEdit(
-  card: HTMLElement,
-  view: EditorView,
-  model: MutableTikzcdModel,
-): void {
-  normalizeMutableTikzcdModel(model);
-  const bodyRange = readMappedDatasetRange(
-    card,
-    "texleafBodyFrom",
-    "texleafBodyTo",
-    view.state.doc.length,
-  );
-  if (bodyRange === undefined) {
-    setStatus("warning", "tikzcd 源码位置已经变化，请重新打开可视化编辑器。", 3_500);
-    return;
-  }
-  if (model.nodes.some((row) => row.some((node) =>
-    /[\r\n]/u.test(node) || hasUnescapedTableSeparator(node) || /\\arrow\b/u.test(node)
-  ))) {
-    setStatus("warning", "节点不能含换行、未转义的 & 或手写 \\arrow；请用箭头编辑区。", 4_000);
-    return;
-  }
-  if (model.arrows.some((arrow) =>
-    /[\r\n"]/u.test(arrow.label)
-  )) {
-    setStatus("warning", "箭头标签不能含换行或双引号。", 4_000);
-    return;
-  }
-  const original = view.state.sliceDoc(bodyRange.from, bodyRange.to);
-  const body = serializeVisualTikzcdBody(original, model);
-  const sourceRange = readMappedDatasetRange(
-    card,
-    "texleafSourceFrom",
-    "texleafSourceTo",
-    view.state.doc.length,
-  );
-  applyAtomicVisualDocumentChange(view, {
-    from: bodyRange.from,
-    to: bodyRange.to,
-    insert: body,
-  }, sourceRange === undefined ? undefined : {
-    before: sourceRange.to,
-    after: sourceRange.to + body.length - original.length,
-  });
-}
-
-function serializeVisualTikzcdBody(
-  original: string,
-  model: MutableTikzcdModel,
-): string {
-  const eol = original.includes("\r\n") ? "\r\n" : "\n";
-  const firstContent = /(?:^|\r?\n)([ \t]*)\S/u.exec(original);
-  const rowIndent = firstContent?.[1] ?? "  ";
-  const trailingIndent = /(?:\r?\n)([ \t]*)$/u.exec(original)?.[1] ?? "";
-  const arrowsByNode = new Map<string, MutableTikzcdArrow[]>();
-  for (const arrow of model.arrows) {
-    const key = `${arrow.fromRow}:${arrow.fromColumn}`;
-    const values = arrowsByNode.get(key) ?? [];
-    values.push(arrow);
-    arrowsByNode.set(key, values);
-  }
-  const rows: string[] = [];
-  for (let row = 0; row < model.rowCount; row += 1) {
-    const cells: string[] = [];
-    for (let column = 0; column < model.columnCount; column += 1) {
-      let source = model.nodes[row]?.[column]?.trim() ?? "";
-      for (const arrow of arrowsByNode.get(`${row}:${column}`) ?? []) {
-        source += `${source.length === 0 ? "" : " "}\\arrow[${serializeTikzcdArrowOptions(arrow)}]`;
-      }
-      cells.push(source);
-    }
-    rows.push(`${rowIndent}${cells.join(" & ")}${row < model.rowCount - 1 ? " \\\\" : ""}`);
-  }
-  return `${eol}${rows.join(eol)}${eol}${trailingIndent}`;
-}
-
-function serializeTikzcdArrowOptions(arrow: MutableTikzcdArrow): string {
-  const deltaRow = arrow.toRow - arrow.fromRow;
-  const deltaColumn = arrow.toColumn - arrow.fromColumn;
-  const direction = [
-    deltaColumn > 0 ? "r".repeat(deltaColumn) : "l".repeat(-deltaColumn),
-    deltaRow > 0 ? "d".repeat(deltaRow) : "u".repeat(-deltaRow),
-  ].join("");
-  const options = [direction];
-  if (arrow.label.trim().length > 0) {
-    options.push(`"${arrow.label.trim()}"${arrow.swap ? "'" : ""}`);
-  } else if (arrow.swap) {
-    options.push("swap");
-  }
-  if (arrow.lineStyle !== "solid") {
-    options.push(arrow.lineStyle);
-  }
-  if (arrow.bend !== "none") {
-    options.push(`bend ${arrow.bend}=${clampInteger(arrow.bendAmount, 1, 90)}`);
-  }
-  switch (arrow.head) {
-    case "twoHeads":
-      options.push("two heads");
-      break;
-    case "hook":
-      options.push("hook");
-      break;
-    case "noHead":
-      options.push("no head");
-      break;
-    case "normal":
-      break;
-  }
-  return options.join(", ");
+  }, {signal: controller.signal});
+  trigger.textContent = '关闭交换图编辑'; trigger.setAttribute('aria-pressed', 'true');
+  card.append(panel); view.requestMeasure();
 }
 
 const visualPdfImageCache = new Map<string, string>();
@@ -20389,7 +18343,7 @@ function wireSourcePointer(
     open(event.ctrlKey || event.metaKey);
   });
   element.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") {
+    if (event.target === element && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
       event.stopPropagation();
       open(event.ctrlKey || event.metaKey);
@@ -21097,7 +19051,7 @@ function buildFormulaPresentation(
       continue;
     }
     const selected = sourceFormulaIds.has(record.id);
-    if (!visual || selected) {
+    if (!visual || selected || record.sourceOnly) {
       if (!selected) {
         previousEnd = record.to;
         continue;
@@ -21207,7 +19161,7 @@ function patchFormulaRenderDecorations(
     filterFrom = Math.min(filterFrom, record.from, replacement.from);
     filterTo = Math.max(filterTo, record.to, replacement.to);
     const selected = selectionIntersectsFormula(state, record);
-    if (enabled && (!visual || selected)) {
+    if (enabled && (!visual || selected || record.sourceOnly)) {
       // Revealed formula source marks are supplied by nativeSyntaxField as a
       // single flat layer. Adding a second outer mark here would recreate the
       // nested Chromium DOM that breaks Microsoft Pinyin composition.
@@ -22915,12 +20869,16 @@ function requestCommittedFormulaAfterSelectionLeave(update: ViewUpdate): void {
     update.state,
     nextField?.records ?? [],
   );
-  if (previous === undefined || previous.record.id === next?.record.id) {
+  if (previous?.record.id === next?.record.id) {
     return;
   }
+  // Table formulas skip viewport rendering. Request their static asset on
+  // first entry too, since local TeX cannot render a cursor overlay.
+  const target = next?.record.sourceOnly ? next : previous;
+  if (target === undefined) return;
   const record = nextField?.records.find(
-    (candidate) => candidate.id === previous.record.id,
-  ) ?? previous.record;
+    (candidate) => candidate.id === target.record.id,
+  ) ?? target.record;
   if (record.from < 0 || record.to > update.state.doc.length || record.from >= record.to) {
     return;
   }
@@ -24049,11 +22007,7 @@ function applyEditingToolbarSnippet(
   to: number,
   parts: readonly ReplacementPart[],
 ): void {
-  const sourceBefore = view.state.doc.toString();
   const encoding = replacementPartsToCodeMirrorSnippet(parts);
-  const insertedText = parts.map((part) =>
-    part.kind === "text" ? part.value : part.placeholder ?? ""
-  ).join("");
   applyingHostOperation = true;
   suppressHostEditMessages = true;
   try {
@@ -24066,9 +22020,6 @@ function applyEditingToolbarSnippet(
       closeBraceMarker: encoding.closeBraceMarker,
     });
     registerVisualSnippetFields(view, applied.fields, applied.exit);
-    if (view.state.sliceDoc(from, from + insertedText.length) !== insertedText) {
-      throw new Error("工具栏片段文本与预期内容不一致。");
-    }
     if (applied.changes.length > 0) {
       clientRevision += 1;
       post({

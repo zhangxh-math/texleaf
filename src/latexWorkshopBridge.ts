@@ -8,6 +8,9 @@
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { beamerForwardSynctexLine, beamerReverseSynctexOffset } from "./core/beamerSynctex";
+import { scanLatexProjectSource } from "./core/latexProject";
+import { normalizeVisualText, visualOffsetFromDocumentOffset } from "./core/visualTextCoordinates";
 import type { VisualCompiledBuild } from "./visualCompiledReferences";
 import {
   VISUAL_EDITOR_REVEAL_OPEN_RANGE_COMMAND,
@@ -49,6 +52,7 @@ interface LatexWorkshopState {
   };
   viewer: {
     view(uri: vscode.Uri, mode?: string): Promise<unknown> | unknown;
+    locate?(uri: vscode.Uri, record: LatexWorkshopForwardSyncRecord | readonly LatexWorkshopForwardSyncRecord[]): Promise<unknown> | unknown;
   };
   locate: {
     synctex: {
@@ -62,7 +66,10 @@ interface LatexWorkshopState {
         pdfUri: vscode.Uri,
       ): Promise<unknown> | unknown;
       components?: {
-        computeToTeX(
+        synctexToPDFCombined?(
+          line: number, column: number, filePath: string, pdfUri: vscode.Uri, indicator: string,
+        ): Promise<LatexWorkshopForwardSyncRecord | readonly LatexWorkshopForwardSyncRecord[]>;
+        computeToTeX?(
           data: LatexWorkshopReverseSyncData,
           pdfUri: vscode.Uri,
         ): Promise<LatexWorkshopReverseSyncRecord | undefined>;
@@ -146,6 +153,13 @@ interface LatexWorkshopReverseSyncRecord {
   readonly input: string;
   readonly line: number;
   readonly column: number;
+}
+
+interface LatexWorkshopForwardSyncRecord {
+  readonly page: number;
+  readonly x: number;
+  readonly y: number;
+  readonly indicator: boolean;
 }
 
 interface LatexWorkshopModule<T> {
@@ -620,6 +634,47 @@ async function locatePdf(
       },
     );
   }
+  try {
+    const components = runtime.lw.locate.synctex.components;
+    const forward = components?.synctexToPDFCombined?.bind(components);
+    const reverse = components?.computeToTeX?.bind(components);
+    if (viewerMode !== "external" && forward && reverse && runtime.lw.viewer.locate &&
+        await isBeamerRoot(runtime.lw, document, rootFile)) {
+      const raw = document.getText();
+      const frameLine = beamerForwardSynctexLine(normalizeVisualText(raw),
+        visualOffsetFromDocumentOffset(raw, document.offsetAt(selection.active)));
+      if (frameLine !== undefined) {
+        const indicator = configuration.get<string>("synctex.indicator", "circle");
+        // A globally direct frame can have precise records without a fragile
+        // option in its header. Only a matching reverse record proves that.
+        let precise: LatexWorkshopForwardSyncRecord | readonly LatexWorkshopForwardSyncRecord[] | undefined;
+        try {
+          const candidates = await forward(selection.active.line + 1, selection.active.character, document.fileName, pdfUri, indicator);
+          for (const candidate of Array.isArray(candidates) ? candidates : [candidates]) {
+            const back = await reverse({ page: candidate.page, pos: [candidate.x, candidate.y] }, pdfUri);
+            if (back?.line === selection.active.line + 1 &&
+                normalizedUri(runtime.lw.file.toUri(back.input)) === normalizedUri(document.uri)) {
+              precise = Array.isArray(candidates) ? [candidate] : candidate;
+              break;
+            }
+          }
+        } catch {
+          // An unavailable precise record must not discard the frame destination.
+        }
+        const result = precise ?? await forward(frameLine, 0, document.fileName, pdfUri, indicator);
+        // Workshop scrolls to every array entry. Keep the first slide instead
+        // of ending on a later overlay from the same collected frame.
+        const selected = Array.isArray(result) ? result.slice(0, 1) : result;
+        if (!Array.isArray(selected) || selected.length > 0) {
+          await runtime.lw.viewer.locate(pdfUri, selected);
+          return;
+        }
+      }
+    }
+  } catch {
+    // Preserve Workshop's existing command path if a component is unavailable
+    // at runtime or cannot read the current SyncTeX artifact.
+  }
   const previousActive = runtime.lw.previousActive;
   runtime.lw.previousActive = { document, selection };
   try {
@@ -632,13 +687,29 @@ async function locatePdf(
   }
 }
 
+async function isBeamerRoot(
+  lw: LatexWorkshopState,
+  document: vscode.TextDocument,
+  rootFile?: string,
+): Promise<boolean> {
+  try {
+    const file = rootFile ?? await preferredRootFile(document) ?? lw.root.file.path ?? document.fileName;
+    const uri = lw.file.toUri(file);
+    const root = normalizedUri(uri) === normalizedUri(document.uri)
+      ? document : await vscode.workspace.openTextDocument(uri);
+    return /^(?:ctex)?beamer$/u.test(scanLatexProjectSource(root.getText()).documentClass?.name.trim() ?? "");
+  } catch {
+    return false;
+  }
+}
+
 function installVisualReverseSync(lw: LatexWorkshopState): void {
   if (patchedSyncTeXStates.has(lw)) {
     return;
   }
   const synctex = lw.locate.synctex;
   const originalToTeX = synctex.toTeX?.bind(synctex);
-  const computeToTeX = synctex.components?.computeToTeX.bind(
+  const computeToTeX = synctex.components?.computeToTeX?.bind(
     synctex.components,
   );
   if (originalToTeX === undefined || computeToTeX === undefined) {
@@ -652,8 +723,15 @@ function installVisualReverseSync(lw: LatexWorkshopState): void {
       if (record !== undefined) {
         const uri = lw.file.toUri(record.input);
         const document = await vscode.workspace.openTextDocument(uri);
-        const position = reverseSyncPosition(document, record, data);
-        const offset = document.offsetAt(position);
+        const raw = document.getText();
+        const source = normalizeVisualText(raw);
+        const row = clampInteger(record.line - 1, 0, Math.max(0, document.lineCount - 1));
+        const rawPosition = new vscode.Position(row, clampInteger(record.column, 0, document.lineAt(row).text.length));
+        const frameOffset = await isBeamerRoot(lw, document)
+          ? beamerReverseSynctexOffset(source, visualOffsetFromDocumentOffset(raw, document.offsetAt(rawPosition)))
+          : undefined;
+        const offset = frameOffset ?? visualOffsetFromDocumentOffset(raw,
+          document.offsetAt(reverseSyncPosition(document, record, data)));
         const handled = await vscode.commands.executeCommand<boolean>(
           registeredVisualPdf
             ? VISUAL_EDITOR_REVEAL_RANGE_COMMAND
