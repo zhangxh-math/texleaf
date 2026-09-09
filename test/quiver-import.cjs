@@ -29,17 +29,19 @@ global.document = {compatMode:'CSS1Compat',documentElement:{},addEventListener()
   assert.deepEqual(parse('[sep=large,column sep=0.90em]').ui.panel.sep,{column:0.9,row:2.7});
   // Run the real raw-document load branch twice with the same UI settings,
   // as repeated loads and persisted localStorage may retain the preceding graph.
-  const bridge = require('node:fs').readFileSync('src/quiver/embedded.mjs','utf8');
-  const start = bridge.indexOf("          ui.settings.set('export.ampersand_replacement', /ampersand replacement/");
-  const end = bridge.indexOf("\n        }\n        // The importer",start);
-  assert.ok(start>0 && end>start);
-  const load = new Function('ui','original','clean','let warnings;'+bridge.slice(start,end)+';return warnings;');
-  const reused = imported.ui;
-  reused.quiver = {import(_ui,_format,clean) {const p=new Parser(reused,clean);p.parse_diagram_options();return {diagnostics:p.diagnostics};}};
-  load(reused,'[row sep=huge,column sep=small,cramped]','[row sep=huge,column sep=small,cramped]');
-  assert.equal(reused.settings.get('export.cramped'),true);
-  load(reused,'','');
-  assert.deepEqual(reused.panel.sep,{column:1.8,row:1.8});
-  assert.equal(reused.settings.get('export.cramped'),false);
+  for (const newline of ['\n', '\r\n']) {
+    const bridge = require('node:fs').readFileSync('src/quiver/embedded.mjs','utf8').replace(/\r\n|\r|\n/g, newline).replace(/\r\n?/g, '\n');
+    const start = bridge.indexOf("          ui.settings.set('export.ampersand_replacement', /ampersand replacement/");
+    const end = bridge.indexOf("\n        }\n        // The importer",start);
+    assert.ok(start>0 && end>start);
+    const load = new Function('ui','original','clean','let warnings;'+bridge.slice(start,end)+';return warnings;');
+    const reused = imported.ui;
+    reused.quiver = {import(_ui,_format,clean) {const p=new Parser(reused,clean);p.parse_diagram_options();return {diagnostics:p.diagnostics};}};
+    load(reused,'[row sep=huge,column sep=small,cramped]','[row sep=huge,column sep=small,cramped]');
+    assert.equal(reused.settings.get('export.cramped'),true);
+    load(reused,'','');
+    assert.deepEqual(reused.panel.sep,{column:1.8,row:1.8});
+    assert.equal(reused.settings.get('export.cramped'),false);
+  }
   console.log('quiver import spacing/cramped preserve export and unsupported values warn');
 })().catch(error=>{console.error(error);process.exitCode=1;});
