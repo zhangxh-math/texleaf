@@ -2240,14 +2240,16 @@ async function run() {
     );
     const cascadedFractionNumerator =
       cascadedFractionExpected.indexOf("\\frac{") + "\\frac{".length;
+    // Text and tabstop selection arrive in separate VS Code events.
+    await waitFor(
+      () => editor.selection.isEmpty &&
+        document.offsetAt(editor.selection.active) === cascadedFractionNumerator,
+      "the cascaded fraction's numerator tabstop selection",
+    );
     assert.equal(
       editor.selection.isEmpty,
       true,
       "the cascaded fraction numerator must be an empty caret tabstop",
-    );
-    await waitFor(
-      () => document.offsetAt(editor.selection.active) === cascadedFractionNumerator,
-      "the cascaded fraction's numerator tabstop selection",
     );
     assert.equal(
       document.offsetAt(editor.selection.active),
