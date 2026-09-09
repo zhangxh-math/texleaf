@@ -18,6 +18,8 @@ TeXLeaf 不自带 TeX 编译器。编译、PDF 查看和 SyncTeX 交给 [LaTeX W
 
 当前 **TeXLeaf 是 LaTeX Workshop 桥接版**：它复用 LaTeX Workshop 已加载的运行时模块、编译配方、执行器与公开命令，以及 PDF 查看器、SyncTeX 和编译诊断，不重复实现一套 TeX 编译基础设施。后续还将推出 **TeXLeaf-Z**——不再桥接 LaTeX Workshop、提供集成编译工作流的版本；具体功能范围和发布时间以后续公告为准，敬请期待。
 
+**1.2.2**：修复文字选区显示、编辑和滚动后的源码按钮定位，以及模式切换时的 quiver 草稿保护。详见 [更新记录](CHANGELOG.md)与 [1.2.2 Wiki](https://github.com/zhangxh-math/texleaf/wiki/Release-1.2.2)；[下载正式版 VSIX 与 SHA-256](https://github.com/zhangxh-math/texleaf/releases/tag/v1.2.2)。
+
 ## 后续维护方向
 
 TeXLeaf 的主要功能现已基本完成。后续更新将聚焦于问题修复，以及可视化编辑器对更多 LaTeX 模板和命令的兼容适配。模板适配将优先处理赞助者的需求。
