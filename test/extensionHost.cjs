@@ -2867,12 +2867,11 @@ async function run() {
         "a partial trigger must retain TeXLeaf priority/order without the exact-match bucket",
       );
 
-      const exactSuffixFixtureBefore = await vscode.workspace.fs.readFile(
-        expectedNewPublisherSnippetUri,
-      );
-      const exactSuffixLibrary = parseJsonc(
-        new TextDecoder().decode(exactSuffixFixtureBefore),
-      );
+      // Keep completion fixtures out of the shared, asynchronously synced user library.
+      const exactSuffixFixtureUri = vscode.Uri.joinPath(texProjectRoot, ".vscode", "texleaf-exact-suffix-test.jsonc");
+      const exactSuffixConfiguration = vscode.workspace.getConfiguration("texleaf", document.uri);
+      const exactSuffixFilesBefore = exactSuffixConfiguration.inspect("snippetFiles")?.workspaceFolderValue;
+      const exactSuffixLibrary = { version: 1, snippets: [] };
       exactSuffixLibrary.snippets.push(
         {
           id: "extension-host-exact-suffix-ab",
@@ -2891,10 +2890,16 @@ async function run() {
         },
       );
       await vscode.workspace.fs.writeFile(
-        expectedNewPublisherSnippetUri,
+        exactSuffixFixtureUri,
         new TextEncoder().encode(`${JSON.stringify(exactSuffixLibrary, null, 2)}\n`),
       );
       try {
+        await exactSuffixConfiguration.update(
+          "snippetFiles",
+          [...exactSuffixConfiguration.get("snippetFiles", []), ".vscode/texleaf-exact-suffix-test.jsonc"],
+          vscode.ConfigurationTarget.WorkspaceFolder,
+        );
+        await vscode.commands.executeCommand("texleaf.reloadSnippets");
         await replaceDocument(editor, "$xab$", 4);
         let exactSuffixList;
         await waitFor(async () => {
@@ -2955,7 +2960,7 @@ async function run() {
           description: "Higher-priority regex exact-match shadow",
         });
         await vscode.workspace.fs.writeFile(
-          expectedNewPublisherSnippetUri,
+          exactSuffixFixtureUri,
           new TextEncoder().encode(
             `${JSON.stringify(exactSuffixLibrary, null, 2)}\n`,
           ),
@@ -3011,16 +3016,9 @@ async function run() {
           "a regex-shadowed literal must not claim the exact-only sort bucket",
         );
       } finally {
-        await vscode.workspace.fs.writeFile(
-          expectedNewPublisherSnippetUri,
-          exactSuffixFixtureBefore,
-        );
-        const restoredLibraryDocument = await vscode.workspace.openTextDocument(expectedNewPublisherSnippetUri);
-        await waitForDocumentText(
-          restoredLibraryDocument,
-          new TextDecoder().decode(exactSuffixFixtureBefore),
-          "the open global snippet document after restoring its fixture on disk",
-        );
+        await exactSuffixConfiguration.update("snippetFiles", exactSuffixFilesBefore, vscode.ConfigurationTarget.WorkspaceFolder);
+        await vscode.commands.executeCommand("texleaf.reloadSnippets");
+        await vscode.workspace.fs.delete(exactSuffixFixtureUri);
         await waitFor(async () => {
           const current = await provideCompletionList(document, 4);
           return (
@@ -6222,7 +6220,10 @@ C(\mathbf{d}) & =\sum_{j=1}^{n}\frac{2d_{j}+1}{\chi(\mathbf{d})-1}C(d_{1},\dots,
       () => texLeafAiDiagnostics(reopenedPersistenceDocument).length === 0,
       "cleared native AI diagnostic",
     );
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await waitFor(async () => {
+      const record = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(aiIssueCacheUri)));
+      return record.issues.length === 0;
+    }, "the cleared AI issue snapshot to reach disk");
     const clearedRecord = JSON.parse(new TextDecoder().decode(
       await vscode.workspace.fs.readFile(aiIssueCacheUri),
     ));
