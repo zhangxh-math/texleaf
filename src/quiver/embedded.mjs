@@ -108,6 +108,8 @@ window.addEventListener('texleaf-quiver-ready', ({detail: ui}) => {
           warnings = [];
         } else {
           ui.settings.set('export.ampersand_replacement', /ampersand replacement/.test(original));
+          ui.panel.sep = { column: 1.8, row: 1.8 };
+          ui.settings.set('export.cramped', false);
           const result = ui.quiver.import(ui, 'tikz-cd', clean, ui.settings);
           warnings = result.diagnostics.map(d => (Array.isArray(d.message) ? d.message.map(p => typeof p === 'string' ? p : p.element?.textContent ?? '').join('') : String(d.message)).replace(/Unknown (diagram|node|edge|arrow) option: /g, (_, kind) => `未识别的${{diagram:'图形',node:'节点',edge:'箭头',arrow:'箭头'}[kind]}选项：`));
         }
