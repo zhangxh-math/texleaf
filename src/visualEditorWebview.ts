@@ -2678,6 +2678,10 @@ const editorTheme = EditorView.theme({
   ".cm-activeLine": {
     backgroundColor: "var(--vscode-editor-lineHighlightBackground)",
   },
+  "&:has(.cm-selectionBackground) .cm-activeLine, &:has(.cm-selectionBackground) .cm-line.texleaf-preamble-line": {
+    // CodeMirror draws selection behind the content; opaque line fills hide it.
+    backgroundColor: "transparent",
+  },
   ".cm-foldPlaceholder": {
     color: "var(--vscode-descriptionForeground)",
     backgroundColor: "var(--vscode-editor-foldBackground)",
@@ -13612,7 +13616,10 @@ class TransparentWrapperEditWidget extends WidgetType {
 
   public override eq(other: TransparentWrapperEditWidget): boolean {
     return this.record.command === other.record.command &&
-      this.record.editLabel === other.record.editLabel;
+      this.record.editLabel === other.record.editLabel &&
+      this.record.from === other.record.from && this.record.to === other.record.to &&
+      this.record.prefixFrom === other.record.prefixFrom && this.record.prefixTo === other.record.prefixTo &&
+      this.record.contentFrom === other.record.contentFrom && this.record.contentTo === other.record.contentTo;
   }
 
   public override toDOM(view: EditorView): HTMLElement {
@@ -16717,10 +16724,16 @@ class TikzcdWidget extends WidgetType {
   }
 
   public override eq(other: TikzcdWidget): boolean {
-    return this.insideFrame === other.insideFrame &&
+    const equal = this.insideFrame === other.insideFrame &&
       ((this.record.tex === other.record.tex &&
         Boolean(this.card?.querySelector('.texleaf-quiver-editor') ?? other.card?.querySelector('.texleaf-quiver-editor'))) ||
       visualPresentationKey(this.record) === visualPresentationKey(other.record));
+    if (equal) {
+      // CodeMirror keeps the DOM but replaces the widget instance on reuse.
+      other.card = this.card ?? other.card;
+      other.cleanup = this.cleanup ?? other.cleanup;
+    }
+    return equal;
   }
 
   public override toDOM(view: EditorView): HTMLElement {
@@ -21359,6 +21372,10 @@ function updateCapabilities(capabilities: VisualEditorCapabilities): void {
 }
 
 function toggleEditorMode(): void {
+  if (editorMode === "visual" && document.querySelector(".texleaf-quiver-editor")) {
+    setStatus("info", "请先应用或取消交换图编辑，再切换源码模式。", 4_500);
+    return;
+  }
   editorMode = editorMode === "visual" ? "source" : "visual";
   updateEditorModeButton();
   const view = editor;

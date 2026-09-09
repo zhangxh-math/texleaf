@@ -177,7 +177,7 @@ pnpm run package
 构建完成后，可从命令面板选择 `Extensions: Install from VSIX...`，或在终端执行：
 
 ```powershell
-code --install-extension .\texleaf-1.2.1.vsix --force
+code --install-extension .\texleaf-1.2.2.vsix --force
 ```
 
 安装后在普通 VS Code 窗口验证，而不是只在扩展开发宿主中验证。发布前至少执行：
@@ -188,7 +188,7 @@ pnpm run release:verify
 
 还应检查 VSIX 内容，确认 `dist/extension.js`、`dist/mathPreviewWorker.js`、README、CHANGELOG、GPLv3 `LICENSE`、`NOTICE`、`SUPPORT.md`、`THIRD_PARTY_NOTICES.md`、`licenses/`、`media/icon.png` 与其他运行资源已包含，源码、测试、coverage、本机临时目录和赞助二维码未被打包。`package.json` 的 SPDX 值必须为 `GPL-3.0-only`，`NOTICE` 必须保留合理 TeXLeaf 署名与用户文档输出例外。README 图片使用公开仓库的 `https://raw.githubusercontent.com/zhangxh-math/texleaf/main/media/` 绝对地址，避免扩展详情页把 `media/...` 解析到错误位置；仅将图片打包进 VSIX 不足以保证详情页显示。检查归档中的 `extension/readme.md`，确认图标和全部 GIF 均使用 HTTPS 图片地址、对应 URL 返回正确的 PNG/GIF 内容，且相对文档链接已由 `vsce --githubBranch main` 改写为公开 HTTPS 地址；安装后的扩展详情页应显示 PNG 图标，命令面板应能找到片段、AI 写作、Zotero 与 Math Preview 命令。手工 VSIX 不会因为 Settings Sync 而自动安装到另一台机器；跨机测试必须在两端安装兼容版本并保持扩展标识 `zhangxh-math.texleaf`。
 
-Visual Studio Marketplace 使用现有 Publisher `zhangxh-math`；Marketplace 项目标识为 `zhangxh-math.texleaf`。可以在 Publisher 管理页手工上传 `texleaf-1.2.1.vsix`；后续自动发布优先使用短期联合身份凭据，不要把 PAT、DeepSeek/OpenAI/自定义 Responses API Key 或其他 secrets 写入仓库。Publisher 变更会建立新的扩展身份：升级冒烟必须先在旧版保存修改并记录自定义模板，安装新版后禁用旧版但暂不卸载，再 Reload Window；只有新主文件不存在、旧 JSONC 严格校验通过且复制期间未变化时，新版才尽力逐字节复制旧片段库，并保留旧文件。验证 Snippet、按需重建自定义模板后再卸载旧版。模板 catalog、既有 `globalState` 与 Settings Sync 基线不会跨 ID 自动迁移。
+Visual Studio Marketplace 使用现有 Publisher `zhangxh-math`；Marketplace 项目标识为 `zhangxh-math.texleaf`。可以在 Publisher 管理页手工上传 `texleaf-1.2.2.vsix`；后续自动发布优先使用短期联合身份凭据，不要把 PAT、DeepSeek/OpenAI/自定义 Responses API Key 或其他 secrets 写入仓库。Publisher 变更会建立新的扩展身份：升级冒烟必须先在旧版保存修改并记录自定义模板，安装新版后禁用旧版但暂不卸载，再 Reload Window；只有新主文件不存在、旧 JSONC 严格校验通过且复制期间未变化时，新版才尽力逐字节复制旧片段库，并保留旧文件。验证 Snippet、按需重建自定义模板后再卸载旧版。模板 catalog、既有 `globalState` 与 Settings Sync 基线不会跨 ID 自动迁移。
 
 ## 安全约束
 

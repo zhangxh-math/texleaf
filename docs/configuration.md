@@ -1,6 +1,6 @@
 # TeXLeaf 配置参考
 
-在 VS Code 设置中搜索 `@ext:zhangxh-math.texleaf` 即可修改配置。1.2.1 的 61 个用户可见设置按 **TeXLeaf · 片段**（22 项）、**TeXLeaf · 文献**（9 项）、**TeXLeaf · AI 写作**（14 项）、**TeXLeaf · 可视化编辑器**（9 项）、**TeXLeaf · 预览**（7 项）分成五个原生分类。全部 AI 写作设置与 `texleaf.visualEditor.defaultMode` 都是 application 级，只能由用户/Profile 设置控制；真正联网前仍要求受信任工作区、针对实际接收地址的明确同意，以及 SecretStorage 中该目标专用的 API Key。
+在 VS Code 设置中搜索 `@ext:zhangxh-math.texleaf` 即可修改配置。1.2.2 的 61 个用户可见设置按 **TeXLeaf · 片段**（22 项）、**TeXLeaf · 文献**（9 项）、**TeXLeaf · AI 写作**（14 项）、**TeXLeaf · 可视化编辑器**（9 项）、**TeXLeaf · 预览**（7 项）分成五个原生分类。全部 AI 写作设置与 `texleaf.visualEditor.defaultMode` 都是 application 级，只能由用户/Profile 设置控制；真正联网前仍要求受信任工作区、针对实际接收地址的明确同意，以及 SecretStorage 中该目标专用的 API Key。
 
 ## 设置项
 
@@ -417,7 +417,7 @@ TeXLeaf 识别常见的 `$ … $`、`\( … \)`、`$$ … $$`、`\[ … \]` 与�
 
 ### 可视化编辑器与源码模式边界
 
-VS Code 的稳定扩展 API 无法在原生 Monaco 文本范围内放入可点击、可交互并自动参与行高布局的任意 MathJax 部件；Decoration 也没有可靠的点击回调。因此 TeXLeaf 1.2.1 使用正式 `CustomTextEditorProvider` 提供独立的 CodeMirror 6 可视化编辑器，并把它注册为 `*.tex` 的默认编辑器。完整公式在选区之外显示为 SVG；点击或键盘激活后原位恢复 LaTeX 源码，光标移出后重新排版。编辑、保存、dirty 状态、Undo/Redo 和外部变化始终同步到同一个 VS Code `TextDocument`，不会创建第二份 TeX 文件。
+VS Code 的稳定扩展 API 无法在原生 Monaco 文本范围内放入可点击、可交互并自动参与行高布局的任意 MathJax 部件；Decoration 也没有可靠的点击回调。因此 TeXLeaf 1.2.2 使用正式 `CustomTextEditorProvider` 提供独立的 CodeMirror 6 可视化编辑器，并把它注册为 `*.tex` 的默认编辑器。完整公式在选区之外显示为 SVG；点击或键盘激活后原位恢复 LaTeX 源码，光标移出后重新排版。编辑、保存、dirty 状态、Undo/Redo 和外部变化始终同步到同一个 VS Code `TextDocument`，不会创建第二份 TeX 文件。
 
 Custom Editor Webview 不是原生 `TextEditor`，但 TeXLeaf 的输入规划已通过专用消息桥接到 CodeMirror：自动/手动/Visual 片段、模板、占位符、自动分数与括号放大、Tabout、matrix/align 键位、片段搜索、引用、AI 检查/改写/续写都可直接使用。工具栏“源码模式”在当前标签内显示完整主题高亮源码并继续提供不改动文档字符或选择范围的活动公式浮动预览；安全普通 Provider 候选和常见 Snippet 也可通过官方执行命令桥接。只有复杂补全副作用、完整 Monaco Suggest UI、Hover、Code Action、Inline Suggest 和扩展专属键位需要点击“↗ 原生”。TeXLeaf 不重复实现 TeX 编译器或 PDF Webview，PDF 仍交给 LaTeX Workshop。
 

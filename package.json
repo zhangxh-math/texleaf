@@ -2,7 +2,7 @@
   "name": "texleaf",
   "displayName": "TeXLeaf — Fast LaTeX Snippets",
   "description": "安全、可定制的 LaTeX 可视化公式编辑、自动片段、AI 写作检查、Math Preview 与 Zotero 引用管理。",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "publisher": "zhangxh-math",
   "author": {
     "name": "zhangxh-math",

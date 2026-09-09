@@ -11,6 +11,7 @@ const {WebviewProbePool, connectWorkbench, findAvailablePort, delay} = require('
 const root = path.resolve(__dirname, '..');
 const out = path.join(root, '.tmp/max-compat');
 const paper = process.argv[2] || 'arXiv-2609.04378v1';
+const confirmedFixes = process.argv.includes('--confirmed-fixes');
 const imeAudit = paper === 'ime';
 const localTable = paper === 'table-edit' && process.argv.includes('--local-table');
 const enhancedPreview = localTable || process.argv.includes('--enhanced');
@@ -83,6 +84,7 @@ const snapshotExpression = `(()=>{const v=window.__paperView;return {
   'telemetry.telemetryLevel':'off','update.mode':'none','security.workspace.trust.enabled':false,
   'files.autoSave':'off','latex-workshop.latex.autoBuild.run':'never','texleaf.visualEditor.texBinPath':bin,
   'texleaf.visualEditor.compatibilityMode':enhancedPreview?'maximum':'basic','window.zoomLevel':0,
+  ...(confirmedFixes ? {'workbench.colorCustomizations': {'editor.lineHighlightBackground':'#ffcc00','editor.selectionBackground':'#0000ff','textCodeBlock.background':'#ffcc00'}} : {}),
   ...(paper==='synctex'||preciseSynctex?{
    'latex-workshop.latex.outDir':'%DIR%', 'latex-workshop.view.pdf.viewer':'tab',
    'latex-workshop.view.pdf.zoom':'page-fit', 'latex-workshop.view.pdf.internal.synctex.keybinding':'ctrl-click',
@@ -95,6 +97,7 @@ const snapshotExpression = `(()=>{const v=window.__paperView;return {
  const uri=vscode.Uri.file(${JSON.stringify(path.join(workspace,filename))});await vscode.workspace.getConfiguration('texleaf',uri).update('visualEditor.compatibilityMode',${JSON.stringify(enhancedPreview?'maximum':'basic')},vscode.ConfigurationTarget.WorkspaceFolder);const doc=await vscode.workspace.openTextDocument(uri);
  await vscode.commands.executeCommand('vscode.openWith',uri,'texleaf.visualEditor');
  const end=Date.now()+480000;while(Date.now()<end&&!fs.existsSync(${JSON.stringify(done)})){
+ const modeRequest=${JSON.stringify(path.join(owned,'mode-request'))};if(fs.existsSync(modeRequest)){const mode=fs.readFileSync(modeRequest,'utf8');fs.unlinkSync(modeRequest);await vscode.workspace.getConfiguration('texleaf',uri).update('visualEditor.compatibilityMode',mode,vscode.ConfigurationTarget.WorkspaceFolder);}
  const zoomRequest=${JSON.stringify(path.join(owned,'preview-zoom-request'))};if(fs.existsSync(zoomRequest)){const zoom=Number(fs.readFileSync(zoomRequest,'utf8'));fs.unlinkSync(zoomRequest);await vscode.workspace.getConfiguration('texleaf',uri).update('visualEditor.previewZoomPercent',zoom,vscode.ConfigurationTarget.WorkspaceFolder);}
 
  fs.writeFileSync(${JSON.stringify(path.join(owned,'host.next'))},JSON.stringify({mode:vscode.workspace.getConfiguration('texleaf',uri).get('visualEditor.compatibilityMode'),dirty:doc.isDirty,text:doc.getText().replace(/\\r\\n?/g,"\\n"),length:doc.getText().replace(/\\r\\n?/g,"\\n").length}));fs.renameSync(${JSON.stringify(path.join(owned,'host.next'))},${JSON.stringify(path.join(owned,'host.json'))});await new Promise(r=>setTimeout(r,150));}};`);
@@ -108,6 +111,10 @@ const snapshotExpression = `(()=>{const v=window.__paperView;return {
  try{const {windowId}=await workbench.client.request('Browser.getWindowForTarget',{targetId:workbench.target.id});await workbench.client.request('Browser.setWindowBounds',{windowId,bounds:{windowState:'normal'}});await workbench.client.request('Browser.setWindowBounds',{windowId,bounds:{width:1440,height:1000}});}catch{}
  const {client}=await pool.waitFor(`!!document.querySelector('.cm-content')`,v=>v===true,'visual editor',60000);
  await client.evaluate(`window.__paperView=document.querySelector('.cm-content').cmTile?.root?.view;true`);
+ if(confirmedFixes){
+  await require('./helpers/visualConfirmedFixes.cjs')({client,pool,workbench,owned,report,waitFor,source});
+  report.success=true;return;
+ }
  if(renderAudit)await client.evaluate(`(()=>{
   const original=window.__paperView.state.doc.toString(),seen=new Set();window.__paperRenderFailures=[];
   const capture=()=>{for(const e of document.querySelectorAll('[data-texleaf-render-error],.texleaf-math-preview-tooltip-error,svg[aria-label^="公式渲染失败"]')){

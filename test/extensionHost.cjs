@@ -2204,6 +2204,12 @@ async function run() {
       autoEnlargeBinomExpected,
       "binomial automatic expansion with scalable parentheses",
     );
+    // VS Code delivers the snippet text and its tabstop selection separately.
+    await waitFor(
+      () => document.offsetAt(editor.selection.active) ===
+        autoEnlargeBinomExpected.indexOf("\\binom{") + "\\binom{".length,
+      "the enlarged binomial's numerator tabstop selection",
+    );
     assert.equal(
       document.offsetAt(editor.selection.active),
       autoEnlargeBinomExpected.indexOf("\\binom{") + "\\binom{".length,
@@ -2238,6 +2244,10 @@ async function run() {
       editor.selection.isEmpty,
       true,
       "the cascaded fraction numerator must be an empty caret tabstop",
+    );
+    await waitFor(
+      () => document.offsetAt(editor.selection.active) === cascadedFractionNumerator,
+      "the cascaded fraction's numerator tabstop selection",
     );
     assert.equal(
       document.offsetAt(editor.selection.active),
@@ -2280,6 +2290,10 @@ async function run() {
       document,
       cascadedFractionExpected,
       "standalone cascaded fraction used for tabstop navigation",
+    );
+    await waitFor(
+      () => document.offsetAt(editor.selection.active) === cascadedFractionNumerator,
+      "the cascaded fraction's numerator tabstop selection",
     );
     assert.equal(
       document.offsetAt(editor.selection.active),
@@ -3000,6 +3014,12 @@ async function run() {
         await vscode.workspace.fs.writeFile(
           expectedNewPublisherSnippetUri,
           exactSuffixFixtureBefore,
+        );
+        const restoredLibraryDocument = await vscode.workspace.openTextDocument(expectedNewPublisherSnippetUri);
+        await waitForDocumentText(
+          restoredLibraryDocument,
+          new TextDecoder().decode(exactSuffixFixtureBefore),
+          "the open global snippet document after restoring its fixture on disk",
         );
         await waitFor(async () => {
           const current = await provideCompletionList(document, 4);
