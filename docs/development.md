@@ -18,6 +18,7 @@ pnpm run test:extension-host
 - `pnpm test` 运行不启动 VS Code 的核心单元测试。
 - `pnpm run compile` 生成扩展运行产物。
 - `pnpm run test:extension-host` 用隔离的临时 VS Code Profile 运行真实扩展宿主测试。
+- 三平台 CI 在 Windows、macOS、Linux 安装锁定依赖后执行 check、test、compile 和 test:bundle；正式 Release 必须等待发布提交的三个任务通过。
 - `pnpm run release:verify` 依次执行静态检查、单元测试、生产 bundle 检查和隔离扩展宿主回归；`pnpm run package` 会先执行这道完整门禁。
 - `pnpm run package` 生成可安装的 VSIX。
 
@@ -177,7 +178,7 @@ pnpm run package
 构建完成后，可从命令面板选择 `Extensions: Install from VSIX...`，或在终端执行：
 
 ```powershell
-code --install-extension .\texleaf-1.2.2.vsix --force
+code --install-extension .\texleaf-1.2.3.vsix --force
 ```
 
 安装后在普通 VS Code 窗口验证，而不是只在扩展开发宿主中验证。发布前至少执行：
@@ -188,7 +189,7 @@ pnpm run release:verify
 
 还应检查 VSIX 内容，确认 `dist/extension.js`、`dist/mathPreviewWorker.js`、README、CHANGELOG、GPLv3 `LICENSE`、`NOTICE`、`SUPPORT.md`、`THIRD_PARTY_NOTICES.md`、`licenses/`、`media/icon.png` 与其他运行资源已包含，源码、测试、coverage、本机临时目录和赞助二维码未被打包。`package.json` 的 SPDX 值必须为 `GPL-3.0-only`，`NOTICE` 必须保留合理 TeXLeaf 署名与用户文档输出例外。README 图片使用公开仓库的 `https://raw.githubusercontent.com/zhangxh-math/texleaf/main/media/` 绝对地址，避免扩展详情页把 `media/...` 解析到错误位置；仅将图片打包进 VSIX 不足以保证详情页显示。检查归档中的 `extension/readme.md`，确认图标和全部 GIF 均使用 HTTPS 图片地址、对应 URL 返回正确的 PNG/GIF 内容，且相对文档链接已由 `vsce --githubBranch main` 改写为公开 HTTPS 地址；安装后的扩展详情页应显示 PNG 图标，命令面板应能找到片段、AI 写作、Zotero 与 Math Preview 命令。手工 VSIX 不会因为 Settings Sync 而自动安装到另一台机器；跨机测试必须在两端安装兼容版本并保持扩展标识 `zhangxh-math.texleaf`。
 
-Visual Studio Marketplace 使用现有 Publisher `zhangxh-math`；Marketplace 项目标识为 `zhangxh-math.texleaf`。可以在 Publisher 管理页手工上传 `texleaf-1.2.2.vsix`；后续自动发布优先使用短期联合身份凭据，不要把 PAT、DeepSeek/OpenAI/自定义 Responses API Key 或其他 secrets 写入仓库。Publisher 变更会建立新的扩展身份：升级冒烟必须先在旧版保存修改并记录自定义模板，安装新版后禁用旧版但暂不卸载，再 Reload Window；只有新主文件不存在、旧 JSONC 严格校验通过且复制期间未变化时，新版才尽力逐字节复制旧片段库，并保留旧文件。验证 Snippet、按需重建自定义模板后再卸载旧版。模板 catalog、既有 `globalState` 与 Settings Sync 基线不会跨 ID 自动迁移。
+Visual Studio Marketplace 使用现有 Publisher `zhangxh-math`；Marketplace 项目标识为 `zhangxh-math.texleaf`。可以在 Publisher 管理页手工上传 `texleaf-1.2.3.vsix`；后续自动发布优先使用短期联合身份凭据，不要把 PAT、DeepSeek/OpenAI/自定义 Responses API Key 或其他 secrets 写入仓库。Publisher 变更会建立新的扩展身份：升级冒烟必须先在旧版保存修改并记录自定义模板，安装新版后禁用旧版但暂不卸载，再 Reload Window；只有新主文件不存在、旧 JSONC 严格校验通过且复制期间未变化时，新版才尽力逐字节复制旧片段库，并保留旧文件。验证 Snippet、按需重建自定义模板后再卸载旧版。模板 catalog、既有 `globalState` 与 Settings Sync 基线不会跨 ID 自动迁移。
 
 ## 安全约束
 
@@ -205,3 +206,9 @@ Visual Studio Marketplace 使用现有 Publisher `zhangxh-math`；Marketplace �
 - `globalState` 同步值必须先通过完整 JSONC/片段结构校验；dirty 或并发冲突不得采用“最后写入者静默覆盖”。
 
 任何放宽这些约束的变更都应被视为安全敏感变更，并补充对应的错误路径与恶意输入测试。
+
+## 1.2.3 回归要点
+
+- Zotero 导出期间若文档、项目文献集合或引用设置变化，停止提交并提示重新选择；保留未保存的文献编辑。
+- 片段管理器的查找替换与确认弹窗支持 Tab / Shift+Tab 焦点循环，关闭后恢复触发按钮焦点；无效正则通过状态区域提示并禁用应用。
+- quiver 导入保留支持的行列间距与 `cramped`，不能准确保留的值显示转换提示，避免静默丢失。

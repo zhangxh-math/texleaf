@@ -480,7 +480,7 @@ export function renderSnippetManagerWebview(nonce: string): string {
     <div class="replace-card">
       <h2 id="replace-title">批量查找替换</h2>
       <div class="grid-2">
-        <div class="field"><label for="replace-find">查找</label><input id="replace-find" autocomplete="off"></div>
+        <div class="field"><label for="replace-find">查找</label><input id="replace-find" autocomplete="off" aria-describedby="replace-summary"></div>
         <div class="field"><label for="replace-with">替换为</label><input id="replace-with" autocomplete="off"></div>
       </div>
       <div class="scope-grid" id="replace-scopes"></div>
@@ -488,7 +488,7 @@ export function renderSnippetManagerWebview(nonce: string): string {
         <label class="check"><input id="replace-case" type="checkbox"> 区分大小写</label>
         <label class="check"><input id="replace-regex" type="checkbox"> 使用正则表达式</label>
       </div>
-      <p id="replace-summary" class="subtitle">输入查找内容以生成预览。</p>
+      <p id="replace-summary" class="subtitle" role="status" aria-live="polite" aria-atomic="true">输入查找内容以生成预览。</p>
       <div id="replace-preview" class="preview"></div>
       <div class="replace-actions">
         <button id="replace-apply" disabled>应用替换</button>
@@ -532,7 +532,8 @@ export function renderSnippetManagerWebview(nonce: string): string {
         request: 0,
         reloadArmed: false,
         pendingAction: new Map(),
-        confirmation: null
+        confirmation: null,
+        confirmationFocus: null
       };
       let readyTimer = null;
       let contentReceived = false;
@@ -562,10 +563,13 @@ export function renderSnippetManagerWebview(nonce: string): string {
       function closeConfirmation() {
         byId("confirm-panel").hidden = true;
         state.confirmation = null;
+        state.confirmationFocus?.focus();
+        state.confirmationFocus = null;
       }
       function requestConfirmation(message, onConfirm) {
         if (state.busy) return;
         state.confirmation = onConfirm;
+        state.confirmationFocus = document.activeElement;
         byId("confirm-message").textContent = message;
         byId("confirm-panel").hidden = false;
         byId("confirm-accept").focus();
@@ -1042,6 +1046,10 @@ export function renderSnippetManagerWebview(nonce: string): string {
           ? [["trigger", "Trigger"], ["replacement", "Replacement"], ["description", "说明"], ["category", "分类"]]
           : [["trigger", "Trigger"], ["name", "名称"], ["description", "说明"], ["content", "模板正文"]];
       }
+      function closeReplace() {
+        byId("replace-panel").hidden = true;
+        byId("find-replace").focus();
+      }
       function openReplace() {
         const scopes = byId("replace-scopes");
         scopes.replaceChildren();
@@ -1133,6 +1141,7 @@ export function renderSnippetManagerWebview(nonce: string): string {
           state.lastUndoKey = "";
           byId("replace-panel").hidden = true;
           render();
+          closeReplace();
           reportDirty();
           setStatus("已在草稿中应用 " + plan.count + " 处替换；请检查后保存。", "success");
         });
@@ -1194,7 +1203,7 @@ export function renderSnippetManagerWebview(nonce: string): string {
       byId("advanced-json").addEventListener("click", () => runCommand("openJson"));
       byId("restore").addEventListener("click", restoreDefaults);
       byId("find-replace").addEventListener("click", openReplace);
-      byId("replace-close").addEventListener("click", () => byId("replace-panel").hidden = true);
+      byId("replace-close").addEventListener("click", closeReplace);
       byId("replace-apply").addEventListener("click", applyReplacement);
       byId("confirm-cancel").addEventListener("click", closeConfirmation);
       byId("confirm-accept").addEventListener("click", acceptConfirmation);
@@ -1205,7 +1214,19 @@ export function renderSnippetManagerWebview(nonce: string): string {
           event.preventDefault(); requestSave();
         }
         if (event.key === "Escape" && !byId("confirm-panel").hidden) closeConfirmation();
-        else if (event.key === "Escape" && !byId("replace-panel").hidden) byId("replace-panel").hidden = true;
+        else if (event.key === "Escape" && !byId("replace-panel").hidden) closeReplace();
+        if (event.key === "Tab") {
+          const panel = !byId("confirm-panel").hidden ? byId("confirm-panel")
+            : !byId("replace-panel").hidden ? byId("replace-panel") : null;
+          if (!panel) return;
+          const controls = Array.from(panel.querySelectorAll("button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])"))
+            .filter((control) => control.getClientRects().length > 0);
+          const first = controls[0], last = controls[controls.length - 1];
+          if (first && (!panel.contains(document.activeElement) || document.activeElement === (event.shiftKey ? first : last))) {
+            event.preventDefault();
+            (event.shiftKey ? last : first).focus();
+          }
+        }
       });
       window.addEventListener("message", (event) => {
         const message = event.data;

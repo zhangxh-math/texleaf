@@ -473,18 +473,29 @@ export class Parser {
             }
             return;
         }
-        if (this.eat("row sep") || this.eat("column sep") || this.eat("sep")) {
-            // We simply ignore these options.
+        const separation = this.eat("row sep") || this.eat("column sep") || this.eat("sep");
+        if (separation) {
             this.eat_whitespace();
             this.eat("=", true);
             this.eat_whitespace();
-            if (this.eat(/-?[0-9a-z\.]+/) === null) {
+            const amount = this.eat(/-?[0-9a-z\.]+/);
+            if (amount === null) {
                 throw this.error("Expected separation amount.");
             }
+            // Match the exporter's named sizes and two-decimal em precision.
+            const sizes = { tiny: 0.45, small: 0.9, scriptsize: 1.35, normal: 1.8, large: 2.7, huge: 3.6 };
+            const value = Object.hasOwn(sizes, amount) ? sizes[amount]
+                : /^\d*(?:\.\d+)?em$/.test(amount) ? Number(amount.slice(0, -2)) : NaN;
+            if (!Number.isFinite(value) || value < 0.45 || value > 3.6
+                || Number(value.toFixed(2)) !== value) {
+                throw this.warn(["Unknown diagram option: ", new DOM.Code(`${separation}=${amount}`), "."]);
+            }
+            if (separation !== "column sep") this.ui.panel.sep.row = value;
+            if (separation !== "row sep") this.ui.panel.sep.column = value;
             return;
         }
         if (this.eat("cramped")) {
-            // We simply ignore this option.
+            this.ui.settings.set("export.cramped", true);
             return;
         }
 

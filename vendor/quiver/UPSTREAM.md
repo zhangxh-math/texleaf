@@ -11,3 +11,6 @@ editor bridge live in src/quiver; original diagram rendering and manipulation ar
 
 The build emits a self-contained editor.html with local fonts, icons and a nonce-bound script.
 It makes no network requests at runtime. quiver.sty is also supplied for isolated TeX previews.
+
+The parser preserves supported tikz-cd row/column separation and cramped options.
+Unsupported units or values produce conversion diagnostics instead of being silently discarded.

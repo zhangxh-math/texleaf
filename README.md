@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <strong>TeXLeaf 1.2.2</strong> · VS Code 1.98+ · Windows / macOS / Linux · GPL-3.0-only
+  <strong>TeXLeaf 1.2.3</strong> · VS Code 1.98+ · Windows / macOS / Linux · GPL-3.0-only
 </p>
 
 TeXLeaf 始终编辑原来的 `.tex` / `.bib` 文件，不创建中间文档，也不改变 LaTeX 源码格式。可视化模式、同标签页源码模式和 VS Code 原生编辑器共享同一份 `TextDocument`、保存状态与 Undo/Redo 历史。
@@ -18,7 +18,7 @@ TeXLeaf 不自带 TeX 编译器。编译、PDF 查看和 SyncTeX 交给 [LaTeX W
 
 当前 **TeXLeaf 是 LaTeX Workshop 桥接版**：它复用 LaTeX Workshop 已加载的运行时模块、编译配方、执行器与公开命令，以及 PDF 查看器、SyncTeX 和编译诊断，不重复实现一套 TeX 编译基础设施。后续还将推出 **TeXLeaf-Z**——不再桥接 LaTeX Workshop、提供集成编译工作流的版本；具体功能范围和发布时间以后续公告为准，敬请期待。
 
-**1.2.2**：修复文字选区显示、编辑和滚动后的源码按钮定位，以及模式切换时的 quiver 草稿保护。详见 [更新记录](CHANGELOG.md)与 [1.2.2 Wiki](https://github.com/zhangxh-math/texleaf/wiki/Release-1.2.2)；[下载正式版 VSIX 与 SHA-256](https://github.com/zhangxh-math/texleaf/releases/tag/v1.2.2)。
+**1.2.3**：修复 Zotero 导出期间的过期提交、片段管理器弹窗的键盘焦点，以及 quiver 导入间距与紧凑布局的保留。详见 [更新记录](CHANGELOG.md)与 [1.2.3 Wiki](https://github.com/zhangxh-math/texleaf/wiki/Release-1.2.3)；[下载正式版 VSIX 与 SHA-256](https://github.com/zhangxh-math/texleaf/releases/tag/v1.2.3)。
 
 ## 后续维护方向
 

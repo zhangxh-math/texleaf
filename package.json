@@ -2,7 +2,7 @@
   "name": "texleaf",
   "displayName": "TeXLeaf — Fast LaTeX Snippets",
   "description": "安全、可定制的 LaTeX 可视化公式编辑、自动片段、AI 写作检查、Math Preview 与 Zotero 引用管理。",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "publisher": "zhangxh-math",
   "author": {
     "name": "zhangxh-math",
@@ -108,7 +108,7 @@
     "test": "pnpm run test:compile && node test/run-bounded.cjs",
     "test:extension-host:run": "node test/run-extension-host.cjs",
     "test:extension-host": "pnpm run compile && pnpm run test:extension-host:run",
-    "test:bundle": "node test/bundle-smoke.cjs && node test/math-preview-worker.cjs",
+    "test:bundle": "node test/bundle-smoke.cjs && node test/math-preview-worker.cjs && node test/quiver-import.cjs",
     "verify": "pnpm run check && pnpm run test && pnpm run compile && pnpm run test:bundle",
     "release:verify": "pnpm run verify && pnpm run test:extension-host:run",
     "package": "pnpm run release:verify && vsce package --no-dependencies --githubBranch main"

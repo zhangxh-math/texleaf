@@ -131,6 +131,7 @@ interface CitationCompletionTarget {
   readonly document: vscode.TextDocument;
   readonly position: vscode.Position;
   readonly setSelection?: (position: vscode.Position) => void;
+  readonly readBibliographyUris?: () => Promise<readonly vscode.Uri[]>;
 }
 
 interface ZoteroCitationReference extends CitationReference {
@@ -589,6 +590,7 @@ export class CitationController
     document: vscode.TextDocument,
     position: vscode.Position,
     command: vscode.Command,
+    readBibliographyUris?: () => Promise<readonly vscode.Uri[]>,
   ): Promise<vscode.Position | undefined> {
     if (command.command === MARK_COMPLETION_ACCEPTED_COMMAND) {
       this.markCitationHandled(document, position);
@@ -601,7 +603,10 @@ export class CitationController
     if (!validCitationCompletionArgument(argument)) {
       throw new Error("引用补全动作参数无效，请重新触发补全。");
     }
-    return this.acceptZoteroCompletion(argument, { document, position });
+    return this.acceptZoteroCompletion(argument, {
+      document, position,
+      ...(readBibliographyUris === undefined ? {} : { readBibliographyUris }),
+    });
   }
 
   private createExistingCompletion(
@@ -1182,6 +1187,7 @@ export class CitationController
       );
       return undefined;
     }
+    const texVersion = target.document.version;
     const initialLocated = this.locateCitation(target.document, target.position);
     if (initialLocated === undefined) {
       void vscode.window.showErrorMessage(
@@ -1218,6 +1224,21 @@ export class CitationController
           "当前项目解析到的 bibliography 已变化，请从当前补全列表重新选择。",
         );
       }
+      const configurationKey = zoteroCompletionContextKey(initialLocated.config);
+      const bibliographyUris = (await target.readBibliographyUris?.())?.map((uri) => uri.toString()).sort();
+      if (bibliographyUris !== undefined && !bibliographyUris.includes(currentBibliographyUri.toString())) {
+        throw new Error("当前项目的文献集合已变化，请重新选择文献。");
+      }
+      const assertCurrent = async (): Promise<void> => {
+        const currentUris = (await target.readBibliographyUris?.())?.map((uri) => uri.toString()).sort();
+        const config = readConfig(target.document.uri);
+        if (target.document.isClosed || target.document.version !== texVersion || !vscode.workspace.isTrusted
+          || !config.enabled || !config.zoteroCitations || zoteroCompletionContextKey(config) !== configurationKey
+          || (bibliographyUris !== undefined && (currentUris === undefined || !sameStrings(currentUris, bibliographyUris)))) {
+          throw new Error("导出期间文档、引用设置或项目文献集合已变化，请重新选择文献。");
+        }
+      };
+      await assertCurrent();
       const snapshot = this.zoteroCache;
       if (
         snapshot === undefined ||
@@ -1261,6 +1282,7 @@ export class CitationController
           raw,
           exportedEntries[0]!,
           currentBibliographyUri,
+          assertCurrent,
         ),
       );
       target.setSelection?.(result.caret);
@@ -1289,11 +1311,13 @@ export class CitationController
     rawEntry: string,
     exportedEntry: BibTeXEntry,
     expectedBibliographyUri: vscode.Uri,
+    assertCurrent: () => Promise<void>,
   ): Promise<{
     readonly imported: boolean;
     readonly saved: boolean;
     readonly caret: vscode.Position;
   }> {
+    await assertCurrent();
     const texDocument = target.document;
     const texVersion = texDocument.version;
     const cursorOffset = texDocument.offsetAt(target.position);
@@ -1402,6 +1426,12 @@ export class CitationController
       );
     }
 
+    await assertCurrent();
+    const currentBibliographyDocument = bibliographyDocument ?? bibliography.document;
+    if (currentBibliographyDocument !== undefined && (currentBibliographyDocument.isClosed
+      || currentBibliographyDocument.getText() !== bibliography.text)) {
+      throw new Error("文献文件在提交前已变化，请重新选择文献。");
+    }
     validateCitationContext(
       texDocument,
       texVersion,

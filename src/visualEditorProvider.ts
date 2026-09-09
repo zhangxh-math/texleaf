@@ -2345,6 +2345,14 @@ export class VisualEditorProvider
       // range is the stable citation position for both Enter and mouse clicks.
       visualPositionAt(session.document, completionCursor),
       action.command,
+      async () => {
+        const context = await this.projectContexts.getContext(session.document);
+        const uris = await resolveTemplateBibliographyUris(context);
+        if (session.disposed) throw new Error("引用编辑会话已关闭，请重新选择文献。");
+        return uris ?? [await this.citations.resolveProjectBibliographyUri(
+          session.document, readConfig(session.document.uri).bibliographyFile,
+        )];
+      },
     );
     if (caret !== undefined && !session.disposed) {
       const offset = visualOffsetAt(session.document, caret);
